@@ -7,6 +7,7 @@
 use dioxus::prelude::*;
 
 use crate::bots::{Activity, Bot};
+use crate::chat::clock;
 
 /// Their focus ring for rows (`SIMPLE_ROW_FOCUS`).
 const ROW_FOCUS: &str = "focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-focus";
@@ -169,16 +170,4 @@ fn SearchIcon() -> Element {
             circle { cx: "11", cy: "11", r: "8" }
         }
     }
-}
-
-/// A message time as the person's clock shows it ("3:34 PM"), as their `formatTime` does in English.
-fn clock(at: f64) -> String {
-    let date = js_sys::Date::new(&at.into());
-    if date.get_time().is_nan() {
-        return String::new();
-    }
-    let options = js_sys::Object::new();
-    let _ = js_sys::Reflect::set(&options, &"hour".into(), &"numeric".into());
-    let _ = js_sys::Reflect::set(&options, &"minute".into(), &"2-digit".into());
-    date.to_locale_time_string_with_options("en-US", &options).into()
 }

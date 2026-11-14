@@ -10,6 +10,8 @@ use serde_json::Value;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bot {
     pub id: String,
+    /// Its conversation (Catbot bots have one).
+    pub thread_id: String,
     pub name: String,
     /// One of the stylesheet's identity colours (`--identity-<color>`).
     pub color: String,
@@ -53,6 +55,7 @@ impl Bot {
         let messages = wire["messages"].as_array().map(Vec::as_slice).unwrap_or_default();
         Some(Bot {
             id: wire["id"].as_str()?.to_string(),
+            thread_id: wire["threadId"].as_str().unwrap_or_default().to_string(),
             name: wire["name"].as_str().unwrap_or_default().to_string(),
             color: wire["color"].as_str().unwrap_or("blue").to_string(),
             activity,
@@ -169,7 +172,7 @@ mod tests {
     use serde_json::json;
 
     fn wire(extra: Value) -> Value {
-        let mut bot = json!({ "id": "b1", "catbot": true, "name": "Kiwi", "color": "teal", "activity": "idle", "busy": false, "unread": false, "messages": [] });
+        let mut bot = json!({ "id": "b1", "threadId": "t1", "catbot": true, "name": "Kiwi", "color": "teal", "activity": "idle", "busy": false, "unread": false, "messages": [] });
         bot.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         bot
     }

@@ -5,12 +5,14 @@
 
 mod api;
 mod bots;
+mod chat;
+mod markdown;
 mod sidebar;
 
 use dioxus::prelude::*;
 
 use bots::Bot;
-use sidebar::{BotMark, Sidebar};
+use sidebar::Sidebar;
 
 const STYLES: Asset = asset!("/assets/tailwind.css");
 /// The bundled fonts, copied through as a folder so `fonts.css` finds its files beside it.
@@ -62,20 +64,23 @@ fn App() -> Element {
     }
 }
 
-/// The chat area. Until stage 6.3 it shows which bot is open.
+/// The chat area: the open bot's conversation.
 #[component]
 fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, problem: ReadSignal<Option<String>>) -> Element {
     let open = selected.read().as_ref().and_then(|id| bots.read().iter().find(|b| &b.id == id).cloned());
-    rsx! {
-        main {
-            class: "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center gap-3 bg-app text-ink-secondary",
-            if let Some(err) = problem() {
+    match (problem(), open) {
+        (Some(err), _) => rsx! {
+            main { class: "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center bg-app",
                 p { role: "alert", class: "text-[13px] text-danger", "Can't reach Catbot: {err}" }
-            } else if let Some(bot) = open {
-                BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64 }
-                p { class: "text-[15px] font-semibold text-ink", "{bot.name}" }
-                p { class: "text-[13px]", "The conversation appears here in the next stage." }
             }
-        }
+        },
+        // A one-item keyed list, so switching bots starts the conversation view fresh:
+        // Dioxus only honours a key among siblings, and a reused view would keep the last bot's messages.
+        (None, Some(bot)) => rsx! {
+            for bot in std::iter::once(bot) {
+                chat::Chat { key: "{bot.id}", bot }
+            }
+        },
+        (None, None) => rsx! { main { class: "relative flex h-full min-w-0 flex-1 flex-col bg-app" } },
     }
 }
