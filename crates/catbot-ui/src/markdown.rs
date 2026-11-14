@@ -124,7 +124,8 @@ pub fn to_html(text: &str) -> String {
             }
             // Raw HTML is shown as the text it is, never run.
             Event::Html(html) | Event::InlineHtml(html) => escape_into(&mut out, &html),
-            Event::SoftBreak => out.push('\n'),
+            // A single line break stays a line break, as their `remarkSoftBreaks` makes it: poems keep their lines.
+            Event::SoftBreak => out.push_str("<br>"),
             Event::HardBreak => out.push_str("<br>"),
             Event::Rule => out.push_str(r#"<hr class="border-hairline/40">"#),
             Event::TaskListMarker(done) => out.push_str(if done { "☑ " } else { "☐ " }),
@@ -217,6 +218,12 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"), "{html}");
         let link = to_html("[site](https://example.com/?a=\"b\")");
         assert!(link.contains(r#"href="https://example.com/?a=&quot;b&quot;" target="_blank""#), "{link}");
+    }
+
+    #[test]
+    fn single_line_breaks_stay() {
+        assert_eq!(to_html("one\ntwo"), "<p>one<br>two</p>");
+        assert!(to_html("> a\n> b").contains("a<br>b"));
     }
 
     #[test]
