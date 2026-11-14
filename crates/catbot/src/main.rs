@@ -13,7 +13,7 @@
 
 use std::{net::SocketAddr, path::PathBuf};
 
-use catbot::{ask, claude::PermissionMode, proxy, routes};
+use catbot::{approval, ask, claude::PermissionMode, proxy, routes};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -68,7 +68,13 @@ enum Command {
         /// Print every event as a JSON line instead of the readable reply.
         #[arg(long)]
         json: bool,
+        /// Refuse anything that needs approval instead of asking.
+        #[arg(long)]
+        no_approvals: bool,
     },
+    /// The approval helper Claude Code starts for a turn (not for running by hand).
+    #[command(hide = true)]
+    ApprovalMcp { socket: PathBuf },
     /// Summarize recordings into the list of routes the interface used.
     Routes {
         /// Recording files or folders. Defaults to every recording in the traffic folder.
@@ -88,17 +94,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Command::Record { listen, upstream, out, body_cap } => {
             proxy::run(listen, &upstream, &out, body_cap).await
         }
-        Command::Ask { prompt, resume, model, mode, cwd, system, cli, inherit_user_config, json } => {
+        Command::Ask { prompt, resume, model, mode, cwd, system, cli, inherit_user_config, json, no_approvals } => {
             let cwd = match cwd {
                 Some(cwd) => cwd,
                 None => std::env::current_dir()?,
             };
-            let options = ask::Options { prompt, resume, model, mode, cwd, system, cli, inherit_user_config, json };
+            let options = ask::Options { prompt, resume, model, mode, cwd, system, cli, inherit_user_config, json, no_approvals };
             if !ask::run(options).await? {
                 std::process::exit(1);
             }
             Ok(())
         }
+        Command::ApprovalMcp { socket } => Ok(approval::serve_mcp(&socket).await?),
         Command::Routes { paths } => {
             let paths = if paths.is_empty() { vec![default_traffic_dir()] } else { paths };
             routes::run(&paths)

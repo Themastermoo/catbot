@@ -5,13 +5,16 @@
 
 use std::{
     collections::HashMap,
-    io::{IsTerminal, Write},
+    io::{BufRead, IsTerminal, Write},
     path::PathBuf,
 };
 
 use serde_json::Value;
 
-use crate::claude::{self, Event, PermissionMode, Session, Turn};
+use crate::{
+    approval::{Decision, REFUSED_NEXT_STEP},
+    claude::{self, Event, PermissionMode, Session, Turn},
+};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -25,6 +28,7 @@ pub struct Options {
     pub cli: String,
     pub inherit_user_config: bool,
     pub json: bool,
+    pub no_approvals: bool,
 }
 
 /// Runs the turn. Returns whether it finished well.
@@ -46,6 +50,12 @@ pub async fn run(options: Options) -> Result<bool, BoxError> {
         system_prompt: options.system,
         cli: vec![options.cli],
         isolated: !options.inherit_user_config,
+        // Questions need someone at a keyboard to answer them.
+        approval_helper: if options.no_approvals || options.json || !std::io::stdin().is_terminal() {
+            None
+        } else {
+            Some(vec![std::env::current_exe()?.to_string_lossy().into_owned()])
+        },
     };
     let mut running = claude::start(&turn).await?;
 
@@ -53,6 +63,7 @@ pub async fn run(options: Options) -> Result<bool, BoxError> {
     let mut streamed = false; // deltas of the current text block were already printed
     let mut tools: HashMap<String, String> = HashMap::new();
     let mut ok = false;
+    let mut mid_line = false; // the reply stopped partway through a line
     loop {
         let event = tokio::select! {
             event = running.events.recv() => event,
@@ -79,6 +90,7 @@ pub async fn run(options: Options) -> Result<bool, BoxError> {
                 print!("{text}");
                 out.flush()?;
                 streamed = true;
+                mid_line = !text.ends_with('\n');
             }
             Event::ThinkingDelta { .. } => {}
             Event::Text { text } => {
@@ -87,6 +99,29 @@ pub async fn run(options: Options) -> Result<bool, BoxError> {
                 }
                 println!();
                 streamed = false;
+                mid_line = false;
+            }
+            Event::ApprovalRequested { id, tool, input } => {
+                if mid_line {
+                    println!();
+                    mid_line = false;
+                }
+                eprintln!("{}", paint.yellow(&format!("  ? {tool} {}", summarize(&input))));
+                eprint!("{}", paint.yellow("    allow? [y]es / [n]o, or type a reason to refuse: "));
+                std::io::stderr().flush()?;
+                let reply = tokio::select! {
+                    line = tokio::task::spawn_blocking(read_answer) => line?,
+                    _ = tokio::signal::ctrl_c() => {
+                        running.stop().await;
+                        eprintln!("\n{}", paint.dim("stopped"));
+                        return Ok(false);
+                    }
+                };
+                let decision = decide(&reply);
+                if decision == Decision::Allow {
+                    eprintln!("{}", paint.dim("    ✓ allowed"));
+                }
+                running.answer(&id, decision);
             }
             Event::ToolStarted { id, name, input } => {
                 eprintln!("{}", paint.dim(&format!("  ⚙ {name} {}", summarize(&input))));
@@ -95,7 +130,9 @@ pub async fn run(options: Options) -> Result<bool, BoxError> {
             Event::ToolFinished { id, ok, output } => {
                 let name = tools.get(&id).map(String::as_str).unwrap_or("tool");
                 if !ok {
-                    let first = output.lines().next().unwrap_or("").chars().take(120).collect::<String>();
+                    // Show what the person or the tool said, not the instructions added for the bot.
+                    let said = output.split(REFUSED_NEXT_STEP).next().unwrap_or("");
+                    let first = said.lines().next().unwrap_or("").chars().take(120).collect::<String>();
                     eprintln!("{}", paint.red(&format!("    ✗ {name}: {first}")));
                 }
             }
@@ -111,12 +148,14 @@ pub async fn run(options: Options) -> Result<bool, BoxError> {
                 }
                 eprintln!("{}", paint.dim(&format!("─ {}", parts.join(" · "))));
                 let denied = outcome.permission_denials.len();
-                if denied > 0 {
+                if denied > 0 && turn.approval_helper.is_some() {
+                    eprintln!("{}", paint.dim(&format!("  {denied} step(s) refused")));
+                } else if denied > 0 {
                     eprintln!(
                         "{}",
                         paint.dim(&format!(
-                            "  {denied} action(s) needed approval and were refused. Approval cards come later; \
-                             --mode accept-edits allows file edits in the working folder."
+                            "  {denied} step(s) needed approval and were refused, because nobody could be asked \
+                             (run in a terminal, without --json or --no-approvals, to be asked)."
                         ))
                     );
                 }
@@ -127,6 +166,21 @@ pub async fn run(options: Options) -> Result<bool, BoxError> {
         }
     }
     Ok(ok)
+}
+
+fn read_answer() -> String {
+    let mut line = String::new();
+    let _ = std::io::stdin().lock().read_line(&mut line);
+    line.trim().to_string()
+}
+
+/// "y" or "yes" allows; anything else refuses, and words longer than "n"/"no" go to the bot.
+fn decide(reply: &str) -> Decision {
+    match reply.to_ascii_lowercase().as_str() {
+        "y" | "yes" => Decision::Allow,
+        "" | "n" | "no" => Decision::Deny("The person refused this step.".into()),
+        _ => Decision::Deny(format!("The person refused this step and said: {reply}")),
+    }
 }
 
 /// The one detail of a tool call worth a glance: the command, the file, the search, the address.
@@ -148,6 +202,9 @@ impl Paint {
     fn dim(&self, text: &str) -> String {
         if self.on { format!("\x1b[2m{text}\x1b[0m") } else { text.to_string() }
     }
+    fn yellow(&self, text: &str) -> String {
+        if self.on { format!("\x1b[33m{text}\x1b[0m") } else { text.to_string() }
+    }
     fn red(&self, text: &str) -> String {
         if self.on { format!("\x1b[31m{text}\x1b[0m") } else { text.to_string() }
     }
@@ -155,8 +212,17 @@ impl Paint {
 
 #[cfg(test)]
 mod tests {
-    use super::summarize;
+    use super::{decide, summarize};
+    use crate::approval::Decision;
     use serde_json::json;
+
+    #[test]
+    fn answers() {
+        assert_eq!(decide("y"), Decision::Allow);
+        assert_eq!(decide("YES"), Decision::Allow);
+        assert!(matches!(decide(""), Decision::Deny(_)));
+        assert_eq!(decide("no use /tmp instead"), Decision::Deny("The person refused this step and said: no use /tmp instead".into()));
+    }
 
     #[test]
     fn summaries_pick_the_useful_field() {

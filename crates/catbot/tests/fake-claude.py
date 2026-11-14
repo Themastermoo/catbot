@@ -3,15 +3,36 @@
 The prompt picks the behaviour:
   "crash"  -> writes to stderr and exits 1 with no result line
   "tool"   -> calls a tool that is refused, like an unapproved Bash command
+  "approve" -> asks the permission prompt tool (as the real CLI does), and obeys the answer
   anything else -> streams "Hello, <prompt>" back
 """
-import json, sys
+import json, subprocess, sys
 
 def arg_after(flag):
     return sys.argv[sys.argv.index(flag) + 1] if flag in sys.argv else None
 
 def out(obj):
     print(json.dumps(obj), flush=True)
+
+def ask_permission(tool_name, tool_input):
+    """What the real CLI does with --permission-prompt-tool: start the MCP server, call the tool."""
+    prompt_tool = arg_after("--permission-prompt-tool")
+    if not prompt_tool:
+        return {"behavior": "deny", "message": "This command requires approval"}
+    server_name, tool = prompt_tool.split("__")[1:3]
+    config = json.load(open(arg_after("--mcp-config")))["mcpServers"][server_name]
+    server = subprocess.Popen([config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+    def rpc(id, method, params):
+        server.stdin.write(json.dumps({"jsonrpc": "2.0", "id": id, "method": method, "params": params}) + "\n")
+        server.stdin.flush()
+        return json.loads(server.stdout.readline())
+    rpc(1, "initialize", {"protocolVersion": "2024-11-05"})
+    tools = [t["name"] for t in rpc(2, "tools/list", {})["result"]["tools"]]
+    assert tool in tools, tools
+    result = rpc(3, "tools/call", {"name": tool, "arguments": {"tool_name": tool_name, "input": tool_input}})
+    server.stdin.close()
+    server.wait()
+    return json.loads(result["result"]["content"][0]["text"])
 
 session = arg_after("--session-id") or arg_after("--resume") or "none"
 message = json.loads(sys.stdin.readline())
@@ -30,6 +51,16 @@ if prompt == "tool":
     out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": True,
          "content": "This command requires approval"}]}})
     denials = [{"tool_name": "Bash", "tool_use_id": "t1"}]
+if prompt == "approve":
+    tool_input = {"command": "echo hi"}
+    out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t2", "name": "Bash", "input": tool_input}]}})
+    verdict = ask_permission("Bash", tool_input)
+    if verdict["behavior"] == "allow":
+        out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t2", "content": "hi"}]}})
+    else:
+        out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t2", "is_error": True,
+             "content": verdict["message"]}]}})
+        denials = [{"tool_name": "Bash", "tool_use_id": "t2"}]
 reply = f"Hello, {prompt}"
 for piece in (reply[:3], reply[3:]):
     out({"type": "stream_event", "parent_tool_use_id": None,

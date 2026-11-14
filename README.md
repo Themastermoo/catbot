@@ -38,8 +38,12 @@ cargo run -- ask --model opus --system "You are terse." "Explain Rust lifetimes"
 ```
 
 Bots are isolated from this machine's own Claude setup (CLAUDE.md, MCP servers, plugins)
-unless `--inherit-user-config` is given. With the default `--mode default`, anything that
-would need approval is refused, because approval cards don't exist yet.
+unless `--inherit-user-config` is given.
+
+**Approvals.** Anything that needs a yes (running a command, editing a file) is asked in the
+terminal: `y` allows it, `n` refuses, and anything longer refuses and is passed to the bot as
+your reason ("no, use /tmp instead"). Without a terminal, or with `--no-approvals`, such steps
+are refused. How it works is described at the top of `crates/catbot/src/approval.rs`.
 
 ## Recording the interface's traffic
 

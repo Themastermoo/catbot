@@ -11,6 +11,8 @@ use std::{path::PathBuf, process::Stdio};
 
 use serde::Serialize;
 use serde_json::{Value, json};
+use crate::approval::{Broker, Decision};
+
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{Child, Command},
@@ -68,6 +70,9 @@ pub struct Turn {
     pub cli: Vec<String>,
     /// Keep the machine's own Claude settings, CLAUDE.md and MCP servers out of the bot.
     pub isolated: bool,
+    /// The program that runs `catbot` (normally this very binary). When given, anything that
+    /// needs a yes becomes an [`Event::ApprovalRequested`]; without it, such steps are refused.
+    pub approval_helper: Option<Vec<String>>,
 }
 
 /// What a turn reports while it runs.
@@ -86,6 +91,9 @@ pub enum Event {
     ToolStarted { id: String, name: String, input: Value },
     /// A tool call ended.
     ToolFinished { id: String, ok: bool, output: String },
+    /// The bot wants to do something that needs a yes. Answer with [`Running::answer`];
+    /// the bot waits until then.
+    ApprovalRequested { id: String, tool: String, input: Value },
     /// Something went wrong that the person should see (signed out, usage limit, API error).
     Error { message: String },
     /// The turn is over.
@@ -257,9 +265,20 @@ fn flatten_tool_output(content: &Value) -> String {
 pub struct Running {
     pub events: mpsc::Receiver<Event>,
     child: Option<Child>,
+    broker: Option<Broker>,
 }
 
 impl Running {
+    /// The private folder holding this turn's approval socket, if approvals are on.
+    pub fn approval_dir(&self) -> Option<&std::path::Path> {
+        self.broker.as_ref().map(Broker::dir)
+    }
+
+    /// Answers an [`Event::ApprovalRequested`]. Returns false if it was already answered.
+    pub fn answer(&self, id: &str, decision: Decision) -> bool {
+        self.broker.as_ref().is_some_and(|broker| broker.answer(id, decision))
+    }
+
     /// Stops the turn now.
     pub async fn stop(&mut self) {
         if let Some(child) = self.child.as_mut() {
@@ -274,9 +293,18 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
         .cli
         .split_first()
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no claude program given"))?;
+    let (tx, events) = mpsc::channel(256);
+    let broker = match &turn.approval_helper {
+        Some(helper) => Some(Broker::start(helper, tx.downgrade())?),
+        None => None,
+    };
+    let mut command_args = args(turn);
+    if let Some(broker) = &broker {
+        command_args.extend(broker.args());
+    }
     let mut child = Command::new(program)
         .args(leading)
-        .args(args(turn))
+        .args(command_args)
         .current_dir(&turn.cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -308,7 +336,6 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
         text[start..].to_string()
     });
 
-    let (tx, events) = mpsc::channel(256);
     tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         let mut finished = false;
@@ -329,7 +356,7 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
         }
     });
 
-    Ok(Running { events, child: Some(child) })
+    Ok(Running { events, child: Some(child), broker })
 }
 
 #[cfg(test)]
@@ -346,6 +373,7 @@ mod tests {
             system_prompt: Some("You are Assistant.".into()),
             cli: vec!["claude".into()],
             isolated: true,
+            approval_helper: None,
         }
     }
 
