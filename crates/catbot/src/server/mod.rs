@@ -180,9 +180,10 @@ async fn serve_ui(app: &App, req: Request) -> Response {
     use tower_http::services::{ServeDir, ServeFile};
     let Some(dir) = &app.ui else { return StatusCode::NOT_FOUND.into_response() };
     let files = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
+    // Serving files can't fail as a service (its error type is Infallible); a missing file is a 404 answer.
     match files.oneshot(req).await {
         Ok(response) => response.into_response(),
-        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+        Err(never) => match never {},
     }
 }
 

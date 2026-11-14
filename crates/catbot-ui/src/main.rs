@@ -4,8 +4,13 @@
 //! (Apache-2.0, see NOTICE), so the stylesheet's tokens and skins apply unchanged.
 
 mod api;
+mod bots;
+mod sidebar;
 
 use dioxus::prelude::*;
+
+use bots::Bot;
+use sidebar::{BotMark, Sidebar};
 
 const STYLES: Asset = asset!("/assets/tailwind.css");
 /// The bundled fonts, copied through as a folder so `fonts.css` finds its files beside it.
@@ -29,58 +34,48 @@ fn App() -> Element {
     use_hook(|| {
         document::eval(FOLLOW_SYSTEM_SKIN);
     });
+    let mut bots = use_signal(Vec::<Bot>::new);
+    let mut selected = use_signal(|| None::<String>);
+    let mut problem = use_signal(|| None::<String>);
+    // The bot list, once. Live updates come with the event stream (stage 6.4).
+    use_future(move || async move {
+        match api::get("/api/bots?messages=20").await {
+            Ok(answer) => {
+                let list = Bot::list(&answer);
+                if selected.peek().is_none() {
+                    selected.set(list.first().map(|b| b.id.clone()));
+                }
+                bots.set(list);
+            }
+            Err(err) => problem.set(Some(err)),
+        }
+    });
     rsx! {
         document::Stylesheet { href: "{FONTS}/fonts.css" }
         document::Stylesheet { href: STYLES }
         div { class: "flex h-screen flex-col bg-app text-ink",
             div { class: "relative flex min-h-0 flex-1",
-                Sidebar {}
-                Main {}
+                Sidebar { bots, selected }
+                Main { bots, selected, problem }
             }
         }
     }
 }
 
+/// The chat area. Until stage 6.3 it shows which bot is open.
 #[component]
-fn Sidebar() -> Element {
-    rsx! {
-        aside {
-            "aria-label": "Bots",
-            class: "relative flex h-full w-[320px] shrink-0 flex-col border-r-[0.5px] border-edge bg-panel",
-            div { class: "flex items-center gap-2 px-4 pb-2 pt-4",
-                span { class: "text-[15px] font-semibold text-ink", "Catbot" }
-            }
-        }
-    }
-}
-
-/// What the app knows about the server it came from.
-#[derive(Clone, PartialEq)]
-enum Connection {
-    Reached { catbot_bots: usize },
-    Failed(String),
-}
-
-#[component]
-fn Main() -> Element {
-    let connection = use_resource(|| async move {
-        match api::get("/api/bots?messages=0").await {
-            Ok(list) => {
-                let bots = list["bots"].as_array().cloned().unwrap_or_default();
-                Connection::Reached { catbot_bots: bots.iter().filter(|b| b["catbot"] == true).count() }
-            }
-            Err(err) => Connection::Failed(err),
-        }
-    });
-    let status = match &*connection.read() {
-        None => "Connecting to Catbot…".to_string(),
-        Some(Connection::Reached { catbot_bots }) => format!("Connected to Catbot · {catbot_bots} bot(s)"),
-        Some(Connection::Failed(err)) => format!("Can't reach Catbot: {err}"),
-    };
+fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, problem: ReadSignal<Option<String>>) -> Element {
+    let open = selected.read().as_ref().and_then(|id| bots.read().iter().find(|b| &b.id == id).cloned());
     rsx! {
         main {
             class: "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center gap-3 bg-app text-ink-secondary",
-            p { class: "text-[13px]", "{status}" }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "text-[13px] text-danger", "Can't reach Catbot: {err}" }
+            } else if let Some(bot) = open {
+                BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64 }
+                p { class: "text-[15px] font-semibold text-ink", "{bot.name}" }
+                p { class: "text-[13px]", "The conversation appears here in the next stage." }
+            }
         }
     }
 }
