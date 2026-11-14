@@ -26,6 +26,43 @@ home Linux box runs the agents (`claude`, `codex`), and any paired device
 
 Runtime data (database, transcripts, keys) lives outside this repo, never in it.
 
+## Talking to Claude through Catbot
+
+`catbot ask` runs one turn through Catbot's own Claude driver (`crates/catbot/src/claude.rs`),
+the same piece every bot will run on.
+
+```sh
+cargo run -- ask "What's in this folder?"
+cargo run -- ask --resume <session id> "And the biggest file?"   # continue a conversation
+cargo run -- ask --model opus --system "You are terse." "Explain Rust lifetimes"
+```
+
+Bots are isolated from this machine's own Claude setup (CLAUDE.md, MCP servers, plugins)
+unless `--inherit-user-config` is given. With the default `--mode default`, anything that
+would need approval is refused, because approval cards don't exist yet.
+
+## Recording the interface's traffic
+
+`catbot record` sits between the interface and the reference server, passes every
+request through unchanged, and writes what it saw to `~/Projects/catbot-traffic/`
+(one JSON Lines file per run, outside this repo). Values under names like `key`,
+`token`, `password` or `code` are replaced with `[redacted]`, but other text can
+still be private: treat the recordings as private.
+
+```sh
+# tab 1: the reference server, as usual
+cd ~/Projects/openmausbot-ref && pnpm dev:server
+
+# tab 2: the recorder (listens on 8800, forwards to 8799)
+cd ~/Projects/Catbot && cargo run -- record
+
+# tab 3: the interface, pointed at the recorder instead of the server
+cd ~/Projects/openmausbot-ref && OMB_PORT=8800 pnpm dev
+
+# later: the distinct routes the interface used
+cd ~/Projects/Catbot && cargo run -- routes
+```
+
 ## Licensing
 
 Code taken or translated from OpenMausBot stays under Apache 2.0: keep its

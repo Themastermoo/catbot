@@ -1,0 +1,20 @@
+[package]
+name = "catbot"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Catbot server. For now: a pass-through recorder in front of the reference server."
+
+[dependencies]
+axum = "0.8"
+bytes = "1"
+chrono = "0.4"
+clap = { version = "4", features = ["derive"] }
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+uuid = { version = "1", features = ["v4"] }
