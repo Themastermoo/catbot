@@ -47,12 +47,14 @@ pub fn mode_from_approval(level: &str) -> Option<PermissionMode> {
     }
 }
 
-/// The colours the interface knows; each bot gets one from its id, so it never changes.
-const COLORS: [&str; 6] = ["blue", "teal", "purple", "orange", "red", "yellow"];
+/// A bot that hasn't picked a colour gets one of these from its id, so it never changes.
+const DEFAULT_COLORS: [&str; 6] = ["blue", "teal", "purple", "orange", "red", "yellow"];
 
-fn color(id: &str) -> &'static str {
-    let sum: usize = id.bytes().map(usize::from).sum();
-    COLORS[sum % COLORS.len()]
+fn color(bot: &Bot) -> String {
+    bot.color.clone().unwrap_or_else(|| {
+        let sum: usize = bot.id.bytes().map(usize::from).sum();
+        DEFAULT_COLORS[sum % DEFAULT_COLORS.len()].to_string()
+    })
 }
 
 fn sha256(text: &str) -> String {
@@ -84,7 +86,10 @@ pub fn bot(store: &Store, bot: &Bot, activity: &str, messages: Option<usize>) ->
         "soul": bot.instructions,
         "soulHash": sha256(&bot.instructions),
         "notifications": true,
-        "color": color(&bot.id),
+        "color": color(bot),
+        // Catbot's own: which mascot it wears, and whether it may use the Codex vault.
+        "mark": bot.mark.as_str(),
+        "codex": bot.codex,
         "mascotBody": "cursor",
         "unread": false,
         "modelSelection": model_selection(bot),

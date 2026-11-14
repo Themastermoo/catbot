@@ -32,7 +32,7 @@ use crate::{
     claude::PermissionMode,
     proxy::Proxy,
     record::Recorder,
-    store::{Bot, NewBot, Role, Store},
+    store::{self, Bot, Mark, NewBot, Role, Store},
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -281,6 +281,15 @@ async fn create_bot(app: &Arc<App>, req: Request) -> Answer {
         let instructions = body["soul"].as_str().or(body["personality"].as_str()).unwrap_or("").to_string();
         store.create_bot(NewBot { name, instructions, model: None, mode: PermissionMode::Default, codex: true })
     }).map_err(bad)?;
+    // Anything else the new bot was given (model, approval level, picture, colour), on top of the defaults.
+    let mut changes = body.clone();
+    if let Some(changes) = changes.as_object_mut() {
+        changes.remove("name");
+        changes.remove("soul");
+    }
+    let mut bot = bot;
+    apply_changes(&mut bot, &changes)?;
+    app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
     let wire = app.try_store(|store| wire::bot(store, &bot, "idle", Some(50))).map_err(fail)?;
     app.announce_bot(&bot.id);
     eprintln!("catbot: made {} ({})", bot.name, bot.folder.display());
@@ -324,6 +333,16 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
 }
 
 fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
+    apply_changes(&mut bot, &body)?;
+    app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
+    let thread = app.try_store(|store| store.ensure_conversation(&bot.id)).map_err(fail)?;
+    let wire = app.try_store(|store| wire::bot(store, &bot, app.turns.activity(&thread.id), None)).map_err(fail)?;
+    app.hub.send(json!({ "kind": "bot", "bot": wire }));
+    Ok((StatusCode::OK, json!({ "bot": wire })))
+}
+
+/// Takes what a PATCH or POST body says about a bot. Only the fields present change.
+fn apply_changes(bot: &mut Bot, body: &Value) -> Result<(), (StatusCode, String)> {
     if let Some(name) = body["name"].as_str() {
         bot.name = name.trim().to_string();
     }
@@ -340,11 +359,19 @@ fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
     if let Some(level) = body["approvalMode"].as_str() {
         bot.mode = wire::mode_from_approval(level).ok_or_else(|| bad(format!("unknown approval level {level}")))?;
     }
-    app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
-    let thread = app.try_store(|store| store.ensure_conversation(&bot.id)).map_err(fail)?;
-    let wire = app.try_store(|store| wire::bot(store, &bot, app.turns.activity(&thread.id), None)).map_err(fail)?;
-    app.hub.send(json!({ "kind": "bot", "bot": wire }));
-    Ok((StatusCode::OK, json!({ "bot": wire })))
+    if let Some(mark) = body["mark"].as_str() {
+        bot.mark = Mark::parse(mark).ok_or_else(|| bad(format!("unknown picture {mark}")))?;
+    }
+    match body.get("color") {
+        Some(Value::Null) => bot.color = None,
+        Some(Value::String(color)) if store::COLORS.contains(&color.as_str()) => bot.color = Some(color.clone()),
+        Some(other) => return Err(bad(format!("unknown colour {other}"))),
+        None => {}
+    }
+    if let Some(codex) = body["codex"].as_bool() {
+        bot.codex = codex;
+    }
+    Ok(())
 }
 
 /// `POST /api/bots/:id/messages`: keep the person's message, show it everywhere, start the turn.

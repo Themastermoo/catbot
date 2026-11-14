@@ -49,6 +49,45 @@ pub struct Bot {
     /// The bot's own working folder.
     pub folder: PathBuf,
     pub created_at: String,
+    /// Which picture the interface draws for it.
+    #[serde(serialize_with = "mark_str")]
+    pub mark: Mark,
+    /// Its colour, one of `COLORS`. None: picked from its id, so it never changes on its own.
+    pub color: Option<String>,
+}
+
+/// The colours a bot can wear: the interface's identity colours.
+pub const COLORS: [&str; 12] = ["green", "blue", "red", "orange", "purple", "cyan", "pink", "yellow", "teal", "coral", "silver", "chrome"];
+
+/// A bot's picture: one of Catbot's three cats, or the first letter of its name in a circle.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Mark {
+    #[default]
+    CatHead,
+    CatSitting,
+    CatVisor,
+    Letter,
+}
+
+impl Mark {
+    pub const ALL: [Mark; 4] = [Mark::CatHead, Mark::CatSitting, Mark::CatVisor, Mark::Letter];
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Mark::CatHead => "cat-head",
+            Mark::CatSitting => "cat-sitting",
+            Mark::CatVisor => "cat-visor",
+            Mark::Letter => "letter",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Mark> {
+        Mark::ALL.into_iter().find(|m| m.as_str() == text)
+    }
+}
+
+fn mark_str<S: serde::Serializer>(mark: &Mark, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(mark.as_str())
 }
 
 fn mode_str<S: serde::Serializer>(mode: &PermissionMode, s: S) -> Result<S::Ok, S::Error> {
@@ -181,6 +220,12 @@ impl Store {
         if version == 0 {
             conn.execute_batch(&format!("BEGIN; {SCHEMA} PRAGMA user_version = 1; COMMIT;"))?;
         }
+        if version < 2 {
+            // Version 2: a bot's picture and colour. Bots from before keep the defaults (NULL).
+            conn.execute_batch(
+                "BEGIN; ALTER TABLE bots ADD COLUMN mark TEXT; ALTER TABLE bots ADD COLUMN color TEXT; PRAGMA user_version = 2; COMMIT;",
+            )?;
+        }
         Ok(Self { conn, home: home.to_path_buf() })
     }
 
@@ -205,6 +250,8 @@ impl Store {
             codex: new.codex,
             folder,
             created_at: now(),
+            mark: Mark::default(),
+            color: None,
         };
         self.conn.execute(
             "INSERT INTO bots (id, name, instructions, model, mode, codex, folder, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -226,7 +273,7 @@ impl Store {
     }
 
     pub fn bots(&self) -> Result<Vec<Bot>, BoxError> {
-        let mut stmt = self.conn.prepare("SELECT id, name, instructions, model, mode, codex, folder, created_at FROM bots ORDER BY name")?;
+        let mut stmt = self.conn.prepare("SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color FROM bots ORDER BY name")?;
         let bots = stmt.query_map([], bot_from_row)?.collect::<Result<_, _>>()?;
         Ok(bots)
     }
@@ -236,7 +283,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, instructions, model, mode, codex, folder, created_at FROM bots WHERE name = ?1",
+                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color FROM bots WHERE name = ?1",
                 [name.trim()],
                 bot_from_row,
             )
@@ -247,7 +294,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, instructions, model, mode, codex, folder, created_at FROM bots WHERE id = ?1",
+                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color FROM bots WHERE id = ?1",
                 [id],
                 bot_from_row,
             )
@@ -262,8 +309,8 @@ impl Store {
             return Err(format!("a bot named {} already exists", other.name).into());
         }
         self.conn.execute(
-            "UPDATE bots SET name = ?2, instructions = ?3, model = ?4, mode = ?5, codex = ?6 WHERE id = ?1",
-            params![bot.id, name, bot.instructions, bot.model, bot.mode.as_str(), bot.codex],
+            "UPDATE bots SET name = ?2, instructions = ?3, model = ?4, mode = ?5, codex = ?6, mark = ?7, color = ?8 WHERE id = ?1",
+            params![bot.id, name, bot.instructions, bot.model, bot.mode.as_str(), bot.codex, bot.mark.as_str(), bot.color],
         )?;
         Ok(())
     }
@@ -421,6 +468,8 @@ fn bot_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
         codex: r.get(5)?,
         folder: PathBuf::from(r.get::<_, String>(6)?),
         created_at: r.get(7)?,
+        mark: r.get::<_, Option<String>>(8)?.as_deref().and_then(Mark::parse).unwrap_or_default(),
+        color: r.get::<_, Option<String>>(9)?.filter(|c| COLORS.contains(&c.as_str())),
     })
 }
 
@@ -594,6 +643,41 @@ mod tests {
         assert!(store.messages(&conv.id, 10).unwrap().is_empty());
         assert!(bot.folder.is_dir());
         assert!(store.delete_bot("Scout").is_err());
+    }
+
+    #[test]
+    fn a_bots_picture_and_colour() {
+        let (_dir, store) = store();
+        let mut bot = store.create_bot(new("Kiwi")).unwrap();
+        assert_eq!((bot.mark, bot.color.as_deref()), (Mark::CatHead, None));
+        bot.mark = Mark::CatVisor;
+        bot.color = Some("teal".into());
+        store.update_bot(&bot).unwrap();
+        let again = store.bot("Kiwi").unwrap().unwrap();
+        assert_eq!((again.mark, again.color.as_deref()), (Mark::CatVisor, Some("teal")));
+        assert_eq!(Mark::parse("cat-sitting"), Some(Mark::CatSitting));
+        assert_eq!(Mark::parse("mouse"), None);
+    }
+
+    #[test]
+    fn a_version_1_store_gains_pictures() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("catbot");
+        std::fs::create_dir_all(&home).unwrap();
+        {
+            let conn = Connection::open(home.join("catbot.db")).unwrap();
+            conn.execute_batch(&format!("{SCHEMA} PRAGMA user_version = 1;")).unwrap();
+            conn.execute(
+                "INSERT INTO bots (id, name, folder, created_at) VALUES ('b1', 'Old', '/tmp/old', '2026-11-14T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        }
+        let store = Store::open(&home).unwrap();
+        let bot = store.bot("Old").unwrap().unwrap();
+        assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
+        let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(version, 2);
     }
 
     #[test]

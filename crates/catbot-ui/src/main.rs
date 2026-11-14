@@ -8,7 +8,9 @@ mod bots;
 mod chat;
 mod events;
 mod live;
+mod mascots;
 mod markdown;
+mod settings;
 mod sidebar;
 
 use dioxus::prelude::*;
@@ -40,6 +42,8 @@ fn App() -> Element {
     });
     let mut state = use_context_provider(|| Signal::new(live::State::default()));
     let mut selected = use_signal(|| None::<String>);
+    let settings_open = use_signal(|| false);
+    use_context_provider(|| settings::Ui { selected, settings_open });
     let mut problem = use_signal(|| None::<String>);
 
     // Fetches the bot list, and has every open conversation fetched again: at start, and after
@@ -86,6 +90,15 @@ fn App() -> Element {
     use_hook(catch_up);
 
     let bots = use_memo(move || state.read().bots.clone());
+    // The open bot is gone (deleted here or elsewhere): open the first one left. The settings
+    // panel can't do this itself, as it closes with its bot.
+    use_effect(move || {
+        let bots = bots.read();
+        let current = selected.read().clone();
+        if current.as_ref().is_none_or(|id| !bots.iter().any(|b| &b.id == id)) && !bots.is_empty() {
+            selected.set(bots.first().map(|b| b.id.clone()));
+        }
+    });
     rsx! {
         document::Stylesheet { href: "{FONTS}/fonts.css" }
         document::Stylesheet { href: STYLES }
@@ -98,9 +111,10 @@ fn App() -> Element {
     }
 }
 
-/// The chat area: the open bot's conversation.
+/// The chat area: the open bot's conversation, and its settings beside it when they're open.
 #[component]
 fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, problem: ReadSignal<Option<String>>) -> Element {
+    let ui = use_context::<settings::Ui>();
     let open = selected.read().as_ref().and_then(|id| bots.read().iter().find(|b| &b.id == id).cloned());
     match (problem(), open) {
         (Some(err), _) => rsx! {
@@ -112,9 +126,17 @@ fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, proble
         // Dioxus only honours a key among siblings, and a reused view would keep the last bot's messages.
         (None, Some(bot)) => rsx! {
             for bot in std::iter::once(bot) {
-                chat::Chat { key: "{bot.id}", bot }
+                chat::Chat { key: "{bot.id}", bot: bot.clone() }
+                if (ui.settings_open)() {
+                    settings::SettingsPanel { key: "settings-{bot.id}", bot }
+                }
             }
         },
-        (None, None) => rsx! { main { class: "relative flex h-full min-w-0 flex-1 flex-col bg-app" } },
+        (None, None) => rsx! {
+            main { class: "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center gap-2 bg-app text-ink-secondary",
+                p { class: "text-[15px] font-semibold text-ink", "No bots yet" }
+                p { class: "text-[13px]", "Make one with the + at the top of the sidebar." }
+            }
+        },
     }
 }

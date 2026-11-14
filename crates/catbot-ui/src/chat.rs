@@ -13,7 +13,7 @@ use crate::api;
 use crate::bots::{Activity, Bot};
 use crate::live::{self, Live, State};
 use crate::markdown;
-use crate::sidebar::BotMark;
+use crate::mascots::BotMark;
 
 /// Messages fetched at a time.
 const PAGE: usize = 50;
@@ -535,14 +535,24 @@ fn page_messages(page: &Value) -> Vec<Msg> {
     page["messages"].as_array().map(|list| list.iter().filter_map(Msg::from_wire).collect()).unwrap_or_default()
 }
 
-/// The bar above the conversation: the bot's mark and name, in their floating pill.
+/// The bar above the conversation: the bot's picture and name, in their floating pill.
+/// Clicking it opens the bot's settings, as theirs opens the profile.
 #[component]
 fn ChatHead(bot: Bot) -> Element {
+    let mut ui = use_context::<crate::settings::Ui>();
+    let open = (ui.settings_open)();
     rsx! {
         div { class: "z-[25] shrink-0 bg-app/85 px-5 py-3 backdrop-blur-md",
             div { class: "flex items-center justify-center",
-                div { "data-chathead-pill": true, class: "flex min-w-0 items-center gap-2 rounded-full py-0.5 pl-1.5 pr-3 text-ink {ELEVATED_FLOAT}",
-                    BotMark { color: bot.color.clone(), initial: bot.initial(), size: 24 }
+                button {
+                    r#type: "button",
+                    "data-chathead-pill": true,
+                    title: "Open bot settings",
+                    "aria-label": "Open settings for {bot.name}",
+                    "aria-expanded": "{open}",
+                    class: "group flex min-w-0 items-center gap-2 rounded-full py-0.5 pl-1.5 pr-3 text-ink {ELEVATED_FLOAT} transition-colors duration-[120ms] hover:bg-[color-mix(in_srgb,var(--color-composer),var(--color-ink)_7%)]",
+                    onclick: move |_| ui.settings_open.toggle(),
+                    BotMark { color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone() }
                     span { class: "truncate text-[14px] font-semibold text-ink", "{bot.name}" }
                 }
             }
@@ -554,7 +564,7 @@ fn ChatHead(bot: Bot) -> Element {
 fn EmptyChat(bot: Bot) -> Element {
     rsx! {
         div { class: "flex flex-col items-center gap-3 py-24 text-center",
-            BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64 }
+            BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone() }
             p { class: "text-[15px] font-semibold text-ink", "{bot.name}" }
             p { class: "text-[13px] text-ink-secondary", "No messages yet." }
         }
@@ -823,7 +833,7 @@ fn ApprovalPanel(bot: Bot, pending: Pending, count: usize, on_cancel_turn: Event
                 div { class: "flex min-w-0 items-center gap-2", "aria-live": "polite",
                     div { class: "min-w-0 flex-1",
                         div { "data-ask-header": true, class: "flex min-w-0 items-center gap-1.5 text-[13px] leading-[18px] text-ink-secondary",
-                            span { "aria-hidden": "true", class: "flex shrink-0", BotMark { color: bot.color.clone(), initial: bot.initial(), size: 16 } }
+                            span { "aria-hidden": "true", class: "flex shrink-0", BotMark { color: bot.color.clone(), initial: bot.initial(), size: 16, mark: bot.mark.clone() } }
                             span { dir: "auto", class: "min-w-0 truncate", "{line}" }
                         }
                     }

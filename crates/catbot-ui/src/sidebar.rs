@@ -2,12 +2,13 @@
 //!
 //! Classes and sizes follow the full layout of OpenMausBot's `src/components/Sidebar.tsx`
 //! (`Sidebar` and `BotListItem`, Apache-2.0, see NOTICE). Their bot picture is their mascot
-//! artwork, which Catbot doesn't copy: a bot shows a stand-in mark until Catbot has its own.
+//! artwork, which Catbot doesn't copy: a bot wears one of Catbot's own (`mascots.rs`).
 
 use dioxus::prelude::*;
 
 use crate::bots::{Activity, Bot};
 use crate::chat::clock;
+use crate::mascots::BotMark;
 
 /// Their focus ring for rows (`SIMPLE_ROW_FOCUS`).
 const ROW_FOCUS: &str = "focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-focus";
@@ -17,6 +18,7 @@ const ELEVATED_CONTROL: &str = "bg-composer ring-1 ring-inset ring-ink/[0.07]";
 #[component]
 pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> Element {
     let mut query = use_signal(String::new);
+    let mut making = use_signal(|| false);
     let shown: Vec<Bot> = bots.read().iter().filter(|b| b.matches(&query.read())).cloned().collect();
     let empty = bots.read().is_empty();
     rsx! {
@@ -25,7 +27,20 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             "data-sidebar": true,
             class: "relative flex h-full w-[320px] shrink-0 flex-col border-r-[0.5px] border-edge bg-panel",
             div { "data-sidebar-top-row": true, class: "relative flex h-12 items-center pl-4 pr-2",
-                span { class: "text-[15px] font-semibold text-ink", "Catbot" }
+                span { class: "min-w-0 flex-1 text-[15px] font-semibold text-ink", "Catbot" }
+                button {
+                    r#type: "button",
+                    "aria-label": "New Bot",
+                    title: "New Bot",
+                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                    onclick: move |_| making.set(true),
+                    svg { "aria-hidden": "true", width: "18", height: "18", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        path { d: "M5 12h14M12 5v14" }
+                    }
+                }
+            }
+            if making() {
+                crate::settings::NewBotDialog { on_close: move |_| making.set(false) }
             }
             div { class: "px-3 pt-1 pb-3",
                 div { class: "flex h-8 items-center gap-2 rounded-full px-3 focus-within:ring-focus {ELEVATED_CONTROL}",
@@ -48,9 +63,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                 div { class: "flex flex-col gap-0.5",
                     if empty {
                         div { class: "px-3 py-6 text-center text-[13px] text-ink-secondary",
-                            "No Catbot bots yet. Make one with "
-                            code { class: "font-mono", "catbot bot new" }
-                            "."
+                            "No bots yet. Make one with the + above."
                         }
                     } else if shown.is_empty() {
                         div { class: "px-3 py-6 text-center text-[13px] text-ink-secondary", "Nothing matches “{query}”" }
@@ -70,6 +83,7 @@ fn BotRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element 
     let key_id = bot.id.clone();
     let waiting = bot.activity == Activity::WaitingOnYou;
     let working = bot.activity == Activity::Working;
+    let mood = if waiting { "waiting" } else if working { "working" } else { "idle" }.to_string();
     let row_state = if selected { "bg-raised" } else { "hover:bg-raised/50" };
     let preview_color = if waiting { "font-semibold text-warning" } else { "text-ink-secondary" };
     let time = bot.last.as_ref().filter(|_| selected).map(|last| clock(last.at));
@@ -90,7 +104,7 @@ fn BotRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element 
                     }
                 },
                 span { class: "relative flex shrink-0", title: "{bot.name}",
-                    BotMark { color: bot.color.clone(), initial: bot.initial(), size: 44 }
+                    BotMark { color: bot.color.clone(), initial: bot.initial(), size: 44, mark: bot.mark.clone(), state: mood }
                     if working {
                         span { "data-testid": "working-dot", class: "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full border-2 border-panel bg-success" }
                     }
@@ -124,29 +138,6 @@ fn BotRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element 
                     }
                 }
             }
-        }
-    }
-}
-
-/// Catbot's stand-in bot mark: the bot's colour, shaded as their room avatars are, with its initial.
-#[component]
-pub fn BotMark(color: String, initial: String, size: u32) -> Element {
-    let fill = format!("var(--identity-{color})");
-    let background = format!(
-        "linear-gradient(160deg, color-mix(in srgb, {fill} 82%, #ffffff), {fill} 55%, color-mix(in srgb, {fill} 82%, #000000))"
-    );
-    let font = size * 2 / 5;
-    rsx! {
-        span {
-            "aria-hidden": "true",
-            class: "flex shrink-0 select-none items-center justify-center rounded-full font-semibold text-white",
-            // One property each: Dioxus updates a changed property in place, where a changed
-            // `style` string left the old background cleared and no new one set.
-            width: "{size}px",
-            height: "{size}px",
-            font_size: "{font}px",
-            background: "{background}",
-            "{initial}"
         }
     }
 }

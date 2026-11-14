@@ -15,6 +15,16 @@ pub struct Bot {
     pub name: String,
     /// One of the stylesheet's identity colours (`--identity-<color>`).
     pub color: String,
+    /// Which picture it wears (`mascots::MARKS`).
+    pub mark: String,
+    /// Its instructions.
+    pub soul: String,
+    /// The model it asks for; empty for Claude Code's default.
+    pub model: String,
+    /// What it may do without asking: "ask", "edits", "auto" or "full".
+    pub approval_mode: String,
+    /// Whether it may use the Codex vault.
+    pub codex: bool,
     pub activity: Activity,
     pub unread: bool,
     /// Its newest message worth a preview, if it has one.
@@ -58,6 +68,11 @@ impl Bot {
             thread_id: wire["threadId"].as_str().unwrap_or_default().to_string(),
             name: wire["name"].as_str().unwrap_or_default().to_string(),
             color: wire["color"].as_str().unwrap_or("blue").to_string(),
+            mark: wire["mark"].as_str().unwrap_or("cat-head").to_string(),
+            soul: wire["soul"].as_str().unwrap_or_default().to_string(),
+            model: wire["modelSelection"]["model"].as_str().unwrap_or_default().to_string(),
+            approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
+            codex: wire["codex"].as_bool().unwrap_or(true),
             activity,
             unread: wire["unread"] == true,
             last: messages.iter().rev().find_map(|m| Some(Last { line: line(m)?, at: m["at"].as_f64().unwrap_or(0.0) })),

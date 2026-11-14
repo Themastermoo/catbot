@@ -256,6 +256,31 @@ async fn bots_are_renamed_retuned_and_deleted() {
 }
 
 #[tokio::test]
+async fn pictures_colours_and_codex() {
+    let s = setup().await;
+    let (status, made) = s
+        .call("POST", "/api/bots", Some(json!({ "name": "Fern", "soul": "Gardens.", "approvalMode": "edits", "mark": "cat-sitting", "color": "teal", "codex": false })))
+        .await;
+    assert_eq!(status, 201);
+    let bot = &made["bot"];
+    assert_eq!((bot["name"].as_str(), bot["soul"].as_str()), (Some("Fern"), Some("Gardens.")));
+    assert_eq!((bot["mark"].as_str(), bot["color"].as_str()), (Some("cat-sitting"), Some("teal")));
+    assert_eq!((bot["approvalMode"].as_str(), bot["codex"].as_bool()), (Some("edits"), Some(false)));
+    let id = bot["id"].as_str().unwrap().to_string();
+
+    let (_, patched) = s.call("PATCH", &format!("/api/bots/{id}"), Some(json!({ "mark": "letter", "color": null, "codex": true }))).await;
+    assert_eq!(patched["bot"]["mark"], "letter");
+    assert!(patched["bot"]["color"].as_str().is_some(), "back to the colour it gets from its id");
+    assert_eq!(patched["bot"]["codex"], true);
+    for wrong in [json!({ "mark": "mouse" }), json!({ "color": "plaid" }), json!({ "color": 7 })] {
+        assert_eq!(s.call("PATCH", &format!("/api/bots/{id}"), Some(wrong.clone())).await.0, 400, "{wrong}");
+    }
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    let fern = list["bots"].as_array().unwrap().iter().find(|b| b["id"] == id.as_str()).unwrap().clone();
+    assert_eq!(fern["mark"], "letter");
+}
+
+#[tokio::test]
 async fn the_interface_is_served_beside_the_api() {
     let s = setup().await;
     let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
