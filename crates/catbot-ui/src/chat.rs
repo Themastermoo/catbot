@@ -10,7 +10,8 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use crate::api;
-use crate::bots::Bot;
+use crate::bots::{Activity, Bot};
+use crate::live::{self, Live, State};
 use crate::markdown;
 use crate::sidebar::BotMark;
 
@@ -27,6 +28,9 @@ pub struct Msg {
     pub id: String,
     /// When it was sent, in ms since the epoch.
     pub at: f64,
+    /// The person's own id for a message they sent, so the saved copy can replace the one shown
+    /// while it was on its way.
+    pub send_id: Option<String>,
     pub body: Body,
 }
 
@@ -81,7 +85,8 @@ impl Msg {
             }
             _ => return None,
         };
-        Some(Msg { id, at, body })
+        let send_id = wire["sendId"].as_str().map(str::to_string);
+        Some(Msg { id, at, send_id, body })
     }
 
     fn is_step(&self) -> bool {
@@ -171,33 +176,38 @@ fn js_offset_minutes(_at: f64) -> f64 {
     0.0
 }
 
+/// How close to the bottom (px) still counts as reading the newest messages, so new ones scroll into view.
+const FOLLOW_WITHIN: f64 = 120.0;
+
 #[component]
 pub fn Chat(bot: Bot) -> Element {
     let thread = bot.thread_id.clone();
-    let mut messages = use_signal(Vec::<Msg>::new);
-    let mut more = use_signal(|| false);
-    let mut loading = use_signal(|| true);
+    let mut state = use_context::<Signal<State>>();
+    let mut loading = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
+    // Whether the person is at the end of the conversation; new messages then scroll into view.
+    let mut following = use_signal(|| true);
 
-    // The newest page, then the view jumps to the end.
+    // The newest page, whenever this conversation isn't loaded (first open, or after reconnecting).
     let first_thread = thread.clone();
-    use_future(move || {
+    use_effect(move || {
+        let loaded = state.read().threads.get(&first_thread).is_some_and(|t| t.loaded);
+        if loaded || *loading.peek() {
+            return;
+        }
         let thread = first_thread.clone();
-        async move {
+        loading.set(true);
+        spawn(async move {
             match api::get(&format!("/api/threads/{thread}/messages?limit={PAGE}")).await {
                 Ok(page) => {
-                    messages.set(page_messages(&page));
-                    more.set(page["hasMore"] == true);
-                    loading.set(false);
-                    // Two frames: the first lays the rows out, the second has their real height.
-                    document::eval(r#"requestAnimationFrame(() => requestAnimationFrame(() => { const el = document.getElementById("chat-scroll"); if (el) el.scrollTop = el.scrollHeight; }));"#);
+                    state.write().loaded(&thread, page_messages(&page), page["hasMore"] == true, false);
+                    problem.set(None);
+                    following.set(true);
                 }
-                Err(err) => {
-                    loading.set(false);
-                    problem.set(Some(err));
-                }
+                Err(err) => problem.set(Some(err)),
             }
-        }
+            loading.set(false);
+        });
     });
 
     // Earlier messages, kept in place on screen while the page grows above them.
@@ -205,7 +215,8 @@ pub fn Chat(bot: Bot) -> Element {
     let load_earlier = move || {
         let thread = older_thread.clone();
         async move {
-            let Some(before) = messages.peek().first().map(|m| m.id.clone()) else { return };
+            let before = state.peek().threads.get(&thread).and_then(|t| t.messages.iter().find(|m| !m.id.starts_with("optimistic-")).map(|m| m.id.clone()));
+            let Some(before) = before else { return };
             loading.set(true);
             let keep = document::eval(
                 r#"const el = document.getElementById("chat-scroll");
@@ -214,12 +225,7 @@ pub fn Chat(bot: Bot) -> Element {
                    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight - height + top; });"#,
             );
             match api::get(&format!("/api/threads/{thread}/messages?limit={PAGE}&before={before}")).await {
-                Ok(page) => {
-                    let mut earlier = page_messages(&page);
-                    earlier.extend(messages.peek().iter().cloned());
-                    messages.set(earlier);
-                    more.set(page["hasMore"] == true);
-                }
+                Ok(page) => state.write().loaded(&thread, page_messages(&page), page["hasMore"] == true, true),
                 Err(err) => problem.set(Some(err)),
             }
             let _ = keep.send(true);
@@ -227,10 +233,27 @@ pub fn Chat(bot: Bot) -> Element {
         }
     };
 
+    let (messages, more, live, loaded) = {
+        let state = state.read();
+        match state.threads.get(&thread) {
+            Some(t) => (t.messages.clone(), t.more, t.live.clone(), t.loaded),
+            None => (Vec::new(), false, None, false),
+        }
+    };
+
+    // New rows scroll into view while the person is at the end.
+    let size = messages.len() + live.as_ref().map_or(0, |l| l.text.len() + l.steps.len() * 1000);
+    use_effect(use_reactive!(|size| {
+        let _ = size;
+        if *following.peek() {
+            document::eval(r#"requestAnimationFrame(() => requestAnimationFrame(() => { const el = document.getElementById("chat-scroll"); if (el) el.scrollTop = el.scrollHeight; }));"#);
+        }
+    }));
+
     // Each item, with the day line above it when it starts a new day.
     let today = day(js_now());
     let mut previous_day: Option<i64> = None;
-    let rows: Vec<(Item, Option<String>)> = group(&messages.read())
+    let rows: Vec<(Item, Option<String>)> = group(&messages)
         .into_iter()
         .map(|item| {
             let at = item.first().at;
@@ -240,6 +263,7 @@ pub fn Chat(bot: Bot) -> Element {
             (item, stamp)
         })
         .collect();
+    let working = bot.activity != Activity::Idle || live.is_some();
     rsx! {
         main { class: "relative flex h-full min-w-0 flex-1 flex-col bg-app",
             ChatHead { bot: bot.clone() }
@@ -247,8 +271,10 @@ pub fn Chat(bot: Bot) -> Element {
                 id: "chat-scroll",
                 class: "glass-scroller min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain px-5 [overflow-anchor:none]",
                 onscroll: move |e| {
-                    let near_top = e.data().scroll_top() < LOAD_EARLIER_AT;
-                    if near_top && more() && !loading() {
+                    let data = e.data();
+                    let from_end = data.scroll_height() as f64 - data.scroll_top() - data.client_height() as f64;
+                    following.set(from_end < FOLLOW_WITHIN);
+                    if data.scroll_top() < LOAD_EARLIER_AT && more && !loading() {
                         spawn(load_earlier.clone()());
                     }
                 },
@@ -258,7 +284,7 @@ pub fn Chat(bot: Bot) -> Element {
                     role: "log",
                     "aria-live": "off",
                     "aria-label": "Conversation with {bot.name}",
-                    if loading() && !messages.read().is_empty() {
+                    if loading() && loaded {
                         div { class: "flex items-center justify-center gap-2 py-3 text-xs text-ink-tertiary",
                             span { class: "inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent border-t-transparent" }
                             span { "Loading earlier messages…" }
@@ -269,7 +295,7 @@ pub fn Chat(bot: Bot) -> Element {
                             "Couldn't load this conversation: {err}"
                         }
                     }
-                    if !loading() && messages.read().is_empty() && problem().is_none() {
+                    if loaded && messages.is_empty() && live.is_none() && problem().is_none() {
                         EmptyChat { bot: bot.clone() }
                     }
                     for (item, stamp) in rows {
@@ -285,11 +311,208 @@ pub fn Chat(bot: Bot) -> Element {
                             }
                         }
                     }
+                    if let Some(live) = live {
+                        LiveTurn { live }
+                    } else if working {
+                        Working {}
+                    }
+                }
+            }
+            Composer { bot: bot.clone(), working, on_send: move |_| following.set(true) }
+        }
+    }
+}
+
+/// The turn as it happens: its steps, then the reply streaming in.
+#[component]
+fn LiveTurn(live: Live) -> Element {
+    rsx! {
+        div { class: "contents", "data-live-turn": true,
+            for step in live.steps {
+                Step { key: "{step.id}", name: step.name, ok: step.ok, live: true }
+            }
+            if live.text.is_empty() {
+                Working {}
+            } else {
+                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text) } }
+            }
+        }
+    }
+}
+
+/// Their working pill: three dots, while the bot thinks.
+#[component]
+fn Working() -> Element {
+    rsx! {
+        div { class: "flex justify-start",
+            div { class: "ui-pill", role: "status", "aria-label": "Working…",
+                span { class: "flex items-center gap-1", "aria-hidden": "true",
+                    for i in 0..3 {
+                        span { key: "{i}", class: "size-1.5 animate-pulse rounded-full bg-ink-secondary", style: "animation-delay: {i * 200}ms" }
+                    }
                 }
             }
         }
     }
 }
+
+/// The typing box, as their full-layout composer: a floating rounded box, Enter sends,
+/// Shift+Enter starts a new line. While the bot works the box stays open; what's sent then
+/// waits and goes when the turn ends, as theirs does. Stop ends the turn.
+#[component]
+fn Composer(bot: Bot, working: bool, on_send: EventHandler<()>) -> Element {
+    let mut state = use_context::<Signal<State>>();
+    let mut text = use_signal(String::new);
+    let mut queued = use_signal(|| None::<String>);
+    let mut problem = use_signal(|| None::<String>);
+    let waiting_on_you = bot.activity == Activity::WaitingOnYou;
+
+    let send_bot = bot.clone();
+    let send = use_callback(move |words: String| {
+        let bot = send_bot.clone();
+        spawn(async move {
+            let id = live::send_id();
+            state.write().sending(&bot.thread_id, live::optimistic(&words, &id, js_now()));
+            let body = serde_json::json!({ "text": words, "threadId": bot.thread_id, "sendId": id });
+            if let Err(err) = api::post(&format!("/api/bots/{}/messages", bot.id), &body).await {
+                state.write().unsend(&bot.thread_id, &id);
+                problem.set(Some(err));
+                // Give the words back, ahead of anything typed since.
+                let typed = text.peek().clone();
+                text.set(if typed.trim().is_empty() { words } else { format!("{words}\n{typed}") });
+            }
+        });
+    });
+
+    // A message that waited goes once the bot is free.
+    use_effect(use_reactive!(|working| {
+        if !working && let Some(words) = queued.take() {
+            send(words);
+        }
+    }));
+
+    let mut submit = move || {
+        let words = text.peek().trim().to_string();
+        if words.is_empty() || waiting_on_you {
+            return;
+        }
+        problem.set(None);
+        text.set(String::new());
+        document::eval(RESIZE_BOX);
+        on_send.call(());
+        if working {
+            let mut q = queued.write();
+            *q = Some(match q.take() {
+                Some(earlier) => format!("{earlier}\n\n{words}"),
+                None => words,
+            });
+        } else {
+            send(words);
+        }
+    };
+
+    let stop_bot = bot.clone();
+    let stop = move |_| {
+        let bot = stop_bot.clone();
+        queued.set(None);
+        spawn(async move {
+            let body = serde_json::json!({ "threadId": bot.thread_id });
+            if let Err(err) = api::post(&format!("/api/bots/{}/interrupt", bot.id), &body).await {
+                problem.set(Some(err));
+            }
+        });
+    };
+
+    let placeholder = if waiting_on_you {
+        "Answer the approval above to continue".to_string()
+    } else if working {
+        format!("{} is working. Sends when this turn finishes", bot.name)
+    } else {
+        format!("Message {}", bot.name)
+    };
+    let has_text = !text.read().trim().is_empty();
+    let button_style = format!("--bot-button: var(--identity-{}); --bot-button-ink: #ffffff; --bot-button-hover: color-mix(in srgb, var(--identity-{}) 88%, #000000);", bot.color, bot.color);
+    rsx! {
+        div { class: "pointer-events-none relative shrink-0 px-5 pb-3",
+            div { class: "chat-column pointer-events-auto relative w-full",
+                if let Some(err) = problem() {
+                    div { role: "alert", class: "mb-2 flex items-center gap-2 rounded-lg border border-danger/30 bg-danger/10 px-3 py-2 text-[13px] text-danger",
+                        span { class: "min-w-0 flex-1", "{err}" }
+                        button { r#type: "button", class: "flex size-5 shrink-0 items-center justify-center rounded hover:bg-danger/10", "aria-label": "Dismiss", onclick: move |_| problem.set(None), "×" }
+                    }
+                }
+                if let Some(words) = queued() {
+                    div { class: "mb-2 flex items-center gap-2 rounded-lg border border-hairline/40 bg-panel px-3 py-2 text-[13px] text-ink-secondary",
+                        span { class: "min-w-0 flex-1 truncate", "Waiting to send: {words}" }
+                        button { r#type: "button", class: "shrink-0 rounded px-2 py-1 font-medium hover:bg-raised", onclick: move |_| queued.set(None), "Cancel" }
+                    }
+                }
+                div { class: "relative",
+                    div { "aria-hidden": "true", class: "pointer-events-none absolute -left-5 -right-5 -bottom-3 top-1/2 bg-app" }
+                    div { "data-composer": true, class: "relative z-[1] rounded-2xl px-2 py-1.5 {ELEVATED_FLOAT}",
+                        div { class: "flex items-end gap-1",
+                            textarea {
+                                id: "composer-box",
+                                rows: 1,
+                                value: "{text}",
+                                disabled: waiting_on_you,
+                                placeholder: "{placeholder}",
+                                "aria-label": "Message {bot.name}",
+                                class: "block max-h-[9rem] min-h-6 w-full resize-none overflow-y-auto bg-transparent px-1 py-1 text-[15px] leading-6 placeholder:text-ink-tertiary focus:outline-none",
+                                oninput: move |e| {
+                                    text.set(e.value());
+                                    document::eval(RESIZE_BOX);
+                                },
+                                onkeydown: move |e| {
+                                    if e.key() == Key::Enter && !e.modifiers().shift() && !e.data().is_composing() {
+                                        e.prevent_default();
+                                        submit();
+                                    }
+                                },
+                            }
+                            div { class: "flex items-center gap-1",
+                                if working {
+                                    button {
+                                        r#type: "button",
+                                        "aria-label": "Stop this turn",
+                                        title: "Stop",
+                                        class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                                        onclick: stop,
+                                        svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "currentColor", rect { x: "4", y: "4", width: "16", height: "16", rx: "2" } }
+                                    }
+                                }
+                                if has_text && !waiting_on_you {
+                                    button {
+                                        r#type: "button",
+                                        "aria-label": if working { "Send when this turn finishes" } else { "Send" },
+                                        title: if working { "Sends when this turn finishes" } else { "Send" },
+                                        style: if working { "" } else { "{button_style}" },
+                                        class: if working { "flex size-8 shrink-0 items-center justify-center rounded-full bg-raised text-ink-secondary hover:bg-raised-hover" } else { "bot-button flex size-8 shrink-0 items-center justify-center rounded-full" },
+                                        onclick: move |_| submit(),
+                                        if working {
+                                            svg { width: "15", height: "15", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                                circle { cx: "12", cy: "12", r: "10" }
+                                                path { d: "M12 6v6l4 2" }
+                                            }
+                                        } else {
+                                            svg { width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "1.75", stroke_linecap: "round", stroke_linejoin: "round",
+                                                path { d: "m5 12 7-7 7 7" }
+                                                path { d: "M12 19V5" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The typing box grows with its text, up to its max height.
+const RESIZE_BOX: &str = r#"requestAnimationFrame(() => { const box = document.getElementById("composer-box"); if (box) { box.style.height = "auto"; box.style.height = box.scrollHeight + "px"; } });"#;
 
 fn page_messages(page: &Value) -> Vec<Msg> {
     page["messages"].as_array().map(|list| list.iter().filter_map(Msg::from_wire).collect()).unwrap_or_default()
@@ -364,7 +587,7 @@ fn Row(message: Msg) -> Element {
 
 /// One tool step, as their `ToolActivity` chip draws it closed.
 #[component]
-fn Step(name: String, ok: Option<bool>) -> Element {
+fn Step(name: String, ok: Option<bool>, #[props(default)] live: bool) -> Element {
     let failed = ok == Some(false);
     let tone = if failed { "text-danger" } else { "text-ink-secondary" };
     rsx! {
@@ -376,6 +599,8 @@ fn Step(name: String, ok: Option<bool>) -> Element {
                             match ok {
                                 Some(true) => rsx! { Icon { path: CHECK, class: "text-success" } },
                                 Some(false) => rsx! { Icon { path: CROSS, class: "" } },
+                                // Still running: their working dots; a step that never reported back: a circle.
+                                None if live => rsx! { span { class: "inline-block size-3 animate-spin rounded-full border-[1.5px] border-ink-secondary border-t-transparent" } },
                                 None => rsx! { Icon { path: CIRCLE, class: "" } },
                             }
                         }
@@ -519,7 +744,7 @@ mod tests {
     use serde_json::json;
 
     fn step(id: &str, name: &str, at: f64) -> Msg {
-        Msg { id: id.into(), at, body: Body::Step { name: name.into(), ok: Some(true) } }
+        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) } }
     }
 
     #[test]
@@ -541,7 +766,7 @@ mod tests {
 
     #[test]
     fn steps_fold_into_runs() {
-        let reply = Msg { id: "r".into(), at: 3.0, body: Body::Reply("done".into()) };
+        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()) };
         let items = group(&[step("a", "Read", 1.0), step("b", "Read", 1.0), step("c", "Bash", 2.0), reply.clone(), step("d", "Edit", 4.0)]);
         assert_eq!(items.len(), 3);
         assert!(matches!(&items[0], Item::Run(steps) if steps.len() == 3));

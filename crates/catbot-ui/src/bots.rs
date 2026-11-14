@@ -79,6 +79,30 @@ impl Bot {
         query.is_empty() || self.name.to_lowercase().contains(&query) || self.preview().to_lowercase().contains(&query)
     }
 
+    /// A `bot` frame's news: its name, colour and what it's doing. A frame carries no
+    /// messages, so the preview and conversation are kept from what's known.
+    pub fn update_from(&mut self, newer: Bot) {
+        let last = self.last.take();
+        let thread_id = std::mem::take(&mut self.thread_id);
+        *self = newer;
+        if self.last.is_none() {
+            self.last = last;
+        }
+        if self.thread_id.is_empty() {
+            self.thread_id = thread_id;
+        }
+    }
+
+    /// A new or changed message in this bot's conversation, for the preview.
+    pub fn note_message(&mut self, message: &Value) {
+        if let Some(line) = line(message) {
+            let at = message["at"].as_f64().unwrap_or(0.0);
+            if self.last.as_ref().is_none_or(|last| at >= last.at) {
+                self.last = Some(Last { line, at });
+            }
+        }
+    }
+
     /// The letter on its stand-in mark.
     pub fn initial(&self) -> String {
         self.name.chars().find(|c| c.is_alphanumeric()).map(|c| c.to_uppercase().collect()).unwrap_or_else(|| "?".into())
@@ -207,6 +231,19 @@ mod tests {
         assert_eq!(step.preview(), "Codex is read-only");
         assert_eq!(Bot::from_wire(&wire(json!({ "busy": true, "activity": "working" }))).unwrap().preview(), "Working…");
         assert_eq!(Bot::from_wire(&wire(json!({ "busy": true, "activity": "waiting-on-you" }))).unwrap().preview(), "Waiting for you…");
+    }
+
+    #[test]
+    fn frames_keep_what_they_dont_carry() {
+        let mut bot = Bot::from_wire(&wire(json!({ "messages": [{ "kind": "text", "text": "old", "at": 1.0 }] }))).unwrap();
+        let frame = Bot::from_wire(&json!({ "id": "b1", "catbot": true, "name": "Kiwi 2", "color": "red", "activity": "working", "busy": true })).unwrap();
+        bot.update_from(frame);
+        assert_eq!((bot.name.as_str(), bot.activity, bot.thread_id.as_str()), ("Kiwi 2", Activity::Working, "t1"));
+        assert_eq!(bot.last.as_ref().unwrap().line, "old");
+        bot.note_message(&json!({ "kind": "text", "text": "**new**", "at": 2.0 }));
+        assert_eq!(bot.last.as_ref().unwrap().line, "new");
+        bot.note_message(&json!({ "kind": "text", "text": "older", "at": 0.5 }));
+        assert_eq!(bot.last.as_ref().unwrap().line, "new");
     }
 
     #[test]
