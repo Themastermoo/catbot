@@ -70,8 +70,8 @@ Each bot has its own instructions, model, approval setting and working folder, a
 everything said is saved. Data lives in `~/.local/share/catbot` (`$CATBOT_HOME` to move it):
 `catbot.db` (bots, conversations, messages) and `bots/<name>/` (each bot's folder).
 
-**Codex.** Bots can read and write the Codex vault at `~/Vault/Codex` (`$CATBOT_CODEX` to
-move it): they look there for context about you and your projects, and add notes when they
+**Codex.** Bots can read and write the Codex vault at `~/VaultCodex` (`$CATBOT_CODEX` to
+move it); they're told to follow its `AGENTS.md` protocol: they look there for context about you and your projects, and add notes when they
 learn something worth keeping. On the default approval setting every write asks you first;
 a bot set to `accept-edits` (or looser) can write there without asking. `--no-codex` on
 `bot new`, or `bot edit --codex false`, keeps a bot out.

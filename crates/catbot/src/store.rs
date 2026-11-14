@@ -26,13 +26,13 @@ pub fn default_home() -> PathBuf {
     home.join(".local").join("share").join("catbot")
 }
 
-/// The Codex vault: `$CATBOT_CODEX`, else `~/Vault/Codex`.
+/// The Codex vault: `$CATBOT_CODEX`, else `~/VaultCodex`.
 pub fn default_codex() -> PathBuf {
     if let Some(codex) = std::env::var_os("CATBOT_CODEX") {
         return PathBuf::from(codex);
     }
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join("Vault").join("Codex")
+    home.join("VaultCodex")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

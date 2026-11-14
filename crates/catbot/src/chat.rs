@@ -45,7 +45,8 @@ pub fn system_prompt(bot: &Bot, codex: Option<&Path>) -> String {
              any index, home or README note). When you learn something durable that future bots should know, add or \
              update a note there: follow the vault's existing structure and naming, and link related notes with \
              [[wikilinks]]. Say briefly what you're saving there and why. \
-             Never put passwords, keys or other secrets in it.",
+             Never put passwords, keys or other secrets in it. If the vault has an AGENTS.md, read it first and \
+             follow it.",
             path = codex.display()
         ));
     }
@@ -245,11 +246,11 @@ mod tests {
         let bot = store
             .create_bot(NewBot { name: "Scout".into(), instructions: "Find things.".into(), model: None, mode: PermissionMode::Default, codex: true })
             .unwrap();
-        let with = system_prompt(&bot, Some(Path::new("/home/moo/Vault/Codex")));
+        let with = system_prompt(&bot, Some(Path::new("/home/moo/VaultCodex")));
         assert!(with.starts_with("You are Scout"));
         assert!(with.contains("Find things."));
         assert!(with.contains(&bot.folder.display().to_string()));
-        assert!(with.contains("/home/moo/Vault/Codex"));
+        assert!(with.contains("/home/moo/VaultCodex"));
         let without = system_prompt(&bot, None);
         assert!(!without.contains("Codex"));
     }

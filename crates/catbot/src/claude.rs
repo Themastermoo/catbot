@@ -384,7 +384,7 @@ mod tests {
             cli: vec!["claude".into()],
             isolated: true,
             approval_helper: None,
-            extra_dirs: vec!["/home/moo/Vault/Codex".into()],
+            extra_dirs: vec!["/home/moo/VaultCodex".into()],
         }
     }
 
@@ -395,7 +395,7 @@ mod tests {
         assert!(a.contains("--permission-mode default"));
         assert!(a.contains("--strict-mcp-config --setting-sources project"));
         assert!(a.contains("--model sonnet"));
-        assert!(a.contains("--add-dir /home/moo/Vault/Codex"));
+        assert!(a.contains("--add-dir /home/moo/VaultCodex"));
         assert!(a.contains("--append-system-prompt You are Assistant."));
         assert!(a.ends_with("--session-id 11111111-2222-4333-8444-555555555555"));
 
