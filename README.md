@@ -26,7 +26,23 @@ home Linux box runs the agents (`claude`, `codex`), and any paired device
 
 Runtime data (database, transcripts, keys) lives outside this repo, never in it.
 
-## Running the interface on Catbot
+## Catbot's own interface
+
+Being rewritten in Rust with [Dioxus](https://dioxuslabs.com) 0.7 (`crates/catbot-ui`), keeping
+OpenMausBot's look: its stylesheet and fonts are reused with credit (see `NOTICE`). It follows the
+system's light or dark setting. Built in slices; so far it's the frame of the app.
+
+```sh
+scripts/setup.sh          # once: adds the WebAssembly target and dx 0.7.10 (step 6)
+scripts/build-ui.sh       # builds the interface (run again after changing it)
+cargo run -- serve        # then open http://127.0.0.1:8788
+```
+
+`catbot serve` serves the interface for every address outside `/api`, from
+`target/dx/catbot-ui/release/web/public` (`--ui` to change). OpenMausBot's interface on port 5199
+keeps working at the same time.
+
+## Running OpenMausBot's interface on Catbot
 
 ```sh
 # tab 1: the reference server (still answers everything Catbot doesn't yet)

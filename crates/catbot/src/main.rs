@@ -107,6 +107,9 @@ enum Command {
         /// Also record what goes to the reference server, into ~/Projects/catbot-traffic.
         #[arg(long)]
         record: bool,
+        /// Catbot's interface: the `public` folder of its dx build, served at `/`.
+        #[arg(long, default_value = "target/dx/catbot-ui/release/web/public")]
+        ui: PathBuf,
     },
     /// Pass every request through to the reference server and record it.
     Record {
@@ -244,7 +247,7 @@ async fn run() -> Result<(), BoxError> {
             }
             Ok(())
         }
-        Command::Serve { listen, upstream, cli, record } => {
+        Command::Serve { listen, upstream, cli, record, ui } => {
             server::serve(server::Options {
                 listen,
                 upstream,
@@ -252,6 +255,7 @@ async fn run() -> Result<(), BoxError> {
                 codex: store::default_codex(),
                 cli: vec![cli],
                 record: record.then(default_traffic_dir),
+                ui: Some(ui),
             })
             .await
         }

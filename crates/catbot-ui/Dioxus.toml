@@ -1,0 +1,8 @@
+[application]
+name = "catbot-ui"
+
+[web.app]
+title = "Catbot"
+
+[web.watcher]
+watch_path = ["src", "assets", "tailwind.css"]

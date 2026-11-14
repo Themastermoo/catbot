@@ -74,6 +74,8 @@ pub fn bot(store: &Store, bot: &Bot, activity: &str, messages: Option<usize>) ->
     let updated = epoch_ms(&conversation.updated_at).max(epoch_ms(&conversation.created_at));
     let mut wire = json!({
         "id": bot.id,
+        // Marks Catbot's own bots, so Catbot's interface can tell them from the reference server's.
+        "catbot": true,
         "threadId": conversation.id,
         "mainThreadId": conversation.id,
         "name": bot.name,
@@ -195,6 +197,7 @@ mod tests {
 
         let wire = bot_value(&store, &bot, Some(50));
         assert_eq!(wire["threadId"], conversation.id);
+        assert_eq!(wire["catbot"], true);
         assert_eq!(wire["approvalMode"], "edits");
         assert_eq!(wire["modelSelection"], json!({"instanceId": "claude", "model": "claude-opus-5-5"}));
         assert_eq!(wire["soulHash"].as_str().unwrap().len(), 64);

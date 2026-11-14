@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
-members = ["crates/catbot"]
+members = ["crates/catbot", "crates/catbot-ui"]
+# `cargo build` / `cargo test` at the top build the server; the interface is built with `dx` (see README).
+default-members = ["crates/catbot"]
 
 [workspace.package]
 edition = "2024"

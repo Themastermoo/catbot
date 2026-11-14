@@ -36,6 +36,15 @@ fn reference_server() -> Router {
 
 use futures_util::StreamExt;
 
+/// A stand-in interface build: an index page and one asset.
+fn ui_dir(base: &std::path::Path) -> std::path::PathBuf {
+    let ui = base.join("ui");
+    std::fs::create_dir_all(ui.join("assets")).unwrap();
+    std::fs::write(ui.join("index.html"), "<!doctype html><title>Catbot</title>").unwrap();
+    std::fs::write(ui.join("assets/app.css"), "body{}").unwrap();
+    ui
+}
+
 struct Setup {
     base: String,
     _dir: tempfile::TempDir,
@@ -59,6 +68,7 @@ async fn setup() -> Setup {
         dir.path().join("no-codex"),
         vec!["python3".into(), FAKE_CLAUDE.into()],
         Some(vec![env!("CARGO_BIN_EXE_catbot").into()]),
+        Some(ui_dir(dir.path())),
     );
     let addr = listen(server::router(app)).await;
     Setup { base: format!("http://{addr}"), _dir: dir }
@@ -243,4 +253,28 @@ async fn bots_are_renamed_retuned_and_deleted() {
     assert_eq!(s.call("DELETE", &format!("/api/bots/{bot}"), None).await.0, 200);
     let (_, list) = s.call("GET", "/api/bots", None).await;
     assert_eq!(list["bots"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn the_interface_is_served_beside_the_api() {
+    let s = setup().await;
+    let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
+    let get = |path: &str| {
+        let req = hyper::Request::get(format!("{}{path}", s.base)).body(Full::new(Bytes::new())).unwrap();
+        let client = client.clone();
+        async move {
+            let resp = client.request(req).await.unwrap();
+            let status = resp.status().as_u16();
+            let body = resp.into_body().collect().await.unwrap().to_bytes();
+            (status, String::from_utf8_lossy(&body).into_owned())
+        }
+    };
+    let (status, page) = get("/").await;
+    assert_eq!(status, 200);
+    assert!(page.contains("<title>Catbot</title>"));
+    assert_eq!(get("/assets/app.css").await, (200, "body{}".to_string()));
+    // A page address with no file of its own gets the app, which routes it.
+    assert!(get("/bots/some-bot").await.1.contains("<title>Catbot</title>"));
+    // The API is still the API.
+    assert_eq!(s.call("GET", "/api/config", None).await.1, json!({ "from": "reference" }));
 }

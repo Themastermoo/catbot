@@ -45,6 +45,8 @@ pub struct Options {
     pub cli: Vec<String>,
     /// Record the traffic passed to the reference server into this folder.
     pub record: Option<PathBuf>,
+    /// Catbot's own interface (the `dx` build's `public` folder), served at `/`.
+    pub ui: Option<PathBuf>,
 }
 
 pub struct App {
@@ -56,11 +58,20 @@ pub struct App {
     pub cli: Vec<String>,
     /// The approval helper (this program), so every turn can ask before it acts.
     pub helper: Option<Vec<String>>,
+    /// Catbot's own interface, when built: served for every path outside `/api`.
+    pub ui: Option<PathBuf>,
 }
 
 impl App {
-    pub fn new(store: Store, proxy: Arc<Proxy>, codex: PathBuf, cli: Vec<String>, helper: Option<Vec<String>>) -> Arc<Self> {
-        Arc::new(Self { store: Mutex::new(store), hub: hub::Hub::default(), turns: turns::Turns::default(), proxy, codex, cli, helper })
+    pub fn new(
+        store: Store,
+        proxy: Arc<Proxy>,
+        codex: PathBuf,
+        cli: Vec<String>,
+        helper: Option<Vec<String>>,
+        ui: Option<PathBuf>,
+    ) -> Arc<Self> {
+        Arc::new(Self { store: Mutex::new(store), hub: hub::Hub::default(), turns: turns::Turns::default(), proxy, codex, cli, helper, ui })
     }
 
     /// Runs `f` with the store, logging (and swallowing) any error.
@@ -106,14 +117,24 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
     let proxy = Proxy::new(&options.upstream, recorder, 16 * 1024)?;
     let helper = Some(vec![std::env::current_exe()?.to_string_lossy().into_owned()]);
     let bots = store.bots()?.len();
-    let app = App::new(store, proxy, options.codex, options.cli, helper);
+    let ui = options.ui.filter(|dir| {
+        let built = dir.join("index.html").is_file();
+        if !built {
+            eprintln!("catbot: no interface build at {} (build it with dx, see README); serving the API only", dir.display());
+        }
+        built
+    });
+    let app = App::new(store, proxy, options.codex, options.cli, helper, ui.clone());
 
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
         .map_err(|err| format!("could not listen on {}: {err} (is something else using that port?)", options.listen))?;
     eprintln!("catbot: serving http://{} ({bots} Catbot bot(s) in {})", options.listen, options.home.display());
     eprintln!("catbot: everything else goes to the reference server at {}", app.proxy.upstream());
-    eprintln!("catbot: start the interface with OMB_PORT={} pnpm dev", options.listen.port());
+    match &ui {
+        Some(dir) => eprintln!("catbot: Catbot's interface: http://{} (from {})", options.listen, dir.display()),
+        None => eprintln!("catbot: OpenMausBot's interface: start it with OMB_PORT={} pnpm dev", options.listen.port()),
+    }
 
     axum::serve(listener, router(app)).await?;
     Ok(())
@@ -143,7 +164,25 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             respond(thread_route(&app, &id, &rest, req).await)
         }
+        _ if serves_ui(&app, &path) => serve_ui(&app, req).await,
         _ => app.proxy.handle(req).await,
+    }
+}
+
+/// Every path outside the API is Catbot's interface, when it has one.
+fn serves_ui(app: &App, path: &str) -> bool {
+    app.ui.is_some() && !path.starts_with("/api/") && path != "/api" && !path.starts_with("/.well-known/")
+}
+
+/// A file of the interface, or its `index.html` for any page address it doesn't have as a file.
+async fn serve_ui(app: &App, req: Request) -> Response {
+    use tower::ServiceExt;
+    use tower_http::services::{ServeDir, ServeFile};
+    let Some(dir) = &app.ui else { return StatusCode::NOT_FOUND.into_response() };
+    let files = ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html")));
+    match files.oneshot(req).await {
+        Ok(response) => response.into_response(),
+        Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
     }
 }
 
