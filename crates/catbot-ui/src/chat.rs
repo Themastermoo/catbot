@@ -43,7 +43,15 @@ pub enum Body {
     /// A step of the bot's work: a tool it used, or a note. `ok` is None while it runs.
     Step { name: String, ok: Option<bool> },
     /// An approval card: what the bot asked to do, and how the person answered.
-    Card { title: String, subtitle: String, answer: Answer },
+    Card {
+        title: String,
+        subtitle: String,
+        answer: Answer,
+        /// The question's id, for answering it.
+        request_id: Option<String>,
+        /// The tool asked for ("Bash", "Write", ...).
+        tool: Option<String>,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +89,8 @@ impl Msg {
                     title: card["title"].as_str().unwrap_or("Approval needed").to_string(),
                     subtitle: card["subtitle"].as_str().unwrap_or_default().to_string(),
                     answer,
+                    request_id: card["requestId"].as_str().map(str::to_string),
+                    tool: card["tool"].as_str().map(str::to_string),
                 }
             }
             _ => return None,
@@ -264,6 +274,10 @@ pub fn Chat(bot: Bot) -> Element {
         })
         .collect();
     let working = bot.activity != Activity::Idle || live.is_some();
+    // Questions waiting for the person: unanswered cards, while the bot is actually waiting.
+    // (A card left unanswered by a turn that's gone, say after a restart, isn't asking anymore.)
+    let asking = bot.activity == Activity::WaitingOnYou;
+    let pending: Vec<Pending> = if asking { pending_approvals(&messages) } else { Vec::new() };
     rsx! {
         main { class: "relative flex h-full min-w-0 flex-1 flex-col bg-app",
             ChatHead { bot: bot.clone() }
@@ -305,8 +319,8 @@ pub fn Chat(bot: Bot) -> Element {
                             }
                             {
                                 match item {
-                                    Item::One(m) => rsx! { Row { message: m } },
-                                    Item::Run(steps) => rsx! { Run { steps } },
+                                    Item::One(m) => rsx! { Row { message: m, bot_name: bot.name.clone(), asking } },
+                                    Item::Run(steps) => rsx! { Run { steps, bot_name: bot.name.clone(), asking } },
                                 }
                             }
                         }
@@ -318,7 +332,7 @@ pub fn Chat(bot: Bot) -> Element {
                     }
                 }
             }
-            Composer { bot: bot.clone(), working, on_send: move |_| following.set(true) }
+            Composer { bot: bot.clone(), working, pending, on_send: move |_| following.set(true) }
         }
     }
 }
@@ -360,7 +374,7 @@ fn Working() -> Element {
 /// Shift+Enter starts a new line. While the bot works the box stays open; what's sent then
 /// waits and goes when the turn ends, as theirs does. Stop ends the turn.
 #[component]
-fn Composer(bot: Bot, working: bool, on_send: EventHandler<()>) -> Element {
+fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandler<()>) -> Element {
     let mut state = use_context::<Signal<State>>();
     let mut text = use_signal(String::new);
     let mut queued = use_signal(|| None::<String>);
@@ -412,7 +426,7 @@ fn Composer(bot: Bot, working: bool, on_send: EventHandler<()>) -> Element {
     };
 
     let stop_bot = bot.clone();
-    let stop = move |_| {
+    let stop = use_callback(move |_: ()| {
         let bot = stop_bot.clone();
         queued.set(None);
         spawn(async move {
@@ -421,7 +435,7 @@ fn Composer(bot: Bot, working: bool, on_send: EventHandler<()>) -> Element {
                 problem.set(Some(err));
             }
         });
-    };
+    });
 
     let placeholder = if waiting_on_you {
         "Answer the approval above to continue".to_string()
@@ -440,6 +454,9 @@ fn Composer(bot: Bot, working: bool, on_send: EventHandler<()>) -> Element {
                         span { class: "min-w-0 flex-1", "{err}" }
                         button { r#type: "button", class: "flex size-5 shrink-0 items-center justify-center rounded hover:bg-danger/10", "aria-label": "Dismiss", onclick: move |_| problem.set(None), "×" }
                     }
+                }
+                if let Some(question) = pending.first() {
+                    ApprovalPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len(), on_cancel_turn: move |_| stop(()) }
                 }
                 if let Some(words) = queued() {
                     div { class: "mb-2 flex items-center gap-2 rounded-lg border border-hairline/40 bg-panel px-3 py-2 text-[13px] text-ink-secondary",
@@ -477,7 +494,7 @@ fn Composer(bot: Bot, working: bool, on_send: EventHandler<()>) -> Element {
                                         "aria-label": "Stop this turn",
                                         title: "Stop",
                                         class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
-                                        onclick: stop,
+                                        onclick: move |_| stop(()),
                                         svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "currentColor", rect { x: "4", y: "4", width: "16", height: "16", rx: "2" } }
                                     }
                                 }
@@ -546,7 +563,7 @@ fn EmptyChat(bot: Bot) -> Element {
 
 /// One message: the person's bubble on the right, the bot's reply on the left, a step, or a card.
 #[component]
-fn Row(message: Msg) -> Element {
+fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] asking: bool) -> Element {
     let when = clock(message.at);
     let full_time = full_date(message.at);
     match &message.body {
@@ -581,7 +598,10 @@ fn Row(message: Msg) -> Element {
             }
         }
         Body::Step { name, ok } => rsx! { Step { name: name.clone(), ok: *ok } },
-        Body::Card { title, subtitle, answer } => rsx! { Card { title: title.clone(), subtitle: subtitle.clone(), answer: *answer } },
+        Body::Card { subtitle, answer, tool, .. } => {
+            let answer = settled_answer(*answer, asking);
+            rsx! { ApprovalRow { line: approval_line(&bot_name, tool.as_deref()), detail: approval_detail(subtitle, tool.as_deref()), answer } }
+        }
     }
 }
 
@@ -614,7 +634,7 @@ fn Step(name: String, ok: Option<bool>, #[props(default)] live: bool) -> Element
 
 /// Two or more steps in a row, folded into one line that opens to show them (their `ActivityRun`).
 #[component]
-fn Run(steps: Vec<Msg>) -> Element {
+fn Run(steps: Vec<Msg>, #[props(default)] bot_name: String, #[props(default)] asking: bool) -> Element {
     let mut open = use_signal(|| false);
     let summary = describe_run(&steps);
     let pill = "flex min-w-0 max-w-full items-center gap-2 rounded-full border border-hairline/40 bg-panel px-3 py-1.5 text-[13px] text-ink-secondary hover:bg-control";
@@ -628,7 +648,7 @@ fn Run(steps: Vec<Msg>) -> Element {
                     }
                 }
                 for step in steps {
-                    Row { key: "{step.id}", message: step }
+                    Row { key: "{step.id}", message: step, bot_name: bot_name.clone(), asking }
                 }
             }
         };
@@ -644,23 +664,215 @@ fn Run(steps: Vec<Msg>) -> Element {
     }
 }
 
-/// An approval card, read only. Answering it arrives with stage 6.5.
+/// A question the bot is waiting on, for the panel above the typing box.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    pub request_id: String,
+    pub tool: Option<String>,
+    pub subtitle: String,
+}
+
+/// Unanswered approval cards, oldest first (their `pendingApprovals`).
+pub fn pending_approvals(messages: &[Msg]) -> Vec<Pending> {
+    messages
+        .iter()
+        .filter_map(|m| match &m.body {
+            Body::Card { answer: Answer::Waiting, request_id: Some(id), tool, subtitle, .. } => {
+                Some(Pending { request_id: id.clone(), tool: tool.clone(), subtitle: subtitle.clone() })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// How a card reads now: one still marked waiting whose bot isn't asking anymore had its turn end.
+fn settled_answer(answer: Answer, asking: bool) -> Answer {
+    if answer == Answer::Waiting && !asking { Answer::Dismissed } else { answer }
+}
+
+/// Their tool phrases (`toolLabel`): "run a command", "write a file"…
+pub fn tool_phrase(tool: Option<&str>) -> String {
+    match tool {
+        None => "take an action".into(),
+        Some("Bash" | "shell") => "run a command".into(),
+        Some("Read" | "read") => "read a file".into(),
+        Some("Write") => "write a file".into(),
+        Some("Edit" | "MultiEdit" | "edit") => "edit a file".into(),
+        Some("WebFetch" | "fetch") => "fetch a web page".into(),
+        Some("WebSearch") => "search the web".into(),
+        Some("delete") => "delete a file".into(),
+        Some("tool") => "use a tool".into(),
+        Some(other) => match other.strip_prefix("mcp__").map(|rest| rest.splitn(2, "__").collect::<Vec<_>>()) {
+            Some(parts) if parts.len() == 2 => format!("{} · {}", parts[0], parts[1].replace('_', " ")),
+            _ => other.replace('_', " "),
+        },
+    }
+}
+
+/// "Kiwi wants to run a command".
+pub fn approval_line(bot_name: &str, tool: Option<&str>) -> String {
+    let action = tool_phrase(tool);
+    if bot_name.is_empty() { format!("Wants to {action}") } else { format!("{bot_name} wants to {action}") }
+}
+
+/// What exactly it wants to do: the card's summary without the tool's name in front.
+pub fn approval_detail(subtitle: &str, tool: Option<&str>) -> String {
+    let subtitle = subtitle.trim();
+    match tool.and_then(|tool| subtitle.strip_prefix(tool)) {
+        Some(rest) if rest.starts_with(' ') => rest.trim().to_string(),
+        Some("") => String::new(),
+        _ => subtitle.to_string(),
+    }
+}
+
+/// Their code chip for a request's detail (`APPROVAL_CODE_CHIP`).
+const APPROVAL_CODE_CHIP: &str = "inline-flex min-w-0 max-w-full items-baseline rounded-full bg-inset px-2 pb-px pt-[3px] font-mono text-[13px] leading-5 text-ink";
+
+/// An approval in the conversation, as their `CompactApprovalRow`: who wanted what, and how it
+/// ended. While the question is open the row stays out of sight; the panel above the typing
+/// box asks it.
 #[component]
-fn Card(title: String, subtitle: String, answer: Answer) -> Element {
-    let (status, tone) = match answer {
-        Answer::Waiting => ("Waiting for your answer", "text-warning"),
-        Answer::Allowed => ("Allowed", "text-success"),
-        Answer::Denied => ("Denied", "text-danger"),
-        Answer::Dismissed => ("No answer before the turn ended", "text-ink-secondary"),
+fn ApprovalRow(line: String, detail: String, answer: Answer) -> Element {
+    let mut open = use_signal(|| false);
+    if answer == Answer::Waiting {
+        return rsx! {
+            div { "data-approval-row": "pending", class: "sr-only", "{line} {detail}. Waiting for your answer below" }
+        };
+    }
+    let (status, icon, icon_class) = match answer {
+        Answer::Allowed => ("Allowed", CHECK, "text-success"),
+        Answer::Denied => ("Denied", CROSS, ""),
+        _ => ("No answer before the turn ended", CLOCK, ""),
     };
     rsx! {
-        div { class: "flex w-full justify-start",
-            div { class: "w-full max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct))] rounded-2xl px-4 py-3 {ELEVATED_FLOAT}",
-                div { class: "text-[14px] font-semibold text-ink", "{title}" }
-                if !subtitle.is_empty() {
-                    div { class: "mt-1 break-words font-mono text-[13px] text-ink-secondary", "{subtitle}" }
+        div { "data-approval-row": "settled", class: "w-full max-w-[840px] text-[13px] text-ink-tertiary",
+            div { class: "flex min-w-0 flex-wrap items-baseline gap-x-2 gap-y-1 leading-5",
+                span { class: "shrink-0 self-center", Icon { path: icon, class: icon_class, size: 14 } }
+                span { class: "min-w-0 break-words", "{line}" }
+                if !detail.is_empty() {
+                    span { role: "group", "aria-label": "Details", class: "min-w-0 max-w-full",
+                        button {
+                            r#type: "button",
+                            "aria-expanded": "{open}",
+                            title: "{detail}",
+                            class: "{APPROVAL_CODE_CHIP} text-left hover:bg-control focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus",
+                            onclick: move |_| open.toggle(),
+                            span { class: "truncate", "{detail}" }
+                        }
+                    }
                 }
-                div { class: "mt-2 text-[13px] font-medium {tone}", "{status}" }
+                span { class: "shrink-0", "aria-live": "polite", "· {status}" }
+            }
+            if open() {
+                pre {
+                    tabindex: 0,
+                    "aria-label": "Details",
+                    class: "mt-1.5 max-h-40 overflow-auto whitespace-pre-wrap break-words rounded-2xl bg-inset px-4 py-3 font-mono text-[12px] leading-relaxed text-ink",
+                    "{detail}"
+                }
+            }
+        }
+    }
+}
+
+// Their answer buttons (`AskCard.tsx`).
+const ASK_LOOK: &str = "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-focus disabled:opacity-40";
+const ASK_BUTTON_SHAPE: &str = "inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-full px-4 py-1.5 text-center text-[14px] font-medium leading-5 transition-colors [&>svg]:shrink-0 disabled:cursor-not-allowed pointer-coarse:min-h-11";
+const ASK_SECONDARY: &str = "bg-ink/[0.07] text-ink enabled:hover:bg-ink/[0.11] enabled:active:bg-ink/[0.15]";
+const ASK_QUIET: &str = "text-ink-secondary enabled:hover:bg-ink/[0.06] enabled:hover:text-ink enabled:active:bg-ink/[0.1]";
+const ASK_QUIET_BUTTON: &str = "inline-flex h-7 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-full px-3 text-[13px] font-medium leading-5 transition-colors -my-1 text-ink-tertiary hover:bg-ink/[0.07] hover:text-ink-secondary";
+
+/// The question waiting for an answer, above the typing box, as their `PendingApprovalPanel`:
+/// who asks and what for, the exact request, then Deny and Allow once. Cancel turn is under
+/// the details arrow.
+#[component]
+fn ApprovalPanel(bot: Bot, pending: Pending, count: usize, on_cancel_turn: EventHandler<()>) -> Element {
+    let mut open = use_signal(|| false);
+    let mut answering = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let line = approval_line(&bot.name, pending.tool.as_deref());
+    let detail = approval_detail(&pending.subtitle, pending.tool.as_deref());
+    let thread = bot.thread_id.clone();
+    let request = pending.request_id.clone();
+    let decide = move |behavior: &'static str| {
+        if answering() {
+            return;
+        }
+        answering.set(true);
+        problem.set(None);
+        let (thread, request) = (thread.clone(), request.clone());
+        spawn(async move {
+            let body = serde_json::json!({ "requestId": request, "behavior": behavior });
+            if let Err(err) = api::post(&format!("/api/threads/{thread}/respond"), &body).await {
+                problem.set(Some(err));
+                answering.set(false);
+            }
+            // On success the saved card changes and the panel goes away with it.
+        });
+    };
+    let allow_style = format!(
+        "--bot-button: var(--identity-{c}); --bot-button-ink: #ffffff; --bot-button-hover: color-mix(in srgb, var(--identity-{c}) 88%, #000000); --bot-button-pressed: color-mix(in srgb, var(--identity-{c}) 80%, #000000);",
+        c = bot.color
+    );
+    let details_id = format!("approval-details-{}", pending.request_id);
+    let (mut deny, mut allow) = (decide.clone(), decide);
+    let chevron: &'static str = if open() { "rotate-180 motion-safe:transition-transform" } else { "motion-safe:transition-transform" };
+    rsx! {
+        div { class: "mb-2 overflow-hidden rounded-[18px] bg-composer ring-[0.5px] ring-ink/10",
+            div { role: "region", "aria-label": "Approval needed", "data-ask-card": "approval", class: "px-4 pb-3.5 pt-3",
+                div { class: "flex min-w-0 items-center gap-2", "aria-live": "polite",
+                    div { class: "min-w-0 flex-1",
+                        div { "data-ask-header": true, class: "flex min-w-0 items-center gap-1.5 text-[13px] leading-[18px] text-ink-secondary",
+                            span { "aria-hidden": "true", class: "flex shrink-0", BotMark { color: bot.color.clone(), initial: bot.initial(), size: 16 } }
+                            span { dir: "auto", class: "min-w-0 truncate", "{line}" }
+                        }
+                    }
+                    if count > 1 {
+                        span { class: "shrink-0 rounded-full bg-ink/[0.06] px-2 text-[12px] leading-5 tabular-nums text-ink-secondary", "1 of {count}" }
+                    }
+                    button {
+                        r#type: "button",
+                        "aria-expanded": "{open}",
+                        "aria-controls": "{details_id}",
+                        "aria-label": if open() { "Hide details" } else { "Details" },
+                        title: if open() { "Hide details" } else { "Details" },
+                        class: "{ASK_QUIET_BUTTON} -me-2 w-7 px-0",
+                        onclick: move |_| open.toggle(),
+                        Icon { path: CHEVRON_DOWN, class: chevron, size: 16 }
+                    }
+                }
+                if !detail.is_empty() {
+                    div { class: "mt-2",
+                        div { dir: "auto", "aria-label": "Review the details", class: "rounded-xl bg-ink/[0.045] px-3 py-2 font-mono text-[12px] leading-[18px] whitespace-pre-wrap text-ink-secondary [overflow-wrap:anywhere]", "{detail}" }
+                    }
+                }
+                if let Some(err) = problem() {
+                    p { role: "alert", class: "mt-2 text-[13px] leading-[18px] text-warning", "Couldn't answer: {err}" }
+                }
+                div { class: "mt-3 flex flex-wrap items-center justify-end gap-2",
+                    button {
+                        r#type: "button",
+                        "data-approval-action": "deny",
+                        disabled: answering(),
+                        class: "{ASK_BUTTON_SHAPE} {ASK_LOOK} {ASK_SECONDARY}",
+                        onclick: move |_| deny("deny"),
+                        "Deny"
+                    }
+                    button {
+                        r#type: "button",
+                        "data-approval-action": "allow",
+                        disabled: answering(),
+                        class: "bot-button {ASK_BUTTON_SHAPE} {ASK_LOOK}",
+                        style: "{allow_style}",
+                        onclick: move |_| allow("allow"),
+                        "Allow once"
+                    }
+                }
+                div { id: "{details_id}", hidden: !open(), class: "mt-3 space-y-2",
+                    div { class: "flex flex-wrap items-center gap-2",
+                        button { r#type: "button", class: "{ASK_BUTTON_SHAPE} {ASK_LOOK} {ASK_QUIET}", onclick: move |_| on_cancel_turn.call(()), "Cancel turn" }
+                    }
+                }
             }
         }
     }
@@ -671,14 +883,16 @@ const CHECK: &str = "M20 6 9 17l-5-5";
 const CROSS: &str = "M18 6 6 18M6 6l12 12";
 const CHEVRON: &str = "m9 18 6-6-6-6";
 const CIRCLE: &str = "M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20";
+const CLOCK: &str = "M12 2a10 10 0 1 0 0 20a10 10 0 1 0 0-20M12 6v6l4 2";
+const CHEVRON_DOWN: &str = "m6 9 6 6 6-6";
 
 #[component]
-fn Icon(path: &'static str, class: &'static str) -> Element {
+fn Icon(path: &'static str, class: &'static str, #[props(default = 13)] size: u32) -> Element {
     rsx! {
         svg {
             class: "shrink-0 {class}",
-            width: "13",
-            height: "13",
+            width: "{size}",
+            height: "{size}",
             view_box: "0 0 24 24",
             fill: "none",
             stroke: "currentColor",
@@ -777,6 +991,28 @@ mod tests {
         }
         let many: Vec<Msg> = ["A", "B", "C", "D", "E"].iter().enumerate().map(|(i, n)| step(&i.to_string(), n, 1.0)).collect();
         assert_eq!(describe_run(&many), "5 steps · A, B, C +2 more");
+    }
+
+    #[test]
+    fn approvals_read_like_theirs() {
+        assert_eq!(approval_line("Kiwi", Some("Bash")), "Kiwi wants to run a command");
+        assert_eq!(approval_line("Kiwi", Some("Write")), "Kiwi wants to write a file");
+        assert_eq!(approval_line("Kiwi", Some("mcp__catbot__approve_it")), "Kiwi wants to catbot · approve it");
+        assert_eq!(approval_detail("Bash cd ~/x && ls", Some("Bash")), "cd ~/x && ls");
+        assert_eq!(approval_detail("Bashful thing", Some("Bash")), "Bashful thing");
+        assert_eq!(approval_detail("Write", Some("Write")), "");
+        assert_eq!(settled_answer(Answer::Waiting, false), Answer::Dismissed);
+        assert_eq!(settled_answer(Answer::Waiting, true), Answer::Waiting);
+        let card = |id: &str, answered: Option<&str>| {
+            let mut card = json!({ "title": "Approval needed", "subtitle": "Bash ls", "requestId": id, "tool": "Bash" });
+            if let Some(a) = answered {
+                card["answered"] = json!(a);
+            }
+            Msg::from_wire(&json!({ "id": format!("cb-{id}"), "at": 1.0, "role": "bot", "kind": "options", "card": card })).unwrap()
+        };
+        let pending = pending_approvals(&[card("r1", Some("allow")), card("r2", None), card("r3", None)]);
+        assert_eq!(pending.iter().map(|p| p.request_id.as_str()).collect::<Vec<_>>(), ["r2", "r3"]);
+        assert_eq!(pending[0].tool.as_deref(), Some("Bash"));
     }
 
     #[test]
