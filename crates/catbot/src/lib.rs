@@ -2,7 +2,12 @@
 
 pub mod approval;
 pub mod ask;
+pub mod bots;
+pub mod chat;
 pub mod claude;
+pub mod console;
 pub mod proxy;
 pub mod record;
 pub mod routes;
+pub mod server;
+pub mod store;

@@ -11,7 +11,7 @@ use std::{path::PathBuf, process::Stdio};
 
 use serde::Serialize;
 use serde_json::{Value, json};
-use crate::approval::{Broker, Decision};
+use crate::approval::{Answerer, Broker, Decision};
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
@@ -73,6 +73,8 @@ pub struct Turn {
     /// The program that runs `catbot` (normally this very binary). When given, anything that
     /// needs a yes becomes an [`Event::ApprovalRequested`]; without it, such steps are refused.
     pub approval_helper: Option<Vec<String>>,
+    /// More folders the bot may use besides `cwd` (the Codex vault). Writes there still ask.
+    pub extra_dirs: Vec<PathBuf>,
 }
 
 /// What a turn reports while it runs.
@@ -133,6 +135,9 @@ pub fn args(turn: &Turn) -> Vec<String> {
     }
     if let Some(model) = &turn.model {
         args.extend(["--model".into(), model.clone()]);
+    }
+    for dir in &turn.extra_dirs {
+        args.extend(["--add-dir".into(), dir.to_string_lossy().into_owned()]);
     }
     if let Some(system) = &turn.system_prompt {
         args.extend(["--append-system-prompt".into(), system.clone()]);
@@ -274,6 +279,11 @@ impl Running {
         self.broker.as_ref().map(Broker::dir)
     }
 
+    /// A handle for answering this turn's questions from elsewhere, if approvals are on.
+    pub fn answerer(&self) -> Option<Answerer> {
+        self.broker.as_ref().map(Broker::answerer)
+    }
+
     /// Answers an [`Event::ApprovalRequested`]. Returns false if it was already answered.
     pub fn answer(&self, id: &str, decision: Decision) -> bool {
         self.broker.as_ref().is_some_and(|broker| broker.answer(id, decision))
@@ -374,6 +384,7 @@ mod tests {
             cli: vec!["claude".into()],
             isolated: true,
             approval_helper: None,
+            extra_dirs: vec!["/home/moo/Vault/Codex".into()],
         }
     }
 
@@ -384,6 +395,7 @@ mod tests {
         assert!(a.contains("--permission-mode default"));
         assert!(a.contains("--strict-mcp-config --setting-sources project"));
         assert!(a.contains("--model sonnet"));
+        assert!(a.contains("--add-dir /home/moo/Vault/Codex"));
         assert!(a.contains("--append-system-prompt You are Assistant."));
         assert!(a.ends_with("--session-id 11111111-2222-4333-8444-555555555555"));
 

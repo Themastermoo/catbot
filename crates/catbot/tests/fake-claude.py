@@ -36,6 +36,18 @@ def ask_permission(tool_name, tool_input):
 
 session = arg_after("--session-id") or arg_after("--resume") or "none"
 message = json.loads(sys.stdin.readline())
+
+# Tests can see exactly how the CLI was started.
+import os
+if os.environ.get("FAKE_CLAUDE_LOG"):
+    with open(os.environ["FAKE_CLAUDE_LOG"], "a") as log:
+        log.write(json.dumps({"args": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
+
+# The real CLI, asked to resume a conversation it no longer has, answers with an error result.
+if (arg_after("--resume") or "").startswith("gone"):
+    out({"type": "result", "is_error": True, "result": f"No conversation found with session ID: {arg_after('--resume')}",
+         "session_id": arg_after("--resume")})
+    sys.exit(1)
 prompt = message["message"]["content"]
 
 if prompt == "crash":

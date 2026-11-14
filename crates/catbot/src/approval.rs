@@ -102,8 +102,31 @@ impl Broker {
 
     /// Answers a question. Returns false if it was already answered or its turn is gone.
     pub fn answer(&self, id: &str, decision: Decision) -> bool {
+        self.answerer().answer(id, decision)
+    }
+
+    /// A handle that can answer this turn's questions from anywhere (a web request, say).
+    pub fn answerer(&self) -> Answerer {
+        Answerer { pending: self.pending.clone() }
+    }
+}
+
+/// Answers a turn's approval questions. Cheap to clone; outlives nothing it shouldn't:
+/// once the turn is over, answering simply returns false.
+#[derive(Clone)]
+pub struct Answerer {
+    pending: Pending,
+}
+
+impl Answerer {
+    pub fn answer(&self, id: &str, decision: Decision) -> bool {
         let Some(reply) = self.pending.lock().expect("pending lock").remove(id) else { return false };
         reply.send(answer_line(id, &decision)).is_ok()
+    }
+
+    /// Whether this question is still waiting for an answer.
+    pub fn is_open(&self, id: &str) -> bool {
+        self.pending.lock().expect("pending lock").contains_key(id)
     }
 }
 

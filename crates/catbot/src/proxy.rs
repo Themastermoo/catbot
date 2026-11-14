@@ -37,49 +37,85 @@ use crate::record::{self, Record, Recorder};
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type HttpClient = Client<HttpConnector, Full<Bytes>>;
 
-struct App {
+/// Passes requests to the reference server unchanged, recording them when asked to.
+pub struct Proxy {
     client: HttpClient,
     upstream: Uri,
-    recorder: Recorder,
+    recorder: Option<Recorder>,
     cap: usize,
     next_id: AtomicU64,
 }
 
-pub async fn run(listen: SocketAddr, upstream: &str, out: &Path, cap: usize) -> Result<(), BoxError> {
-    let upstream: Uri = upstream.parse()?;
-    if upstream.scheme_str() != Some("http") || upstream.authority().is_none() {
-        return Err(format!("--upstream must look like http://127.0.0.1:8799, not {upstream}").into());
-    }
-    let (recorder, file) = Recorder::start(out).await?;
-    let mut connector = HttpConnector::new();
-    connector.set_nodelay(true);
-    let client = Client::builder(TokioExecutor::new()).build(connector);
-    let app = Arc::new(App { client, upstream: upstream.clone(), recorder, cap, next_id: AtomicU64::new(1) });
+type App = Proxy;
 
+impl Proxy {
+    pub fn new(upstream: &str, recorder: Option<Recorder>, cap: usize) -> Result<Arc<Self>, BoxError> {
+        let upstream: Uri = upstream.parse()?;
+        if upstream.scheme_str() != Some("http") || upstream.authority().is_none() {
+            return Err(format!("--upstream must look like http://127.0.0.1:8799, not {upstream}").into());
+        }
+        let mut connector = HttpConnector::new();
+        connector.set_nodelay(true);
+        let client = Client::builder(TokioExecutor::new()).build(connector);
+        Ok(Arc::new(Self { client, upstream, recorder, cap, next_id: AtomicU64::new(1) }))
+    }
+
+    pub fn upstream(&self) -> &Uri {
+        &self.upstream
+    }
+
+    /// Sends a request on and returns the reference server's answer (a 502 if it has none).
+    pub async fn handle(self: &Arc<Self>, req: Request) -> Response {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let path = req.uri().path().to_string();
+        let result = if req.headers().contains_key(header::UPGRADE) {
+            upgrade(self, id, req).await
+        } else {
+            forward(self, id, req).await
+        };
+        result.unwrap_or_else(|err| {
+            eprintln!("catbot: {path}: the reference server didn't answer: {err}");
+            (StatusCode::BAD_GATEWAY, format!("catbot: the reference server didn't answer: {err}\n")).into_response()
+        })
+    }
+
+    /// Sends a request the server builds itself (the bot list it merges, the event stream).
+    pub async fn request(&self, req: hyper::Request<Full<Bytes>>) -> Result<hyper::Response<Incoming>, BoxError> {
+        Ok(self.client.request(req).await?)
+    }
+
+    /// The reference server's address for a path (and query).
+    pub fn uri_for(&self, path_and_query: &str) -> Result<Uri, BoxError> {
+        let mut parts = self.upstream.clone().into_parts();
+        parts.path_and_query = Some(path_and_query.parse()?);
+        Ok(Uri::from_parts(parts)?)
+    }
+
+    fn record(&self, record: Record) {
+        if let Some(recorder) = &self.recorder {
+            recorder.write(record);
+        }
+    }
+}
+
+/// `catbot record`: nothing but the recording pass-through.
+pub async fn run(listen: SocketAddr, upstream: &str, out: &Path, cap: usize) -> Result<(), BoxError> {
+    let (recorder, file) = Recorder::start(out).await?;
+    let proxy = Proxy::new(upstream, Some(recorder), cap)?;
     let listener = tokio::net::TcpListener::bind(listen)
         .await
-        .map_err(|err| format!("could not listen on {listen}: {err} (is another catbot already running?)"))?;
-    eprintln!("catbot: recording http://{listen} -> {upstream}");
+        .map_err(|err| format!("could not listen on {listen}: {err} (is something else using that port?)"))?;
+    eprintln!("catbot: recording http://{listen} -> {}", proxy.upstream);
     eprintln!("catbot: writing {}", file.display());
     eprintln!("catbot: start the interface with OMB_PORT={} pnpm dev", listen.port());
 
-    let router = Router::new().fallback(handle).with_state(app);
+    let router = Router::new().fallback(handle).with_state(proxy);
     axum::serve(listener, router).await?;
     Ok(())
 }
 
-async fn handle(State(app): State<Arc<App>>, req: Request) -> Response {
-    let id = app.next_id.fetch_add(1, Ordering::Relaxed);
-    let path = req.uri().path().to_string();
-    let result = if req.headers().contains_key(header::UPGRADE) {
-        upgrade(&app, id, req).await
-    } else {
-        forward(&app, id, req).await
-    };
-    result.unwrap_or_else(|err| {
-        eprintln!("catbot: {path}: the reference server didn't answer: {err}");
-        (StatusCode::BAD_GATEWAY, format!("catbot: the reference server didn't answer: {err}\n")).into_response()
-    })
+async fn handle(State(proxy): State<Arc<Proxy>>, req: Request) -> Response {
+    proxy.handle(req).await
 }
 
 /// Headers that belong to one connection and are never passed along.
@@ -126,7 +162,7 @@ async fn forward(app: &Arc<App>, id: u64, req: Request) -> Result<Response, BoxE
 
     let mode = if resp_type.as_deref().is_some_and(|t| t.starts_with("text/event-stream")) {
         eprintln!("{:>6} {status} {path}  (live stream opened)", "SSE");
-        app.recorder.write(Record::SseOpen { id, at: record::now(), path, query, status });
+        app.record(Record::SseOpen { id, at: record::now(), path, query, status });
         Mode::Sse
     } else {
         Mode::Http(Some(Pending {
@@ -164,7 +200,7 @@ async fn upgrade(app: &Arc<App>, id: u64, mut req: Request) -> Result<Response, 
     let status = resp.status();
     let path = req.uri().path().to_string();
     eprintln!("{:>6} {} {path}  (websocket)", "WS", status.as_u16());
-    app.recorder.write(Record::Ws { id, at: record::now(), path: path.clone(), status: status.as_u16() });
+    app.record(Record::Ws { id, at: record::now(), path: path.clone(), status: status.as_u16() });
 
     let mut out = Response::builder().status(status);
     for (name, value) in resp.headers() {
@@ -226,7 +262,7 @@ impl Tee {
             Mode::Sse => {
                 if !data.is_empty() {
                     let data = record::sse_value(data, self.app.cap);
-                    self.app.recorder.write(Record::Sse { id: self.id, at: record::now(), data });
+                    self.app.record(Record::Sse { id: self.id, at: record::now(), data });
                 }
             }
         }
@@ -242,7 +278,7 @@ impl Tee {
                 let ms = p.started.elapsed().as_millis();
                 eprintln!("{:>6} {} {}  {ms}ms", p.method, p.status, p.path);
                 let resp_body = record::body_value(&self.captured, self.total, p.resp_type.as_deref(), self.app.cap);
-                self.app.recorder.write(Record::Http {
+                self.app.record(Record::Http {
                     id: self.id,
                     at: record::now(),
                     method: p.method,
@@ -258,7 +294,7 @@ impl Tee {
                 });
             }
             Mode::Sse => {
-                self.app.recorder.write(Record::SseClose { id: self.id, at: record::now(), bytes: self.total });
+                self.app.record(Record::SseClose { id: self.id, at: record::now(), bytes: self.total });
             }
         }
     }

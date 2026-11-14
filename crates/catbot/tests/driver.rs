@@ -16,6 +16,7 @@ fn turn(prompt: &str) -> Turn {
         cli: vec!["python3".into(), concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude.py").into()],
         isolated: true,
         approval_helper: None,
+        extra_dirs: Vec::new(),
     }
 }
 
