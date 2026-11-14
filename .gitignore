@@ -1,0 +1,21 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# Node / web build
+node_modules/
+dist/
+
+# Runtime data and secrets: never commit
+.env
+.env.*
+!.env.example
+*.db
+*.db-*
+/data/
+
+# Editors and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
