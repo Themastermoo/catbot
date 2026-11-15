@@ -443,6 +443,25 @@ impl Store {
         Ok(())
     }
 
+    /// Archives chats nobody has used since `cutoff`, and returns them. Each bot keeps its
+    /// newest chat and the one it opens to, and `busy` chats (working right now) are left.
+    pub fn archive_idle(&self, cutoff: chrono::DateTime<chrono::Utc>, busy: &dyn Fn(&str) -> bool) -> Result<Vec<Conversation>, BoxError> {
+        let mut archived = Vec::new();
+        for bot in self.bots()? {
+            let open = self.current_conversation(&bot.id)?.map(|c| c.id);
+            // Newest first: the first one is always kept.
+            for conversation in self.conversations(&bot.id)?.into_iter().skip(1) {
+                let idle_since = chrono::DateTime::parse_from_rfc3339(&conversation.updated_at).map(|t| t.with_timezone(&chrono::Utc));
+                let stale = idle_since.is_ok_and(|at| at < cutoff);
+                if conversation.archived_at.is_none() && stale && open.as_deref() != Some(&conversation.id) && !busy(&conversation.id) {
+                    self.set_archived(&conversation.id, true)?;
+                    archived.push(conversation);
+                }
+            }
+        }
+        Ok(archived)
+    }
+
     /// Deletes a chat and its messages. If its bot was opening to it, the bot opens to its
     /// latest chat instead.
     pub fn delete_conversation(&self, id: &str) -> Result<(), BoxError> {
@@ -791,6 +810,39 @@ mod tests {
         let conv = store.start_conversation("b1", Some("s1")).unwrap();
         assert_eq!(store.current_conversation("b1").unwrap().unwrap().title, None);
         assert_eq!(store.current_conversation("b1").unwrap().unwrap().id, conv.id);
+    }
+
+    #[test]
+    fn idle_chats_are_archived_but_not_the_newest_open_or_busy() {
+        let (_dir, store) = store();
+        let bot = store.create_bot(new("Kiwi")).unwrap();
+        let chats: Vec<Conversation> = (0..5).map(|_| store.new_conversation(&bot.id).unwrap()).collect();
+        let age = |c: &Conversation, days: i64| {
+            let at = (chrono::Utc::now() - chrono::Duration::days(days)).to_rfc3339();
+            store.conn.execute("UPDATE conversations SET updated_at = ?2 WHERE id = ?1", params![c.id, at]).unwrap();
+        };
+        // 0: recent. 1: old but open. 2: old and working. 3, 4: old and idle (4 is older).
+        age(&chats[0], 2);
+        age(&chats[1], 40);
+        age(&chats[2], 40);
+        age(&chats[3], 31);
+        age(&chats[4], 90);
+        store.open_conversation(&chats[1]).unwrap();
+        let working = chats[2].id.clone();
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+        let archived = store.archive_idle(cutoff, &|id| id == working).unwrap();
+        let mut ids: Vec<&str> = archived.iter().map(|c| c.id.as_str()).collect();
+        ids.sort();
+        let mut want = vec![chats[3].id.as_str(), chats[4].id.as_str()];
+        want.sort();
+        assert_eq!(ids, want);
+        assert!(store.archive_idle(cutoff, &|_| false).unwrap().iter().all(|c| c.id == chats[2].id), "only the chat that was busy is left to archive");
+
+        // A bot whose every chat is old keeps its newest.
+        let other = store.create_bot(new("Fern")).unwrap();
+        let only = store.ensure_conversation(&other.id).unwrap();
+        age(&only, 100);
+        assert!(store.archive_idle(cutoff, &|_| false).unwrap().is_empty());
     }
 
     #[test]

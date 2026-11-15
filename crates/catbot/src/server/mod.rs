@@ -158,8 +158,35 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
         None => eprintln!("catbot: OpenMausBot's interface: start it with OMB_PORT={} pnpm dev", options.listen.port()),
     }
 
+    tokio::spawn(tidy(app.clone(), archive_after_days()));
     axum::serve(listener, router(app)).await?;
     Ok(())
+}
+
+/// After how many days untouched a chat is archived: `CATBOT_ARCHIVE_DAYS`, else 30; 0 never.
+fn archive_after_days() -> u32 {
+    std::env::var("CATBOT_ARCHIVE_DAYS").ok().and_then(|d| d.trim().parse().ok()).unwrap_or(30)
+}
+
+/// Archives chats untouched for `days` days: at start, then once an hour. Each bot keeps its
+/// newest chat and the one it opens to; working chats are left alone.
+async fn tidy(app: Arc<App>, days: u32) {
+    if days == 0 {
+        return;
+    }
+    loop {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+        let archived = app.with_store(|store| store.archive_idle(cutoff, &|thread| app.turns.busy(thread))).unwrap_or_default();
+        if !archived.is_empty() {
+            eprintln!("catbot: archived {} chat(s) untouched for {days} days", archived.len());
+            let mut bots: Vec<&str> = archived.iter().map(|c| c.bot_id.as_str()).collect();
+            bots.dedup();
+            for bot in bots {
+                app.announce_bot(bot);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+    }
 }
 
 /// The whole server as a router, for `serve` and for tests.

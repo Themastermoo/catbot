@@ -123,6 +123,9 @@ everything said is saved. Data lives in `~/.local/share/catbot` (`$CATBOT_HOME` 
 bot's folder). A chat is named from the first line of its first message, then a quick call to
 Claude's small model (`haiku`) gives it a better name a few seconds later, unless you've
 renamed it. `CATBOT_TITLE_MODEL` picks another model, or `off` keeps the first-line names.
+Chats untouched for 30 days are archived (each bot keeps its newest chat and the one it opens
+to); they wait under Archived in the sidebar, and a new message brings one back.
+`CATBOT_ARCHIVE_DAYS` changes the 30, and `0` turns this off.
 
 **Codex.** Bots can read and write the Codex vault at `~/VaultCodex` (`$CATBOT_CODEX` to
 move it); they're told to follow its `AGENTS.md` protocol: they look there for context about you and your projects, and add notes when they
