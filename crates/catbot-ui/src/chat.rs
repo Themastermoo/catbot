@@ -180,10 +180,14 @@ fn js_offset_minutes(at: f64) -> f64 {
     js_sys::Date::new(&at.into()).get_timezone_offset()
 }
 
-/// Off the web (tests), days are counted in UTC.
+/// In the desktop app, the computer's own time zone (minutes behind UTC, as JavaScript counts).
 #[cfg(not(target_arch = "wasm32"))]
-fn js_offset_minutes(_at: f64) -> f64 {
-    0.0
+fn js_offset_minutes(at: f64) -> f64 {
+    use chrono::{Local, Offset, TimeZone};
+    match Local.timestamp_millis_opt(at as i64).single() {
+        Some(when) => -f64::from(when.offset().fix().local_minus_utc()) / 60.0,
+        None => 0.0,
+    }
 }
 
 /// How close to the bottom (px) still counts as reading the newest messages, so new ones scroll into view.
@@ -393,7 +397,9 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                 problem.set(Some(err));
                 // Give the words back, ahead of anything typed since.
                 let typed = text.peek().clone();
-                text.set(if typed.trim().is_empty() { words } else { format!("{words}\n{typed}") });
+                let back = if typed.trim().is_empty() { words } else { format!("{words}\n{typed}") };
+                set_box(&back);
+                text.set(back);
             }
         });
     });
@@ -412,7 +418,7 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         }
         problem.set(None);
         text.set(String::new());
-        document::eval(RESIZE_BOX);
+        set_box("");
         on_send.call(());
         if working {
             let mut q = queued.write();
@@ -471,7 +477,9 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                             textarea {
                                 id: "composer-box",
                                 rows: 1,
-                                value: "{text}",
+                                // The box keeps its own text; the program only listens (and clears it after
+                                // sending). Writing it back on every key loses keys in the desktop app, where
+                                // each key's round trip takes longer than the next key.
                                 disabled: waiting_on_you,
                                 placeholder: "{placeholder}",
                                 "aria-label": "Message {bot.name}",
@@ -526,6 +534,12 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
             }
         }
     }
+}
+
+/// Puts text in the typing box (and fits its height to it).
+fn set_box(text: &str) {
+    let text = serde_json::to_string(text).unwrap_or_else(|_| "\"\"".into());
+    document::eval(&format!(r#"const box = document.getElementById("composer-box"); if (box) {{ box.value = {text}; }} {RESIZE_BOX}"#));
 }
 
 /// The typing box grows with its text, up to its max height.
@@ -918,7 +932,7 @@ fn js_now() -> f64 {
     #[cfg(target_arch = "wasm32")]
     return js_sys::Date::now();
     #[cfg(not(target_arch = "wasm32"))]
-    return 0.0;
+    return chrono::Utc::now().timestamp_millis() as f64;
 }
 
 /// "Today", "Yesterday", or "Sat, Nov 14", as their `dayLabel` says it in English.
@@ -957,9 +971,19 @@ fn date_string(at: f64, fields: &[(&str, &str)], time_only: bool) -> String {
     }
 }
 
+/// The same three shapes in the desktop app, from the computer's clock and time zone.
 #[cfg(not(target_arch = "wasm32"))]
-fn date_string(at: f64, _fields: &[(&str, &str)], _time_only: bool) -> String {
-    format!("{at}")
+fn date_string(at: f64, fields: &[(&str, &str)], time_only: bool) -> String {
+    use chrono::{Local, TimeZone};
+    let Some(when) = Local.timestamp_millis_opt(at as i64).single() else { return String::new() };
+    let pattern = if time_only {
+        "%-I:%M %p" // 3:41 PM
+    } else if fields.iter().any(|(k, _)| *k == "weekday") {
+        "%a, %b %-d" // Sat, Nov 14
+    } else {
+        "%b %-d, %Y, %-I:%M %p" // Nov 14, 2026, 3:41 PM
+    };
+    when.format(pattern).to_string()
 }
 
 #[cfg(test)]

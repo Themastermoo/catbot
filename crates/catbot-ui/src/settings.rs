@@ -365,10 +365,10 @@ pub fn NewBotDialog(on_close: EventHandler<()>) -> Element {
                     }
                 }
                 label { class: LABEL, "Name"
-                    input { class: FIELD, maxlength: 60, placeholder: "New bot", autofocus: true, value: "{name}", oninput: move |e| name.set(e.value()) }
+                    input { class: FIELD, maxlength: 60, placeholder: "New bot", autofocus: true, oninput: move |e| name.set(e.value()) }
                 }
                 label { class: "mt-3 {LABEL}", "Instructions"
-                    textarea { class: "{FIELD} resize-y text-[13px] leading-relaxed", rows: 4, placeholder: "What this bot is for, and how it should work", value: "{soul}", oninput: move |e| soul.set(e.value()) }
+                    textarea { class: "{FIELD} resize-y text-[13px] leading-relaxed", rows: 4, placeholder: "What this bot is for, and how it should work", oninput: move |e| soul.set(e.value()) }
                 }
                 p { class: "mt-3 text-[12px] leading-relaxed text-ink-secondary",
                     "{shown_name} will ask before acting, and can use your Codex notes. Both can be changed in its settings."

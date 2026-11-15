@@ -46,7 +46,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                 div { class: "flex h-8 items-center gap-2 rounded-full px-3 focus-within:ring-focus {ELEVATED_CONTROL}",
                     SearchIcon {}
                     input {
-                        value: "{query}",
+                        id: "sidebar-search",
                         placeholder: "Search",
                         "aria-label": "Search bots and messages",
                         class: "w-full bg-transparent text-[13px] text-ink placeholder:text-ink-tertiary focus:outline-none",
@@ -54,6 +54,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                         onkeydown: move |e| {
                             if e.key() == Key::Escape {
                                 query.set(String::new());
+                                document::eval(r#"const box = document.getElementById("sidebar-search"); if (box) box.value = "";"#);
                             }
                         },
                     }

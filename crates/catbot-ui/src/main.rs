@@ -23,6 +23,13 @@ const STYLES: Asset = asset!("/assets/tailwind.css");
 const FONTS: Asset = asset!("/assets/fonts", AssetOptions::folder());
 
 fn main() {
+    #[cfg(feature = "desktop")]
+    {
+        use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
+        let window = WindowBuilder::new().with_title("Catbot").with_inner_size(LogicalSize::new(1280.0, 840.0)).with_min_inner_size(LogicalSize::new(720.0, 480.0));
+        dioxus::LaunchBuilder::desktop().with_cfg(Config::new().with_window(window).with_menu(None)).launch(App);
+    }
+    #[cfg(not(feature = "desktop"))]
     dioxus::launch(App);
 }
 
@@ -84,7 +91,7 @@ fn App() -> Element {
             })
             .await;
             // The stream ended (Catbot restarted, or the network dropped): try again shortly.
-            gloo_timers::future::TimeoutFuture::new(2_000).await;
+            events::pause(2_000).await;
         }
     });
     use_hook(catch_up);

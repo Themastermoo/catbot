@@ -192,12 +192,22 @@ fn random() -> f64 {
     js_sys::Math::random()
 }
 
+/// In the desktop app: splitmix64 over a counter that starts from the clock, so each run of
+/// the app makes different ids. (They only need to be unique, not secret.)
 #[cfg(not(target_arch = "wasm32"))]
 fn random() -> f64 {
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicU64, Ordering};
-    static SEED: AtomicU64 = AtomicU64::new(0x2545_f491_4f6c_dd1d);
-    let x = SEED.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed);
-    (x >> 11) as f64 / (1u64 << 53) as f64
+    static STATE: OnceLock<AtomicU64> = OnceLock::new();
+    let state = STATE.get_or_init(|| {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+        AtomicU64::new(now ^ u64::from(std::process::id()).rotate_left(32))
+    });
+    let mut z = state.fetch_add(0x9e37_79b9_7f4a_7c15, Ordering::Relaxed).wrapping_add(0x9e37_79b9_7f4a_7c15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    (z >> 11) as f64 / (1u64 << 53) as f64
 }
 
 /// The person's message as it's shown before the server has it.
