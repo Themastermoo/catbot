@@ -107,7 +107,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                     // Picture, colour and name.
                     div { class: CARD,
                         div { class: "mb-4 flex items-center gap-3",
-                            BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone() }
+                            BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
                             div { class: "min-w-0",
                                 div { class: "text-[15px] font-semibold text-ink truncate", "{bot.name}" }
                                 div { class: "text-[12px] text-ink-secondary", "Pick a picture and a colour" }
@@ -124,6 +124,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                                     title: "{label}",
                                     disabled: saving(),
                                     class: if bot.mark == mark { "flex items-center justify-center rounded-xl bg-raised p-2 ring-2 ring-accent" } else { "flex items-center justify-center rounded-xl p-2 hover:bg-raised" },
+                                    "data-cat-follow": true,
                                     onclick: move |_| change(json!({ "mark": mark })),
                                     BotMark { color: bot.color.clone(), initial: bot.initial(), size: 44, mark: mark.to_string() }
                                 }

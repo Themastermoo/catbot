@@ -38,6 +38,17 @@ pub enum Activity {
     WaitingOnYou,
 }
 
+impl Activity {
+    /// The name the bot pictures know this by (`BotMark`'s `state`).
+    pub fn mood(self) -> &'static str {
+        match self {
+            Activity::Idle => "idle",
+            Activity::Working => "working",
+            Activity::WaitingOnYou => "waiting",
+        }
+    }
+}
+
 /// The newest previewable message: its line and when it was sent (ms since the epoch).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Last {

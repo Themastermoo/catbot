@@ -84,7 +84,7 @@ fn BotRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element 
     let key_id = bot.id.clone();
     let waiting = bot.activity == Activity::WaitingOnYou;
     let working = bot.activity == Activity::Working;
-    let mood = if waiting { "waiting" } else if working { "working" } else { "idle" }.to_string();
+    let mood = bot.activity.mood().to_string();
     let row_state = if selected { "bg-raised" } else { "hover:bg-raised/50" };
     let preview_color = if waiting { "font-semibold text-warning" } else { "text-ink-secondary" };
     let time = bot.last.as_ref().filter(|_| selected).map(|last| clock(last.at));
@@ -96,6 +96,8 @@ fn BotRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element 
                 tabindex: 0,
                 "aria-current": if selected { "page" },
                 "data-sidebar-bot-row": "{bot.id}",
+                // The cat's eyes follow the pointer anywhere on its row (see `MASCOT_LIFE`).
+                "data-cat-follow": true,
                 class: "flex w-full items-center gap-3 rounded-xl py-2 pl-2.5 pr-9 text-left transition-colors duration-150 max-md:rounded-2xl max-md:py-2.5 {ROW_FOCUS} {row_state}",
                 onclick: move |_| on_select.call(id.clone()),
                 onkeydown: move |e| {

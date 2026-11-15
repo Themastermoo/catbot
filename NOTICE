@@ -13,6 +13,11 @@ OpenMausBot contributors, licensed under the Apache License, Version 2.0
   scans Catbot's sources.
 - The interface reproduces OpenMausBot's layout and Tailwind class names.
 - Catbot's server speaks OpenMausBot's wire protocol.
+- How Catbot's bot pictures move (crates/catbot-ui/assets/mascots.css and the page
+  script in crates/catbot-ui/src/mascots.rs) is adapted from OpenMausBot's
+  src/components/mascot-motion.ts, CursorAvatar.tsx and Avatar.tsx: the per-state
+  body motions, blink cadence and pointer gaze, rewritten as CSS animations and a
+  small script. The pictures themselves are Catbot's own.
 
 OpenMausBot's names and mascot are trademarks of Supamaus Software Private
 Limited; Catbot uses neither.

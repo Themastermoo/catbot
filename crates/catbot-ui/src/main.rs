@@ -19,6 +19,8 @@ use bots::Bot;
 use sidebar::Sidebar;
 
 const STYLES: Asset = asset!("/assets/tailwind.css");
+/// How the bot pictures move (Catbot's own; `tailwind.css` stays as OpenMausBot's).
+const MASCOT_STYLES: Asset = asset!("/assets/mascots.css");
 /// The bundled fonts, copied through as a folder so `fonts.css` finds its files beside it.
 const FONTS: Asset = asset!("/assets/fonts", AssetOptions::folder());
 
@@ -46,6 +48,7 @@ const FOLLOW_SYSTEM_SKIN: &str = r#"
 fn App() -> Element {
     use_hook(|| {
         document::eval(FOLLOW_SYSTEM_SKIN);
+        document::eval(mascots::MASCOT_LIFE);
     });
     let mut state = use_context_provider(|| Signal::new(live::State::default()));
     let mut selected = use_signal(|| None::<String>);
@@ -109,6 +112,7 @@ fn App() -> Element {
     rsx! {
         document::Stylesheet { href: "{FONTS}/fonts.css" }
         document::Stylesheet { href: STYLES }
+        document::Stylesheet { href: MASCOT_STYLES }
         div { class: "flex h-screen flex-col bg-app text-ink",
             div { class: "relative flex min-h-0 flex-1",
                 Sidebar { bots, selected }

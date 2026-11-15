@@ -1,0 +1,122 @@
+/* Life for Catbot's bot pictures: body motion, blinking, glancing and pointer-following.
+ *
+ * The motion approach and its numbers are after OpenMausBot's mascot-motion.ts (MOTION,
+ * bodyTransform), CursorAvatar.tsx (BLINK, blinkScale) and Avatar.tsx (POINTER_GAZE):
+ * Apache-2.0, see NOTICE. The cats themselves are Catbot's own art (src/mascots.rs).
+ *
+ * Everything here runs in the page, so the desktop app never round-trips to Rust per frame, and
+ * nothing ticks while nothing moves: a running CSS animation costs WebKitGTK a little every
+ * frame even while it holds still, so only the body runs one. Blinks and glances are one-shot,
+ * started by the page script (MASCOT_LIFE in src/mascots.rs) on its own random clock.
+ *
+ *   .catbot-mark[data-mark][data-state]     the picture; body motion (the whole picture)
+ *     .cat-blink                            the eyes; blinks once each time the script sets
+ *                                           data-blink on the picture
+ *       .cat-look                           turned toward the pointer: the script sets
+ *                                           --look-x / --look-y (each -1..1) and data-look
+ *         .cat-glance                       looks around: the script sets --glance-x / --glance-y
+ *
+ * Per picture, mascots.rs sets (once, never changed) --cat-k (a tempo, 0.85..1.2) and
+ * --cat-phase (a negative delay), so a sidebar full of cats never moves in step.
+ */
+
+.catbot-mark {
+  --cat-k: 1;
+  transform-origin: 50% 100%; /* the ground: squash and sway anchor at the bottom centre */
+}
+.catbot-mark[data-mark="letter"] { transform-origin: 50% 50%; }
+
+/* How far the eyes travel, in the cats' 64-unit drawing, and where the eye line is. */
+.catbot-mark[data-mark="cat-head"] { --gx: 3.2px; --gy: 1.7px; --eye-y: 37px; --scan-a: 0px; --scan-b: -6px; }
+.catbot-mark[data-mark="cat-head"][data-state="waiting"] { --gx: 2.3px; --gy: 1.6px; }
+.catbot-mark[data-mark="cat-sitting"] { --gx: 1.3px; --gy: 0.9px; --eye-y: 22.5px; --scan-a: 1.3px; --scan-b: -1.3px; }
+.catbot-mark[data-mark="cat-visor"] { --gx: 2.2px; --gy: 1.3px; --eye-y: 35.5px; --scan-a: 2.2px; --scan-b: -2.2px; }
+
+/* The eyes shut about the eye line. */
+.cat-blink { transform-origin: 32px var(--eye-y, 32px); }
+
+/* A glance, somewhere within the eyes' travel. */
+.cat-glance { translate: calc(var(--glance-x, 0) * var(--gx, 0px)) calc(var(--glance-y, 0) * var(--gy, 0px)); }
+
+/* Toward the pointer, and back to rest when it leaves. */
+.cat-look {
+  translate: calc(var(--look-x, 0) * var(--gx, 0px) + var(--look-rest-x, 0px)) calc(var(--look-y, 0) * var(--gy, 0px) + var(--look-rest-y, 0px));
+}
+/* The working cat head is drawn with its pupils aside; following the pointer starts from centre. */
+.catbot-mark[data-mark="cat-head"][data-state="working"][data-look] .cat-look { --look-rest-x: -3px; --look-rest-y: -1.5px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .cat-look { transition: translate 160ms ease-out; }
+  .cat-glance { transition: translate 240ms ease-in-out; }
+
+  /* ---- Body. Idle: their `pulse`, as a slow breath from the ground. It runs all day, so it
+     moves in small steps, about 12 a second (their small mascots draw 20 frames a second):
+     each step is under a tenth of a pixel. ---- */
+  .catbot-mark {
+    animation: cat-breathe calc(2600ms * var(--cat-k)) var(--cat-phase, 0s) infinite alternate;
+  }
+  .catbot-mark[data-mark="letter"] { animation-name: cat-pulse; }
+  /* Working: their `bob: [2.5, 900], squash: 0.22`. */
+  .catbot-mark[data-state="working"]:not([data-mark="letter"]) {
+    animation: cat-bob 900ms linear var(--cat-phase, 0s) infinite;
+  }
+  /* Waiting for the person: their "notifying", `bob: [4, 700], sway: [2.5, 700]`; the sway takes
+     two hops per swing so the cat rocks side to side as it bounces. */
+  .catbot-mark[data-state="waiting"]:not([data-mark="letter"]) {
+    animation: cat-hop 700ms linear var(--cat-phase, 0s) infinite, cat-sway 1400ms ease-in-out var(--cat-phase, 0s) infinite;
+  }
+
+  /* ---- One blink, about 320ms (their blinkScale). ---- */
+  .catbot-mark[data-blink] .cat-blink { animation: cat-blink 320ms linear; }
+
+  /* ---- Working: a quick left-right scan, in place of glances. Not while following the
+     pointer. Waiting has neither: the eyes stay on the person. ---- */
+  .catbot-mark[data-state="working"]:not([data-look]) .cat-glance { animation: cat-scan calc(2400ms * var(--cat-k)) ease-in-out infinite; }
+}
+
+/* A sine swing in four pieces, eight steps each. */
+@keyframes cat-breathe {
+  0% { scale: 1 1; animation-timing-function: steps(8); }
+  25% { scale: 1.0032 1.0058; animation-timing-function: steps(8); }
+  50% { scale: 1.011 1.02; animation-timing-function: steps(8); }
+  75% { scale: 1.0188 1.0342; animation-timing-function: steps(8); }
+  100% { scale: 1.022 1.04; }
+}
+@keyframes cat-pulse {
+  0% { scale: 1; animation-timing-function: steps(8); }
+  25% { scale: 1.0044; animation-timing-function: steps(8); }
+  50% { scale: 1.015; animation-timing-function: steps(8); }
+  75% { scale: 1.0256; animation-timing-function: steps(8); }
+  100% { scale: 1.03; }
+}
+/* A sine bob in four quarters; the squash comes only below rest, as in bodyTransform(). */
+@keyframes cat-bob {
+  0% { translate: 0 0; scale: 1 1; animation-timing-function: cubic-bezier(0.39, 0.58, 0.57, 1); }
+  25% { translate: 0 -4.5%; scale: 0.985 1.02; animation-timing-function: cubic-bezier(0.47, 0, 0.75, 0.72); }
+  50% { translate: 0 0; scale: 1 1; animation-timing-function: cubic-bezier(0.39, 0.58, 0.57, 1); }
+  75% { translate: 0 0; scale: 1.05 0.92; animation-timing-function: cubic-bezier(0.47, 0, 0.75, 0.72); }
+  100% { translate: 0 0; scale: 1 1; }
+}
+@keyframes cat-hop {
+  0% { translate: 0 0; scale: 1 1; animation-timing-function: cubic-bezier(0.39, 0.58, 0.57, 1); }
+  25% { translate: 0 -8%; scale: 0.98 1.03; animation-timing-function: cubic-bezier(0.47, 0, 0.75, 0.72); }
+  50% { translate: 0 0; scale: 1 1; animation-timing-function: cubic-bezier(0.39, 0.58, 0.57, 1); }
+  75% { translate: 0 0; scale: 1.07 0.9; animation-timing-function: cubic-bezier(0.47, 0, 0.75, 0.72); }
+  100% { translate: 0 0; scale: 1 1; }
+}
+@keyframes cat-sway {
+  0%, 100% { rotate: -3.5deg; }
+  50% { rotate: 3.5deg; }
+}
+
+/* Shut by 42% of the way, open again by the end, never thinner than 4% (their blinkScale). */
+@keyframes cat-blink {
+  0% { scale: 1 1; }
+  42% { scale: 1 0.04; }
+  100% { scale: 1 1; }
+}
+@keyframes cat-scan {
+  0%, 30% { translate: var(--scan-a) 0; }
+  50%, 80% { translate: var(--scan-b) 0; }
+  100% { translate: var(--scan-a) 0; }
+}
