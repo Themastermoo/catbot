@@ -58,7 +58,7 @@ pub enum After {
 
 impl State {
     fn owns_thread(&self, thread: &str) -> bool {
-        self.bots.iter().any(|b| b.thread_id == thread)
+        self.bots.iter().any(|b| b.has_chat(thread))
     }
 
     /// Puts a fetched page of messages in place: the newest page replaces what was there,
@@ -111,7 +111,7 @@ impl State {
                 if !self.owns_thread(thread) {
                     return After::Nothing;
                 }
-                if let Some(bot) = self.bots.iter_mut().find(|b| b.thread_id == thread) {
+                if let Some(bot) = self.bots.iter_mut().find(|b| b.has_chat(thread)) {
                     bot.note_message(&frame["message"]);
                 }
                 let Some(message) = Msg::from_wire(&frame["message"]) else { return After::Nothing };

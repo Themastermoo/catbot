@@ -6,6 +6,7 @@
 mod api;
 mod bots;
 mod chat;
+mod chats;
 mod events;
 mod live;
 mod mascots;
@@ -55,11 +56,25 @@ const FOLLOW_SYSTEM_SKIN: &str = r#"
     dark.addEventListener("change", apply);
 "#;
 
+/// Ctrl+Shift+N (⌘⇧N on a Mac) starts a new chat with the open bot, as in OpenMausBot, by
+/// pressing the chat header's New chat button. (A browser may keep the keys for itself: Chrome
+/// opens an incognito window; the desktop app gets them.)
+const NEW_CHAT_KEY: &str = r#"
+    document.addEventListener("keydown", (event) => {
+        if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.key.toLowerCase() !== "n") return;
+        const button = document.querySelector("[data-new-chat]");
+        if (!button) return;
+        event.preventDefault();
+        button.click();
+    });
+"#;
+
 #[component]
 fn App() -> Element {
     use_hook(|| {
         document::eval(FOLLOW_SYSTEM_SKIN);
         document::eval(mascots::MASCOT_LIFE);
+        document::eval(NEW_CHAT_KEY);
     });
     let mut state = use_context_provider(|| Signal::new(live::State::default()));
     let mut selected = use_signal(|| None::<String>);
@@ -150,7 +165,8 @@ fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, proble
         // Dioxus only honours a key among siblings, and a reused view would keep the last bot's messages.
         (None, Some(bot)) => rsx! {
             for bot in std::iter::once(bot) {
-                chat::Chat { key: "{bot.id}", bot: bot.clone() }
+                // Keyed by bot and chat, so opening another chat starts the view fresh too.
+                chat::Chat { key: "{bot.id}-{bot.thread_id}", bot: bot.in_open_chat() }
                 if (ui.settings_open)() {
                     settings::SettingsPanel { key: "settings-{bot.id}", bot }
                 }

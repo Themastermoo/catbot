@@ -1,14 +1,20 @@
-//! The sidebar: a search field and Catbot's bots, one row each.
+//! The sidebar: a search field and Catbot's bots, one row each. A bot with more than one chat
+//! gets an arrow that opens its chats beneath it (`chats.rs`).
 //!
 //! Classes and sizes follow the full layout of OpenMausBot's `src/components/Sidebar.tsx`
 //! (`Sidebar` and `BotListItem`, Apache-2.0, see NOTICE). Their bot picture is their mascot
 //! artwork, which Catbot doesn't copy: a bot wears one of Catbot's own (`mascots.rs`).
 
+use std::collections::HashSet;
+
 use dioxus::prelude::*;
 
 use crate::bots::{Activity, Bot};
 use crate::chat::clock;
+use crate::chats::{self, ChatList, Chevron};
+use crate::live::State;
 use crate::mascots::BotMark;
+use crate::settings::Ui;
 
 /// Their focus ring for rows (`SIMPLE_ROW_FOCUS`).
 const ROW_FOCUS: &str = "focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-focus";
@@ -19,6 +25,10 @@ const ELEVATED_CONTROL: &str = "bg-composer ring-1 ring-inset ring-ink/[0.07]";
 pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> Element {
     let mut query = use_signal(String::new);
     let mut making = use_signal(|| false);
+    // Bots whose chats are showing.
+    let mut unfolded = use_signal(HashSet::<String>::new);
+    let state = use_context::<Signal<State>>();
+    let ui = use_context::<Ui>();
     let shown: Vec<Bot> = bots.read().iter().filter(|b| b.matches(&query.read())).cloned().collect();
     let empty = bots.read().is_empty();
     rsx! {
@@ -70,7 +80,25 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                         div { class: "px-3 py-6 text-center text-[13px] text-ink-secondary", "Nothing matches “{query}”" }
                     }
                     for bot in shown {
-                        BotRow { key: "{bot.id}", selected: selected.read().as_deref() == Some(bot.id.as_str()), bot, on_select: move |id| selected.set(Some(id)) }
+                        BotRow {
+                            key: "{bot.id}",
+                            selected: selected.read().as_deref() == Some(bot.id.as_str()),
+                            // Open by the arrow, or while a search finds one of its chats.
+                            unfolded: unfolded.read().contains(&bot.id) || chat_found(&bot, &query.read()),
+                            query: query.read().clone(),
+                            bot,
+                            on_select: move |id| selected.set(Some(id)),
+                            on_fold: move |id: String| {
+                                let mut open = unfolded.write();
+                                if !open.remove(&id) {
+                                    open.insert(id);
+                                }
+                            },
+                            on_new_chat: move |id: String| {
+                                unfolded.write().insert(id.clone());
+                                chats::start(state, ui, id);
+                            },
+                        }
                     }
                 }
             }
@@ -78,27 +106,48 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     }
 }
 
+/// Whether a search names one of the bot's chats (not just the bot).
+fn chat_found(bot: &Bot, query: &str) -> bool {
+    let query = query.trim().to_lowercase();
+    !query.is_empty() && bot.chats.iter().any(|c| c.title.to_lowercase().contains(&query))
+}
+
 #[component]
-fn BotRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element {
+fn BotRow(
+    bot: Bot,
+    selected: bool,
+    unfolded: bool,
+    query: String,
+    on_select: EventHandler<String>,
+    on_fold: EventHandler<String>,
+    on_new_chat: EventHandler<String>,
+) -> Element {
     let id = bot.id.clone();
     let key_id = bot.id.clone();
+    let fold_id = bot.id.clone();
+    let new_id = bot.id.clone();
     let waiting = bot.activity == Activity::WaitingOnYou;
     let working = bot.activity == Activity::Working;
     let mood = bot.activity.mood().to_string();
-    let row_state = if selected { "bg-raised" } else { "hover:bg-raised/50" };
+    // The arrow shows once there's more than one chat to choose between.
+    let has_list = bot.listed_chats().count() > 1 || bot.chats.iter().any(|c| c.archived);
+    let expanded = has_list && unfolded;
+    let row_state = if selected && !expanded { "bg-raised" } else { "hover:bg-raised/50" };
+    let row_left = if has_list { "pl-6" } else { "pl-2.5" };
     let preview_color = if waiting { "font-semibold text-warning" } else { "text-ink-secondary" };
-    let time = bot.last.as_ref().filter(|_| selected).map(|last| clock(last.at));
+    let time = bot.last.as_ref().filter(|_| selected && !expanded).map(|last| clock(last.at));
     let preview = bot.preview();
+    let fold_label = if expanded { format!("Hide {} chats", bot.name) } else { format!("Show {} chats", bot.name) };
     rsx! {
         div { class: "group relative",
             div {
                 role: "button",
                 tabindex: 0,
-                "aria-current": if selected { "page" },
+                "aria-current": if selected && !expanded { "page" },
                 "data-sidebar-bot-row": "{bot.id}",
                 // The cat's eyes follow the pointer anywhere on its row (see `MASCOT_LIFE`).
                 "data-cat-follow": true,
-                class: "flex w-full items-center gap-3 rounded-xl py-2 pl-2.5 pr-9 text-left transition-colors duration-150 max-md:rounded-2xl max-md:py-2.5 {ROW_FOCUS} {row_state}",
+                class: "flex w-full items-center gap-3 rounded-xl py-2 {row_left} pr-9 text-left transition-colors duration-150 max-md:rounded-2xl max-md:py-2.5 {ROW_FOCUS} {row_state}",
                 onclick: move |_| on_select.call(id.clone()),
                 onkeydown: move |e| {
                     if e.key() == Key::Enter || e.key() == Key::Character(" ".into()) {
@@ -131,15 +180,42 @@ fn BotRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element 
                             span { class: "shrink-0 text-[12px] tabular-nums text-ink-secondary", "{time}" }
                         }
                     }
-                    div { class: "flex items-center justify-between gap-2",
-                        span { class: "flex min-w-0 items-center gap-1.5 truncate text-[13px] leading-[18px] {preview_color}",
-                            span { dir: "auto", class: "truncate", "{preview}" }
-                        }
-                        if bot.unread {
-                            span { class: "size-2 shrink-0 rounded-full bg-accent", "aria-label": "Unread" }
+                    if !expanded {
+                        div { class: "flex items-center justify-between gap-2",
+                            span { class: "flex min-w-0 items-center gap-1.5 truncate text-[13px] leading-[18px] {preview_color}",
+                                span { dir: "auto", class: "truncate", "{preview}" }
+                            }
+                            if bot.unread {
+                                span { class: "size-2 shrink-0 rounded-full bg-accent", "aria-label": "Unread" }
+                            }
                         }
                     }
                 }
+            }
+            if has_list {
+                button {
+                    r#type: "button",
+                    "aria-label": "{fold_label}",
+                    "aria-expanded": "{expanded}",
+                    "data-chat-fold": "{bot.id}",
+                    class: "absolute left-0.5 top-[30px] flex size-5 -translate-y-1/2 items-center justify-center rounded text-ink-secondary outline-none hover:text-ink focus-visible:ring-1 focus-visible:ring-accent/60",
+                    onclick: move |_| on_fold.call(fold_id.clone()),
+                    Chevron { open: expanded, size: 13 }
+                }
+            }
+            button {
+                r#type: "button",
+                "aria-label": "New chat with {bot.name}",
+                title: "New chat",
+                "data-row-new-chat": "{bot.id}",
+                class: "pointer-events-none absolute right-1 top-[30px] flex size-7 -translate-y-1/2 items-center justify-center rounded text-ink-secondary opacity-0 hover:bg-raised hover:text-ink group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 max-md:pointer-events-auto max-md:opacity-70",
+                onclick: move |_| on_new_chat.call(new_id.clone()),
+                svg { "aria-hidden": "true", width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                    path { d: "M5 12h14M12 5v14" }
+                }
+            }
+            if expanded {
+                ChatList { bot: bot.clone(), current: selected, query }
             }
         }
     }

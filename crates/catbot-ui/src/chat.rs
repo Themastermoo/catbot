@@ -554,20 +554,51 @@ fn page_messages(page: &Value) -> Vec<Msg> {
 #[component]
 fn ChatHead(bot: Bot) -> Element {
     let mut ui = use_context::<crate::settings::Ui>();
+    let state = use_context::<Signal<State>>();
     let open = (ui.settings_open)();
+    // Which chat this is, once the bot has more than one (their `ChatHeadPill`).
+    let conversation = (bot.chats.len() > 1).then(|| bot.open_chat().map(|c| c.title.clone()).unwrap_or_else(|| "New chat".into()));
+    let label = match &conversation {
+        Some(chat) => format!("Open settings for {}, {chat}", bot.name),
+        None => format!("Open settings for {}", bot.name),
+    };
+    let elsewhere = bot.busy_elsewhere();
+    let bot_id = bot.id.clone();
     rsx! {
-        div { class: "z-[25] shrink-0 bg-app/85 px-5 py-3 backdrop-blur-md",
-            div { class: "flex items-center justify-center",
+        div { class: "relative z-[25] shrink-0 bg-app/85 px-5 py-3 backdrop-blur-md",
+            div { class: "flex items-center justify-center px-10",
                 button {
                     r#type: "button",
                     "data-chathead-pill": true,
                     title: "Open bot settings",
-                    "aria-label": "Open settings for {bot.name}",
+                    "aria-label": "{label}",
                     "aria-expanded": "{open}",
-                    class: "group flex min-w-0 items-center gap-2 rounded-full py-0.5 pl-1.5 pr-3 text-ink {ELEVATED_FLOAT} transition-colors duration-[120ms] hover:bg-[color-mix(in_srgb,var(--color-composer),var(--color-ink)_7%)]",
+                    class: "group flex min-w-0 max-w-full items-center gap-2 rounded-full py-0.5 pl-1.5 pr-3 text-ink {ELEVATED_FLOAT} transition-colors duration-[120ms] hover:bg-[color-mix(in_srgb,var(--color-composer),var(--color-ink)_7%)]",
                     onclick: move |_| ui.settings_open.toggle(),
                     BotMark { color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone(), state: bot.activity.mood() }
                     span { class: "truncate text-[14px] font-semibold text-ink", "{bot.name}" }
+                    if let Some(chat) = conversation {
+                        svg { "aria-hidden": "true", class: "shrink-0 text-ink-tertiary", width: "12", height: "12", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                            path { d: "m9 18 6-6-6-6" }
+                        }
+                        span { "data-chathead-conversation": true, dir: "auto", class: "min-w-0 max-w-[180px] truncate text-[14px] font-medium leading-5 text-ink-secondary", "{chat}" }
+                    }
+                    if elsewhere {
+                        span { role: "img", "data-chathead-elsewhere": true, "aria-label": "Another chat is busy", title: "Another chat is busy", class: "size-1.5 shrink-0 rounded-full bg-accent" }
+                    }
+                }
+            }
+            button {
+                r#type: "button",
+                "data-new-chat": true,
+                "aria-label": "New chat with {bot.name}",
+                title: "New chat (Ctrl+Shift+N)",
+                class: "absolute right-4 top-1/2 flex size-8 -translate-y-1/2 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                onclick: move |_| crate::chats::start(state, ui, bot_id.clone()),
+                // Lucide `SquarePen` (ISC).
+                svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                    path { d: "M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" }
+                    path { d: "M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" }
                 }
             }
         }
@@ -941,6 +972,15 @@ fn day_label(at: f64, today: i64) -> String {
         0 => "Today".into(),
         1 => "Yesterday".into(),
         _ => date_string(at, &[("weekday", "short"), ("month", "short"), ("day", "numeric")], false),
+    }
+}
+
+/// When a chat was last used, short: "3:41 PM" today, "Yesterday", else "Nov 12".
+pub fn short_when(at: f64) -> String {
+    match day(js_now()) - day(at) {
+        0 => clock(at),
+        1 => "Yesterday".into(),
+        _ => date_string(at, &[("month", "short"), ("day", "numeric")], false),
     }
 }
 

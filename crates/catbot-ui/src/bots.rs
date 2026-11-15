@@ -10,8 +10,10 @@ use serde_json::Value;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bot {
     pub id: String,
-    /// Its conversation (Catbot bots have one).
+    /// The chat shown when the bot is opened (this window's choice once it has one).
     pub thread_id: String,
+    /// All its chats, the most recently used first; archived ones are marked.
+    pub chats: Vec<Chat>,
     pub name: String,
     /// One of the stylesheet's identity colours (`--identity-<color>`).
     pub color: String,
@@ -31,6 +33,29 @@ pub struct Bot {
     pub last: Option<Last>,
 }
 
+/// One of a bot's chats (their "task"), as the sidebar lists it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chat {
+    pub id: String,
+    pub title: String,
+    pub activity: Activity,
+    /// When it was last used, in ms since the epoch.
+    pub updated: f64,
+    pub archived: bool,
+}
+
+impl Chat {
+    fn from_wire(wire: &Value) -> Option<Chat> {
+        Some(Chat {
+            id: wire["threadId"].as_str()?.to_string(),
+            title: wire["title"].as_str().filter(|t| !t.trim().is_empty()).unwrap_or("New chat").to_string(),
+            activity: Activity::from_wire(wire),
+            updated: wire["updatedAt"].as_f64().unwrap_or(0.0),
+            archived: wire.get("archivedAt").is_some_and(|a| !a.is_null()),
+        })
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
     Idle,
@@ -39,6 +64,16 @@ pub enum Activity {
 }
 
 impl Activity {
+    /// From a bot's or a chat's `activity` and `busy`.
+    fn from_wire(wire: &Value) -> Activity {
+        match wire["activity"].as_str() {
+            Some("waiting-on-you") => Activity::WaitingOnYou,
+            _ if wire["busy"] == true => Activity::Working,
+            Some("working") => Activity::Working,
+            _ => Activity::Idle,
+        }
+    }
+
     /// The name the bot pictures know this by (`BotMark`'s `state`).
     pub fn mood(self) -> &'static str {
         match self {
@@ -67,16 +102,13 @@ impl Bot {
     }
 
     pub fn from_wire(wire: &Value) -> Option<Bot> {
-        let activity = match wire["activity"].as_str() {
-            Some("waiting-on-you") => Activity::WaitingOnYou,
-            _ if wire["busy"] == true => Activity::Working,
-            Some("working") => Activity::Working,
-            _ => Activity::Idle,
-        };
+        let activity = Activity::from_wire(wire);
         let messages = wire["messages"].as_array().map(Vec::as_slice).unwrap_or_default();
+        let chats = wire["tasks"].as_array().map(|tasks| tasks.iter().filter_map(Chat::from_wire).collect()).unwrap_or_default();
         Some(Bot {
             id: wire["id"].as_str()?.to_string(),
             thread_id: wire["threadId"].as_str().unwrap_or_default().to_string(),
+            chats,
             name: wire["name"].as_str().unwrap_or_default().to_string(),
             color: wire["color"].as_str().unwrap_or("blue").to_string(),
             mark: wire["mark"].as_str().unwrap_or("cat-head").to_string(),
@@ -99,14 +131,48 @@ impl Bot {
         }
     }
 
-    /// Whether a search finds this bot: by its name or its preview, ignoring case.
+    /// Whether a search finds this bot: by its name, its preview or one of its chats' names,
+    /// ignoring case.
     pub fn matches(&self, query: &str) -> bool {
         let query = query.trim().to_lowercase();
-        query.is_empty() || self.name.to_lowercase().contains(&query) || self.preview().to_lowercase().contains(&query)
+        query.is_empty()
+            || self.name.to_lowercase().contains(&query)
+            || self.preview().to_lowercase().contains(&query)
+            || self.chats.iter().any(|c| c.title.to_lowercase().contains(&query))
     }
 
-    /// A `bot` frame's news: its name, colour and what it's doing. A frame carries no
-    /// messages, so the preview and conversation are kept from what's known.
+    /// Whether this chat is one of the bot's.
+    pub fn has_chat(&self, thread: &str) -> bool {
+        self.thread_id == thread || self.chats.iter().any(|c| c.id == thread)
+    }
+
+    /// The open chat, if the bot's list has it.
+    pub fn open_chat(&self) -> Option<&Chat> {
+        self.chats.iter().find(|c| c.id == self.thread_id)
+    }
+
+    /// The chats in the list (not archived).
+    pub fn listed_chats(&self) -> impl Iterator<Item = &Chat> {
+        self.chats.iter().filter(|c| !c.archived)
+    }
+
+    /// The bot as its open chat sees it: busy only if that chat is.
+    pub fn in_open_chat(&self) -> Bot {
+        let mut bot = self.clone();
+        if let Some(chat) = self.open_chat() {
+            bot.activity = chat.activity;
+        }
+        bot
+    }
+
+    /// Whether a chat other than the open one is working or waiting.
+    pub fn busy_elsewhere(&self) -> bool {
+        self.chats.iter().any(|c| c.id != self.thread_id && c.activity != Activity::Idle)
+    }
+
+    /// A `bot` frame's news: its name, colour, chats and what it's doing. A frame carries no
+    /// messages, so the preview is kept from what's known; and this window stays on the chat
+    /// it has open, as long as that chat still exists.
     pub fn update_from(&mut self, newer: Bot) {
         let last = self.last.take();
         let thread_id = std::mem::take(&mut self.thread_id);
@@ -114,7 +180,7 @@ impl Bot {
         if self.last.is_none() {
             self.last = last;
         }
-        if self.thread_id.is_empty() {
+        if !thread_id.is_empty() && (self.chats.is_empty() || self.chats.iter().any(|c| c.id == thread_id)) {
             self.thread_id = thread_id;
         }
     }
@@ -270,6 +336,34 @@ mod tests {
         assert_eq!(bot.last.as_ref().unwrap().line, "new");
         bot.note_message(&json!({ "kind": "text", "text": "older", "at": 0.5 }));
         assert_eq!(bot.last.as_ref().unwrap().line, "new");
+    }
+
+    #[test]
+    fn chats_their_activity_and_which_is_open() {
+        let tasks = json!([
+            { "threadId": "t2", "title": "Shed plans", "activity": "working", "busy": true, "updatedAt": 5.0 },
+            { "threadId": "t1", "title": "Garden", "activity": "idle", "busy": false, "updatedAt": 3.0 },
+            { "threadId": "t0", "title": "", "activity": "idle", "busy": false, "updatedAt": 1.0, "archivedAt": 2.0 },
+        ]);
+        let mut bot = Bot::from_wire(&wire(json!({ "tasks": tasks, "activity": "working", "busy": true }))).unwrap();
+        assert_eq!(bot.chats.len(), 3);
+        assert_eq!(bot.listed_chats().count(), 2);
+        assert_eq!(bot.chats[2].title, "New chat");
+        assert!(bot.chats[2].archived);
+        // The open chat (t1) is idle though another chat works: the chat view sees it idle.
+        assert_eq!(bot.open_chat().unwrap().title, "Garden");
+        assert_eq!(bot.in_open_chat().activity, Activity::Idle);
+        assert!(bot.busy_elsewhere());
+        assert!(bot.matches("shed") && bot.has_chat("t0") && !bot.has_chat("t9"));
+
+        // A frame from the server opening another chat doesn't move this window off its chat…
+        let frame = Bot::from_wire(&json!({ "id": "b1", "catbot": true, "threadId": "t2", "tasks": tasks })).unwrap();
+        bot.update_from(frame);
+        assert_eq!(bot.thread_id, "t1");
+        // …until that chat is gone.
+        let gone = json!([{ "threadId": "t2", "title": "Shed plans", "activity": "idle", "busy": false }]);
+        bot.update_from(Bot::from_wire(&json!({ "id": "b1", "catbot": true, "threadId": "t2", "tasks": gone })).unwrap());
+        assert_eq!(bot.thread_id, "t2");
     }
 
     #[test]
