@@ -100,10 +100,15 @@ pub async fn chat(store: &Store, options: Options) -> Result<bool, BoxError> {
         }
         None => {
             let id = uuid::Uuid::new_v4().to_string();
-            (store.start_conversation(&bot.id, Some(&id))?, Session::New(id))
+            let conversation = store.start_conversation(&bot.id, Some(&id))?;
+            store.open_conversation(&conversation)?;
+            (conversation, Session::New(id))
         }
     };
     store.add_message(&conversation.id, Role::Person, &options.message, None)?;
+    if conversation.title.is_none() {
+        store.set_title(&conversation.id, &crate::titles::from_message(&options.message), false)?;
+    }
 
     let helper = approvals_on.then(ask::helper).transpose()?;
     let mut turn = bot_turn(&bot, options.message.clone(), session.clone(), options.cli.clone(), helper, codex);

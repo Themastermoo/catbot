@@ -33,6 +33,7 @@ use crate::{
     proxy::Proxy,
     record::Recorder,
     store::{self, Bot, Mark, NewBot, Role, Store},
+    titles,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -60,6 +61,8 @@ pub struct App {
     pub helper: Option<Vec<String>>,
     /// Catbot's own interface, when built: served for every path outside `/api`.
     pub ui: Option<PathBuf>,
+    /// The model that names new chats (`titles`); None keeps their first-line names.
+    pub title_model: Option<String>,
 }
 
 impl App {
@@ -71,7 +74,17 @@ impl App {
         helper: Option<Vec<String>>,
         ui: Option<PathBuf>,
     ) -> Arc<Self> {
-        Arc::new(Self { store: Mutex::new(store), hub: hub::Hub::default(), turns: turns::Turns::default(), proxy, codex, cli, helper, ui })
+        Arc::new(Self {
+            store: Mutex::new(store),
+            hub: hub::Hub::default(),
+            turns: turns::Turns::default(),
+            proxy,
+            codex,
+            cli,
+            helper,
+            ui,
+            title_model: titles::model_from_env(),
+        })
     }
 
     /// Runs `f` with the store, logging (and swallowing) any error.
@@ -91,12 +104,21 @@ impl App {
         f(&store)
     }
 
+    /// What one chat is doing, for `wire::bot`.
+    fn activity(&self) -> impl Fn(&str) -> &'static str + '_ {
+        |thread| self.turns.activity(thread)
+    }
+
+    /// A bot on the wire, with its chats' activity.
+    fn wire_bot(&self, store: &Store, bot: &Bot, messages: Option<usize>) -> Result<Value, BoxError> {
+        wire::bot(store, bot, &self.activity(), messages)
+    }
+
     /// Sends a bot's current state (no messages) to every open interface.
     pub fn announce_bot(&self, bot_id: &str) {
         let wire = self.with_store(|store| {
             let Some(bot) = store.bot_by_id(bot_id)? else { return Ok(None) };
-            let thread = store.ensure_conversation(&bot.id)?;
-            Ok(Some(wire::bot(store, &bot, self.turns.activity(&thread.id), None)?))
+            Ok(Some(self.wire_bot(store, &bot, None)?))
         });
         if let Some(Some(bot)) = wire {
             self.hub.send(json!({ "kind": "bot", "bot": bot }));
@@ -240,8 +262,7 @@ async fn list_bots(app: &Arc<App>, req: Request) -> Response {
     let ours = app.with_store(|store| {
         let mut wires = Vec::new();
         for bot in store.bots()? {
-            let thread = store.ensure_conversation(&bot.id)?;
-            wires.push(wire::bot(store, &bot, app.turns.activity(&thread.id), Some(limit))?);
+            wires.push(app.wire_bot(store, &bot, Some(limit))?);
         }
         Ok(wires)
     });
@@ -290,7 +311,7 @@ async fn create_bot(app: &Arc<App>, req: Request) -> Answer {
     let mut bot = bot;
     apply_changes(&mut bot, &changes)?;
     app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
-    let wire = app.try_store(|store| wire::bot(store, &bot, "idle", Some(50))).map_err(fail)?;
+    let wire = app.try_store(|store| app.wire_bot(store, &bot, Some(50))).map_err(fail)?;
     app.announce_bot(&bot.id);
     eprintln!("catbot: made {} ({})", bot.name, bot.folder.display());
     Ok((StatusCode::CREATED, json!({ "bot": wire })))
@@ -301,13 +322,12 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
     let bot = app.try_store(|store| store.bot_by_id(id)).map_err(fail)?.ok_or((StatusCode::NOT_FOUND, "no such bot".into()))?;
     match (method, rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice()) {
         (Method::GET, []) => {
-            let thread = app.try_store(|store| store.ensure_conversation(&bot.id)).map_err(fail)?;
-            let wire = app.try_store(|store| wire::bot(store, &bot, app.turns.activity(&thread.id), Some(50))).map_err(fail)?;
+            let wire = app.try_store(|store| app.wire_bot(store, &bot, Some(50))).map_err(fail)?;
             Ok((StatusCode::OK, json!({ "bot": wire })))
         }
         (Method::PATCH, []) => patch_bot(app, bot, json_body(req).await?),
         (Method::DELETE, []) => {
-            if let Some(thread) = app.try_store(|store| store.current_conversation(&bot.id)).map_err(fail)? {
+            for thread in app.try_store(|store| store.conversations(&bot.id)).map_err(fail)? {
                 app.turns.interrupt(&thread.id);
             }
             let bot = app.try_store(|store| store.delete_bot(&bot.name)).map_err(fail)?;
@@ -316,6 +336,13 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             Ok((StatusCode::OK, json!({ "ok": true })))
         }
         (Method::POST, ["messages"]) => send_message(app, bot, json_body(req).await?),
+        (Method::POST, ["tasks"]) => new_chat(app, bot, json_body(req).await?),
+        (Method::POST, ["tasks", thread]) => {
+            let limit = query_param(&req, "messages").and_then(|n| n.parse().ok()).unwrap_or(50usize).min(500);
+            open_chat(app, bot, thread, limit)
+        }
+        (Method::PATCH, ["tasks", thread]) => change_chat(app, bot, thread, json_body(req).await?),
+        (Method::DELETE, ["tasks", thread]) => delete_chat(app, bot, thread),
         (Method::POST, ["read"]) => Ok((StatusCode::OK, json!({ "ok": true }))),
         (Method::POST, ["interrupt"]) => {
             let body = json_body(req).await?;
@@ -335,8 +362,7 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
 fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
     apply_changes(&mut bot, &body)?;
     app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
-    let thread = app.try_store(|store| store.ensure_conversation(&bot.id)).map_err(fail)?;
-    let wire = app.try_store(|store| wire::bot(store, &bot, app.turns.activity(&thread.id), None)).map_err(fail)?;
+    let wire = app.try_store(|store| app.wire_bot(store, &bot, None)).map_err(fail)?;
     app.hub.send(json!({ "kind": "bot", "bot": wire }));
     Ok((StatusCode::OK, json!({ "bot": wire })))
 }
@@ -392,10 +418,104 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     let detail = body["sendId"].as_str().map(|id| json!({ "sendId": id }));
     let message = turns::save_and_send(app, &conversation.id, Role::Person, &text, detail.as_ref())
         .ok_or_else(|| fail("couldn't save the message"))?;
+    if conversation.title.is_none() {
+        // Named after the chat's first message: this one, or for a chat from before chats had
+        // names, the first thing said in it.
+        let first = app.with_store(|store| store.first_words(&conversation.id)).flatten().unwrap_or_else(|| text.clone());
+        name_chat(app, &bot, &conversation.id, &first);
+    }
     let request_id = message["id"].as_str().and_then(wire::parse_message_id).unwrap_or_default();
     let thread = conversation.id.clone();
     turns::start(app.clone(), bot, conversation, request_id, text).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
     Ok((StatusCode::ACCEPTED, json!({ "ok": true, "threadId": thread, "message": message })))
+}
+
+/// Names a chat from its first message: its first line at once, then (in the background)
+/// a better name from the title model, unless the person names it first.
+fn name_chat(app: &Arc<App>, bot: &Bot, thread: &str, text: &str) {
+    let first_line = titles::from_message(text);
+    if app.try_store(|store| store.set_title(thread, &first_line, false)).is_err() {
+        return;
+    }
+    app.announce_bot(&bot.id);
+    let Some(model) = app.title_model.clone() else { return };
+    let Ok(cwd) = app.try_store(|store| Ok(store.home().join("titles"))) else { return };
+    let (app, bot_id, thread, text) = (app.clone(), bot.id.clone(), thread.to_string(), text.to_string());
+    tokio::spawn(async move {
+        let Some(name) = titles::generate(app.cli.clone(), cwd, model, &text).await else { return };
+        let still_first_line = app
+            .with_store(|store| Ok(store.conversation(&thread)?.is_some_and(|c| !c.title_by_person && c.title.as_deref() == Some(&first_line))))
+            .unwrap_or(false);
+        if still_first_line && app.with_store(|store| store.set_title(&thread, &name, false)).is_some() {
+            app.announce_bot(&bot_id);
+        }
+    });
+}
+
+/// One of this bot's chats, or a 404.
+fn chat_of(app: &App, bot: &Bot, thread: &str) -> Result<store::Conversation, (StatusCode, String)> {
+    app.try_store(|store| store.conversation(thread))
+        .map_err(fail)?
+        .filter(|c| c.bot_id == bot.id)
+        .ok_or((StatusCode::NOT_FOUND, "no such chat".into()))
+}
+
+/// `POST /api/bots/:id/tasks`: a new chat. It becomes the one the bot opens to unless the
+/// body says `"select": false`; a `title` names it.
+fn new_chat(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
+    let select = body["select"].as_bool().unwrap_or(true);
+    let conversation = app
+        .try_store(|store| if select { store.new_conversation(&bot.id) } else { store.start_conversation(&bot.id, None) })
+        .map_err(fail)?;
+    if let Some(title) = body["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+        app.try_store(|store| store.set_title(&conversation.id, title, true)).map_err(fail)?;
+    }
+    let conversation = chat_of(app, &bot, &conversation.id)?;
+    let wire = app.try_store(|store| app.wire_bot(store, &bot, None)).map_err(fail)?;
+    app.announce_bot(&bot.id);
+    Ok((StatusCode::CREATED, json!({ "bot": wire, "task": wire::task(&bot, &conversation, "idle") })))
+}
+
+/// `POST /api/bots/:id/tasks/:thread`: the bot opens to this chat from now on. Answers with
+/// the bot and the chat's latest messages.
+fn open_chat(app: &Arc<App>, bot: Bot, thread: &str, limit: usize) -> Answer {
+    let conversation = chat_of(app, &bot, thread)?;
+    app.try_store(|store| store.open_conversation(&conversation)).map_err(fail)?;
+    let wire = app.try_store(|store| app.wire_bot(store, &bot, Some(limit))).map_err(fail)?;
+    Ok((StatusCode::OK, json!({ "bot": wire })))
+}
+
+/// `PATCH /api/bots/:id/tasks/:thread`: rename a chat (`title`), or archive it (`archivedAt`:
+/// any value) or bring it back (`archivedAt: null`).
+fn change_chat(app: &Arc<App>, bot: Bot, thread: &str, body: Value) -> Answer {
+    let conversation = chat_of(app, &bot, thread)?;
+    if let Some(title) = body.get("title") {
+        let title = title.as_str().map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| bad("a chat needs a name"))?;
+        if title.chars().count() > 120 {
+            return Err(bad("that name is too long"));
+        }
+        app.try_store(|store| store.set_title(&conversation.id, title, true)).map_err(fail)?;
+    }
+    if let Some(archived) = body.get("archivedAt") {
+        app.try_store(|store| store.set_archived(&conversation.id, !archived.is_null())).map_err(fail)?;
+    }
+    let conversation = chat_of(app, &bot, thread)?;
+    let task = wire::task(&bot, &conversation, app.turns.activity(&conversation.id));
+    app.announce_bot(&bot.id);
+    Ok((StatusCode::OK, json!({ "task": task })))
+}
+
+/// `DELETE /api/bots/:id/tasks/:thread`: delete a chat and its messages. Not while it's working.
+fn delete_chat(app: &Arc<App>, bot: Bot, thread: &str) -> Answer {
+    let conversation = chat_of(app, &bot, thread)?;
+    if app.turns.busy(&conversation.id) {
+        return Err((StatusCode::CONFLICT, "this chat is still working; stop it first".into()));
+    }
+    app.try_store(|store| store.delete_conversation(&conversation.id)).map_err(fail)?;
+    // A bot always has a chat to open to.
+    let wire = app.try_store(|store| app.wire_bot(store, &bot, None)).map_err(fail)?;
+    app.announce_bot(&bot.id);
+    Ok((StatusCode::OK, json!({ "ok": true, "bot": wire })))
 }
 
 async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Request) -> Answer {

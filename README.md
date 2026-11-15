@@ -119,6 +119,11 @@ Each bot has its own instructions, model, approval setting and working folder, a
 everything said is saved. Data lives in `~/.local/share/catbot` (`$CATBOT_HOME` to move it):
 `catbot.db` (bots, conversations, messages) and `bots/<name>/` (each bot's folder).
 
+**Chats.** A bot can have several chats, and they can work at the same time (they share the
+bot's folder). A chat is named from the first line of its first message, then a quick call to
+Claude's small model (`haiku`) gives it a better name a few seconds later, unless you've
+renamed it. `CATBOT_TITLE_MODEL` picks another model, or `off` keeps the first-line names.
+
 **Codex.** Bots can read and write the Codex vault at `~/VaultCodex` (`$CATBOT_CODEX` to
 move it); they're told to follow its `AGENTS.md` protocol: they look there for context about you and your projects, and add notes when they
 learn something worth keeping. On the default approval setting every write asks you first;

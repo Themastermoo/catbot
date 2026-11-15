@@ -6,7 +6,8 @@ use sha2::{Digest, Sha256};
 
 use crate::{
     claude::PermissionMode,
-    store::{Bot, Message, Role, Store},
+    store::{Bot, Conversation, Message, Role, Store},
+    titles,
 };
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -65,15 +66,58 @@ fn model_selection(bot: &Bot) -> Value {
     json!({ "instanceId": INSTANCE, "model": bot.model.clone().unwrap_or_default() })
 }
 
+/// What a chat is doing: "idle", "working" or "waiting-on-you", by its id.
+pub type Activity<'a> = &'a dyn Fn(&str) -> &'static str;
+
+/// The busiest of several activities: waiting on the person beats working beats idle.
+pub fn busiest(activities: impl IntoIterator<Item = &'static str>) -> &'static str {
+    let mut most = "idle";
+    for activity in activities {
+        match activity {
+            "waiting-on-you" => return activity,
+            "working" => most = activity,
+            _ => {}
+        }
+    }
+    most
+}
+
+/// One of a bot's chats as a `WireTask` (their name for a thread).
+pub fn task(bot: &Bot, conversation: &Conversation, activity: &'static str) -> Value {
+    let updated = epoch_ms(&conversation.updated_at).max(epoch_ms(&conversation.created_at));
+    let mut wire = json!({
+        "threadId": conversation.id,
+        "title": conversation.title.clone().unwrap_or_else(|| titles::UNTITLED.to_string()),
+        "titleByPerson": conversation.title_by_person,
+        "createdAt": epoch_ms(&conversation.created_at),
+        "updatedAt": updated,
+        "lastThreadOrderAt": updated,
+        "unread": false,
+        "activity": activity,
+        "busy": activity != "idle",
+        "modelSelection": model_selection(bot),
+        "followsBotModel": true,
+        "waitingForTeammates": false,
+    });
+    if let Some(at) = &conversation.archived_at {
+        wire["archivedAt"] = json!(epoch_ms(at));
+    }
+    wire
+}
+
 /// A bot as a `WireBot`. With `messages: Some(n)` it carries its latest n messages (the bot
 /// list); with None it is an announcement for a `bot` frame, which the interface merges into
 /// what it has, so it must not carry messages.
-/// `activity` is "idle", "working" or "waiting-on-you".
-pub fn bot(store: &Store, bot: &Bot, activity: &str, messages: Option<usize>) -> Result<Value, BoxError> {
+///
+/// `threadId` is the chat the bot opens to; `tasks` lists all its chats, archived ones marked
+/// with `archivedAt`. The bot's own `activity` is the busiest of its chats'.
+pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<usize>) -> Result<Value, BoxError> {
     let conversation = store.ensure_conversation(&bot.id)?;
+    let conversations = store.conversations(&bot.id)?;
+    let tasks: Vec<Value> = conversations.iter().map(|c| task(bot, c, activity(&c.id))).collect();
+    let activity = busiest(conversations.iter().map(|c| activity(&c.id)));
     let busy = activity != "idle";
     let created = epoch_ms(&bot.created_at);
-    let updated = epoch_ms(&conversation.updated_at).max(epoch_ms(&conversation.created_at));
     let mut wire = json!({
         "id": bot.id,
         // Marks Catbot's own bots, so Catbot's interface can tell them from the reference server's.
@@ -100,19 +144,7 @@ pub fn bot(store: &Store, bot: &Bot, activity: &str, messages: Option<usize>) ->
         "activity": activity,
         "busy": busy,
         "waitingForTeammates": false,
-        "tasks": [{
-            "threadId": conversation.id,
-            "title": "Chat",
-            "createdAt": epoch_ms(&conversation.created_at),
-            "updatedAt": updated,
-            "lastThreadOrderAt": updated,
-            "unread": false,
-            "activity": activity,
-            "busy": busy,
-            "modelSelection": model_selection(bot),
-            "followsBotModel": true,
-            "waitingForTeammates": false,
-        }],
+        "tasks": tasks,
     });
     if let Some(limit) = messages {
         let (list, more) = page(store, &conversation.id, None, limit)?;
@@ -217,7 +249,39 @@ mod tests {
     }
 
     fn bot_value(store: &Store, b: &Bot, messages: Option<usize>) -> Value {
-        bot(store, b, "idle", messages).unwrap()
+        bot(store, b, &|_| "idle", messages).unwrap()
+    }
+
+    #[test]
+    fn a_bot_lists_its_chats_and_opens_to_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let kiwi = store
+            .create_bot(NewBot { name: "Kiwi".into(), instructions: String::new(), model: None, mode: PermissionMode::Default, codex: false })
+            .unwrap();
+        let first = store.ensure_conversation(&kiwi.id).unwrap();
+        store.add_message(&first.id, Role::Person, "first", None).unwrap();
+        store.set_title(&first.id, "Garden plans", false).unwrap();
+        let second = store.new_conversation(&kiwi.id).unwrap();
+        let old = store.new_conversation(&kiwi.id).unwrap();
+        store.set_archived(&old.id, true).unwrap();
+        store.open_conversation(&second).unwrap();
+
+        let working = |id: &str| if id == first.id { "working" } else { "idle" };
+        let wire = bot(&store, &kiwi, &working, None).unwrap();
+        assert_eq!(wire["threadId"], second.id, "it opens to the chat opened last");
+        assert_eq!(wire["activity"], "working", "a bot is as busy as its busiest chat");
+        let tasks = wire["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 3);
+        let named = tasks.iter().find(|t| t["threadId"] == first.id.as_str()).unwrap();
+        assert_eq!(named["title"], "Garden plans");
+        assert_eq!(named["busy"], true);
+        let fresh = tasks.iter().find(|t| t["threadId"] == second.id.as_str()).unwrap();
+        assert_eq!(fresh["title"], titles::UNTITLED);
+        assert!(fresh.get("archivedAt").is_none());
+        let archived = tasks.iter().find(|t| t["threadId"] == old.id.as_str()).unwrap();
+        assert!(archived["archivedAt"].as_i64().unwrap() > 0);
+        assert_eq!(busiest(["idle", "working", "waiting-on-you", "working"]), "waiting-on-you");
     }
 
     #[test]

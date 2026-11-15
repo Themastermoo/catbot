@@ -18,6 +18,9 @@ OpenMausBot contributors, licensed under the Apache License, Version 2.0
   src/components/mascot-motion.ts, CursorAvatar.tsx and Avatar.tsx: the per-state
   body motions, blink cadence and pointer gaze, rewritten as CSS animations and a
   small script. The pictures themselves are Catbot's own.
+- How Catbot names chats (crates/catbot/src/titles.rs) is adapted from
+  OpenMausBot's server/thread-title.ts and thread-title-generate.ts: the
+  first-line name, the naming prompt and how the reply is cleaned.
 
 OpenMausBot's names and mascot are trademarks of Supamaus Software Private
 Limited; Catbot uses neither.

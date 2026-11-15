@@ -130,6 +130,22 @@ async fn until(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, what: &str,
     .unwrap_or_else(|_| panic!("no {what} frame"))
 }
 
+/// Waits for several frames that may come in any order (a chat's name can arrive before or
+/// after its turn ends).
+type Wanted<'a> = Vec<(&'a str, Box<dyn Fn(&Value) -> bool>)>;
+
+async fn until_all(rx: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, wanted: Wanted<'_>) {
+    let mut left = wanted;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !left.is_empty() {
+            let frame = rx.recv().await.expect("stream ended");
+            left.retain(|(_, matches)| !matches(&frame));
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {} frame", left.iter().map(|(what, _)| *what).collect::<Vec<_>>().join(", ")));
+}
+
 fn runtime(frame: &Value, kind: &str) -> bool {
     frame["kind"] == "runtime" && frame["event"]["type"] == kind
 }
@@ -302,4 +318,101 @@ async fn the_interface_is_served_beside_the_api() {
     assert!(get("/bots/some-bot").await.1.contains("<title>Catbot</title>"));
     // The API is still the API.
     assert_eq!(s.call("GET", "/api/config", None).await.1, json!({ "from": "reference" }));
+}
+
+/// The bot's chat list from a bot frame or answer: (title, archived) by chat id.
+fn chats(bot: &Value) -> Vec<(String, String, bool)> {
+    bot["tasks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| (t["threadId"].as_str().unwrap().to_string(), t["title"].as_str().unwrap().to_string(), t.get("archivedAt").is_some()))
+        .collect()
+}
+
+fn title_of(bot: &Value, thread: &str) -> String {
+    chats(bot).into_iter().find(|(id, _, _)| id == thread).map(|(_, title, _)| title).unwrap_or_default()
+}
+
+#[tokio::test]
+async fn chats_are_named_switched_and_tidied() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Kiwi" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let first = made["bot"]["threadId"].as_str().unwrap().to_string();
+    assert_eq!(title_of(&made["bot"], &first), "New chat");
+
+    // The first message names the chat at once, then the namer's better name replaces it.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Plan the garden beds\nwith raised boxes", "threadId": first }))).await;
+    until(&mut events, "first-line name", |f| f["kind"] == "bot" && title_of(&f["bot"], &first) == "Plan the garden beds").await;
+    let (named, done) = (first.clone(), first.clone());
+    until_all(
+        &mut events,
+        vec![
+            ("generated name", Box::new(move |f: &Value| f["kind"] == "bot" && title_of(&f["bot"], &named) == "Plans for the garden")),
+            ("first turn done", Box::new(move |f: &Value| runtime(f, "turn.completed") && f["event"]["threadId"] == done.as_str())),
+        ],
+    )
+    .await;
+
+    // A second chat: the bot opens to it, and the first is still listed.
+    let (status, created) = s.call("POST", &format!("/api/bots/{bot}/tasks"), Some(json!({}))).await;
+    assert_eq!(status, 201);
+    let second = created["task"]["threadId"].as_str().unwrap().to_string();
+    assert_ne!(second, first);
+    assert_eq!(created["bot"]["threadId"], second.as_str());
+    assert_eq!(chats(&created["bot"]).len(), 2);
+
+    // Two chats work at once: the first waits for an approval while the second answers.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "approve", "threadId": first }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    assert_eq!(asked["event"]["threadId"], first.as_str());
+    let (status, _) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "sleepy hello", "threadId": second }))).await;
+    assert_eq!(status, 202, "a second chat isn't held up by the first");
+    let done = until(&mut events, "second chat done", |f| runtime(f, "turn.completed")).await;
+    assert_eq!(done["event"]["threadId"], second.as_str());
+    let (_, listed) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+    assert_eq!(listed["bot"]["activity"], "waiting-on-you", "the bot shows its busiest chat");
+    let first_task = listed["bot"]["tasks"].as_array().unwrap().iter().find(|t| t["threadId"] == first.as_str()).unwrap().clone();
+    assert_eq!(first_task["activity"], "waiting-on-you");
+
+    // A chat can't be deleted while it's working.
+    assert_eq!(s.call("DELETE", &format!("/api/bots/{bot}/tasks/{first}"), None).await.0, 409);
+    let request = asked["event"]["requestId"].as_str().unwrap();
+    s.call("POST", &format!("/api/threads/{first}/respond"), Some(json!({ "requestId": request, "behavior": "deny" }))).await;
+    until(&mut events, "first chat done", |f| runtime(f, "turn.completed") && f["event"]["threadId"] == first.as_str()).await;
+
+    // The person's name wins over the namer's, even one that arrives later ("sleepy" is slow).
+    let (status, renamed) = s.call("PATCH", &format!("/api/bots/{bot}/tasks/{second}"), Some(json!({ "title": "Shed" }))).await;
+    assert_eq!(status, 200);
+    assert_eq!(renamed["task"]["title"], "Shed");
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{bot}/tasks/{second}"), Some(json!({ "title": "  " }))).await.0, 400);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let (_, listed) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+    assert_eq!(title_of(&listed["bot"], &second), "Shed");
+
+    // Opening a chat: the bot opens to it, with its messages.
+    let (_, opened) = s.call("POST", &format!("/api/bots/{bot}/tasks/{first}?messages=50"), None).await;
+    assert_eq!(opened["bot"]["threadId"], first.as_str());
+    assert_eq!(opened["bot"]["messages"][0]["text"], "Plan the garden beds\nwith raised boxes");
+
+    // Archived and back.
+    s.call("PATCH", &format!("/api/bots/{bot}/tasks/{second}"), Some(json!({ "archivedAt": 1 }))).await;
+    let (_, listed) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+    assert!(chats(&listed["bot"]).iter().any(|(id, _, archived)| id == &second && *archived));
+    s.call("PATCH", &format!("/api/bots/{bot}/tasks/{second}"), Some(json!({ "archivedAt": null }))).await;
+    let (_, listed) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+    assert!(chats(&listed["bot"]).iter().all(|(_, _, archived)| !archived));
+
+    // Deleting the open chat: it's gone, with its messages, and the bot opens to the other.
+    let (status, after) = s.call("DELETE", &format!("/api/bots/{bot}/tasks/{first}"), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(after["bot"]["threadId"], second.as_str());
+    assert_eq!(chats(&after["bot"]).len(), 1);
+    assert_eq!(s.call("GET", &format!("/api/threads/{first}/messages"), None).await.0, 404);
+    // Another bot's chat isn't this bot's to touch.
+    let (_, other) = s.call("POST", "/api/bots", Some(json!({ "name": "Other" }))).await;
+    let other_thread = other["bot"]["threadId"].as_str().unwrap();
+    assert_eq!(s.call("DELETE", &format!("/api/bots/{bot}/tasks/{other_thread}"), None).await.0, 404);
 }

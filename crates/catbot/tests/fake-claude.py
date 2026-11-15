@@ -4,6 +4,7 @@ The prompt picks the behaviour:
   "crash"  -> writes to stderr and exits 1 with no result line
   "tool"   -> calls a tool that is refused, like an unapproved Bash command
   "approve" -> asks the permission prompt tool (as the real CLI does), and obeys the answer
+  "Name the conversation…" -> a chat's name, the way Catbot asks for one
   anything else -> streams "Hello, <prompt>" back
 """
 import json, subprocess, sys
@@ -74,6 +75,12 @@ if prompt == "approve":
              "content": verdict["message"]}]}})
         denials = [{"tool_name": "Bash", "tool_use_id": "t2"}]
 reply = f"Hello, {prompt}"
+# Catbot asking for a chat's name ("sleepy" in the message makes the namer slow).
+if prompt.startswith("Name the conversation"):
+    if "sleepy" in prompt:
+        import time
+        time.sleep(2)
+    reply = '"Plans for the garden."'
 for piece in (reply[:3], reply[3:]):
     out({"type": "stream_event", "parent_tool_use_id": None,
          "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": piece}}})

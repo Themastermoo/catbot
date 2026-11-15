@@ -112,7 +112,16 @@ pub struct Conversation {
     pub session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Its name in the chat list: none until the first message.
+    pub title: Option<String>,
+    /// The person named it (so an automatic name never replaces theirs).
+    pub title_by_person: bool,
+    /// When it was put away in the bot's archived chats; none while it's in the list.
+    pub archived_at: Option<String>,
 }
+
+/// A conversation's columns, in the order `conversation_from_row` reads them.
+const CONVERSATION: &str = "id, bot_id, session_id, created_at, updated_at, title, title_by_person, archived_at";
 
 /// Who a stored message is from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -226,6 +235,19 @@ impl Store {
                 "BEGIN; ALTER TABLE bots ADD COLUMN mark TEXT; ALTER TABLE bots ADD COLUMN color TEXT; PRAGMA user_version = 2; COMMIT;",
             )?;
         }
+        if version < 3 {
+            // Version 3: several chats per bot. Each has a name and can be archived; a bot
+            // remembers which chat it opens to. Conversations from before are untitled.
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE conversations ADD COLUMN title TEXT;
+                 ALTER TABLE conversations ADD COLUMN title_by_person INTEGER NOT NULL DEFAULT 0;
+                 ALTER TABLE conversations ADD COLUMN archived_at TEXT;
+                 ALTER TABLE bots ADD COLUMN open_conversation TEXT;
+                 PRAGMA user_version = 3;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { conn, home: home.to_path_buf() })
     }
 
@@ -334,13 +356,27 @@ impl Store {
         Ok(bot)
     }
 
-    /// The bot's most recent conversation.
+    /// The chat the bot opens to: the one last opened, else its latest chat in the list,
+    /// else its latest archived one.
     pub fn current_conversation(&self, bot_id: &str) -> Result<Option<Conversation>, BoxError> {
+        let open: Option<String> = self
+            .conn
+            .query_row("SELECT open_conversation FROM bots WHERE id = ?1", [bot_id], |r| r.get(0))
+            .optional()?
+            .flatten();
+        if let Some(open) = open
+            && let Some(conversation) = self.conversation(&open)?
+            && conversation.bot_id == bot_id
+        {
+            return Ok(Some(conversation));
+        }
         Ok(self
             .conn
             .query_row(
-                "SELECT id, bot_id, session_id, created_at, updated_at FROM conversations
-                 WHERE bot_id = ?1 ORDER BY updated_at DESC, rowid DESC LIMIT 1",
+                &format!(
+                    "SELECT {CONVERSATION} FROM conversations WHERE bot_id = ?1
+                     ORDER BY archived_at IS NOT NULL, updated_at DESC, rowid DESC LIMIT 1"
+                ),
                 [bot_id],
                 conversation_from_row,
             )
@@ -350,12 +386,69 @@ impl Store {
     pub fn conversation(&self, id: &str) -> Result<Option<Conversation>, BoxError> {
         Ok(self
             .conn
+            .query_row(&format!("SELECT {CONVERSATION} FROM conversations WHERE id = ?1"), [id], conversation_from_row)
+            .optional()?)
+    }
+
+    /// All of a bot's chats, archived ones included, the most recently used first.
+    pub fn conversations(&self, bot_id: &str) -> Result<Vec<Conversation>, BoxError> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT {CONVERSATION} FROM conversations WHERE bot_id = ?1 ORDER BY updated_at DESC, rowid DESC"))?;
+        let list = stmt.query_map([bot_id], conversation_from_row)?.collect::<Result<Vec<_>, _>>()?;
+        Ok(list)
+    }
+
+    /// Makes a chat the one its bot opens to.
+    pub fn open_conversation(&self, conversation: &Conversation) -> Result<(), BoxError> {
+        self.conn.execute(
+            "UPDATE bots SET open_conversation = ?2 WHERE id = ?1",
+            params![conversation.bot_id, conversation.id],
+        )?;
+        Ok(())
+    }
+
+    /// A fresh chat for the bot, which it then opens to.
+    pub fn new_conversation(&self, bot_id: &str) -> Result<Conversation, BoxError> {
+        let conversation = self.start_conversation(bot_id, None)?;
+        self.open_conversation(&conversation)?;
+        Ok(conversation)
+    }
+
+    /// Names a chat. `by_person` marks a name the person chose.
+    pub fn set_title(&self, id: &str, title: &str, by_person: bool) -> Result<(), BoxError> {
+        self.conn.execute(
+            "UPDATE conversations SET title = ?2, title_by_person = ?3 WHERE id = ?1",
+            params![id, title, by_person],
+        )?;
+        Ok(())
+    }
+
+    /// The first thing the person said in a chat: what an unnamed chat is named after.
+    pub fn first_words(&self, conversation_id: &str) -> Result<Option<String>, BoxError> {
+        Ok(self
+            .conn
             .query_row(
-                "SELECT id, bot_id, session_id, created_at, updated_at FROM conversations WHERE id = ?1",
-                [id],
-                conversation_from_row,
+                "SELECT body FROM messages WHERE conversation_id = ?1 AND role = 'person' ORDER BY id LIMIT 1",
+                [conversation_id],
+                |r| r.get(0),
             )
             .optional()?)
+    }
+
+    /// Puts a chat in its bot's archived chats (`true`), or back in the list.
+    pub fn set_archived(&self, id: &str, archived: bool) -> Result<(), BoxError> {
+        let at = archived.then(now);
+        self.conn.execute("UPDATE conversations SET archived_at = ?2 WHERE id = ?1", params![id, at])?;
+        Ok(())
+    }
+
+    /// Deletes a chat and its messages. If its bot was opening to it, the bot opens to its
+    /// latest chat instead.
+    pub fn delete_conversation(&self, id: &str) -> Result<(), BoxError> {
+        self.conn.execute("UPDATE bots SET open_conversation = NULL WHERE open_conversation = ?1", [id])?;
+        self.conn.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+        Ok(())
     }
 
     /// The bot's current conversation, started if it has none.
@@ -374,6 +467,9 @@ impl Store {
             session_id: session_id.map(str::to_string),
             created_at: at.clone(),
             updated_at: at,
+            title: None,
+            title_by_person: false,
+            archived_at: None,
         };
         self.conn.execute(
             "INSERT INTO conversations (id, bot_id, session_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -395,7 +491,11 @@ impl Store {
             params![conversation_id, role.as_str(), body, detail, at],
         )?;
         let id = self.conn.last_insert_rowid();
-        self.conn.execute("UPDATE conversations SET updated_at = ?2 WHERE id = ?1", params![conversation_id, at])?;
+        // A new message brings an archived chat back into the list.
+        self.conn.execute(
+            "UPDATE conversations SET updated_at = ?2, archived_at = NULL WHERE id = ?1",
+            params![conversation_id, at],
+        )?;
         Ok(id)
     }
 
@@ -485,7 +585,16 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
 }
 
 fn conversation_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
-    Ok(Conversation { id: r.get(0)?, bot_id: r.get(1)?, session_id: r.get(2)?, created_at: r.get(3)?, updated_at: r.get(4)? })
+    Ok(Conversation {
+        id: r.get(0)?,
+        bot_id: r.get(1)?,
+        session_id: r.get(2)?,
+        created_at: r.get(3)?,
+        updated_at: r.get(4)?,
+        title: r.get(5)?,
+        title_by_person: r.get(6)?,
+        archived_at: r.get(7)?,
+    })
 }
 
 /// A stored mode name back to a mode; anything unknown becomes the safest one.
@@ -660,7 +769,7 @@ mod tests {
     }
 
     #[test]
-    fn a_version_1_store_gains_pictures() {
+    fn a_version_1_store_gains_pictures_and_chats() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("catbot");
         std::fs::create_dir_all(&home).unwrap();
@@ -677,7 +786,52 @@ mod tests {
         let bot = store.bot("Old").unwrap().unwrap();
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
+        // And chats: an old conversation is kept, unnamed, and opened to.
+        let conv = store.start_conversation("b1", Some("s1")).unwrap();
+        assert_eq!(store.current_conversation("b1").unwrap().unwrap().title, None);
+        assert_eq!(store.current_conversation("b1").unwrap().unwrap().id, conv.id);
+    }
+
+    #[test]
+    fn several_chats_per_bot() {
+        let (_dir, store) = store();
+        let bot = store.create_bot(new("Kiwi")).unwrap();
+        let first = store.ensure_conversation(&bot.id).unwrap();
+        store.add_message(&first.id, Role::Person, "plan the garden", None).unwrap();
+        store.add_message(&first.id, Role::Person, "and the shed", None).unwrap();
+        assert_eq!(store.first_words(&first.id).unwrap().as_deref(), Some("plan the garden"));
+
+        // A new chat is opened to; the first stays where it was.
+        let second = store.new_conversation(&bot.id).unwrap();
+        assert_eq!(store.current_conversation(&bot.id).unwrap().unwrap().id, second.id);
+        store.open_conversation(&first).unwrap();
+        assert_eq!(store.current_conversation(&bot.id).unwrap().unwrap().id, first.id);
+        assert_eq!(store.conversations(&bot.id).unwrap().len(), 2);
+
+        // Names: automatic, then the person's.
+        store.set_title(&second.id, "Shed plans", false).unwrap();
+        store.set_title(&second.id, "My shed", true).unwrap();
+        let named = store.conversation(&second.id).unwrap().unwrap();
+        assert_eq!((named.title.as_deref(), named.title_by_person), (Some("My shed"), true));
+
+        // Archived, then back when a message arrives.
+        store.set_archived(&second.id, true).unwrap();
+        assert!(store.conversation(&second.id).unwrap().unwrap().archived_at.is_some());
+        store.add_message(&second.id, Role::Person, "back again", None).unwrap();
+        assert!(store.conversation(&second.id).unwrap().unwrap().archived_at.is_none());
+
+        // Deleting the open chat: the bot opens to what's left.
+        store.delete_conversation(&first.id).unwrap();
+        assert!(store.conversation(&first.id).unwrap().is_none());
+        assert!(store.messages(&first.id, 10).unwrap().is_empty());
+        assert_eq!(store.current_conversation(&bot.id).unwrap().unwrap().id, second.id);
+
+        // An archived chat is opened to only when nothing else is left.
+        let third = store.new_conversation(&bot.id).unwrap();
+        store.set_archived(&second.id, true).unwrap();
+        store.delete_conversation(&third.id).unwrap();
+        assert_eq!(store.current_conversation(&bot.id).unwrap().unwrap().id, second.id);
     }
 
     #[test]

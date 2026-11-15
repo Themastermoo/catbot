@@ -11,3 +11,4 @@ pub mod record;
 pub mod routes;
 pub mod server;
 pub mod store;
+pub mod titles;
