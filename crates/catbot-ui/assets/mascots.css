@@ -16,6 +16,8 @@
  *                                           --look-x / --look-y (each -1..1) and data-look
  *         .cat-glance                       looks around: the script sets --glance-x / --glance-y
  *
+ *   html[data-cats-rest]                    the window isn't the one in use: everything holds
+ *
  * Per picture, mascots.rs sets (once, never changed) --cat-k (a tempo, 0.85..1.2) and
  * --cat-phase (a negative delay), so a sidebar full of cats never moves in step.
  */
@@ -72,6 +74,13 @@
   /* ---- Working: a quick left-right scan, in place of glances. Not while following the
      pointer. Waiting has neither: the eyes stay on the person. ---- */
   .catbot-mark[data-state="working"]:not([data-look]) .cat-glance { animation: cat-scan calc(2400ms * var(--cat-k)) ease-in-out infinite; }
+
+  /* ---- Resting: the window isn't the one in use (the script sets data-cats-rest on <html>).
+     Paused rather than stopped, so each cat carries on from where it was when the window comes
+     back, and a paused animation costs nothing per frame. !important because the state rules above
+     set the whole `animation`, which would put the play state back to running. ---- */
+  [data-cats-rest] .catbot-mark,
+  [data-cats-rest] .catbot-mark .cat-glance { animation-play-state: paused !important; }
 }
 
 /* A sine swing in four pieces, eight steps each. */

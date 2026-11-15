@@ -39,6 +39,10 @@ const INK: &str = "#14171d";
 ///   area under it (a sidebar row, a picker tile), gets `data-look`, and `--look-x` / `--look-y`
 ///   (-1..1) on its `.cat-look` groups.
 ///
+/// - Resting: while the window isn't the one in use, `data-cats-rest` on `<html>`; the cats hold
+///   still (no breathing, blinks or glances) until it is again. Their eyes still turn to a
+///   pointer passing over them, since that only moves when the person does.
+///
 /// `mascots.css` turns those into motion. With reduced motion asked for, the script does nothing.
 pub const MASCOT_LIFE: &str = r#"
 (() => {
@@ -64,8 +68,39 @@ pub const MASCOT_LIFE: &str = r#"
         clock.glancing = false;
         set(cat, ".cat-glance", { "--glance-x": null, "--glance-y": null });
     };
+    // Resting: while the window isn't the one in use (another window has focus, or it is
+    // minimised or on another desktop) the cats hold still. `mascots.css` pauses the body under
+    // data-cats-rest; here a blink in progress opens and a glance comes back to centre.
+    const root = document.documentElement;
+    const resting = () => root.hasAttribute("data-cats-rest");
+    const rest = () => {
+        if (resting()) return;
+        root.setAttribute("data-cats-rest", "");
+        for (const cat of cats) {
+            cat.removeAttribute("data-blink");
+            const clock = clocks.get(cat);
+            if (clock) { clock.openAt = 0; centre(cat, clock); }
+        }
+    };
+    const wake = () => {
+        if (document.hidden || !document.hasFocus()) return;
+        root.removeAttribute("data-cats-rest");
+        // A blink or a glance that came due while resting waits a moment rather than all at once.
+        const now = performance.now();
+        for (const cat of cats) {
+            const clock = clocks.get(cat);
+            if (!clock) continue;
+            clock.blinkAt = Math.max(clock.blinkAt, now + between(400, 3000));
+            clock.glanceAt = Math.max(clock.glanceAt, now + between(1000, 4000));
+        }
+    };
+    window.addEventListener("blur", rest);
+    window.addEventListener("focus", wake);
+    document.addEventListener("visibilitychange", () => (document.hidden ? rest() : wake()));
+    if (document.hidden || !document.hasFocus()) rest();
+
     const tick = () => {
-        if (document.hidden) return;
+        if (document.hidden || resting()) return;
         const now = performance.now();
         for (const cat of cats) {
             if (cat.dataset.mark === "letter") continue;
