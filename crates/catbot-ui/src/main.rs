@@ -23,13 +23,24 @@ const STYLES: Asset = asset!("/assets/tailwind.css");
 const MASCOT_STYLES: Asset = asset!("/assets/mascots.css");
 /// The bundled fonts, copied through as a folder so `fonts.css` finds its files beside it.
 const FONTS: Asset = asset!("/assets/fonts", AssetOptions::folder());
+/// Catbot's icon, the visor cat in teal (`assets/icon/`, drawn from `mascots.rs`): the browser
+/// tab's, with a small picture for browsers that don't take SVG icons.
+const ICON: Asset = asset!("/assets/icon/catbot.svg");
+const ICON_SMALL: Asset = asset!("/assets/icon/catbot-32.png");
 
 fn main() {
     #[cfg(feature = "desktop")]
     {
         use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
         let window = WindowBuilder::new().with_title("Catbot").with_inner_size(LogicalSize::new(1280.0, 840.0)).with_min_inner_size(LogicalSize::new(720.0, 480.0));
-        dioxus::LaunchBuilder::desktop().with_cfg(Config::new().with_window(window).with_menu(None)).launch(App);
+        let mut config = Config::new().with_window(window).with_menu(None);
+        // The window's icon, built into the program. (Under Wayland the taskbar takes its icon from
+        // the app's menu entry instead, which stage 7.4 installs.)
+        match dioxus::desktop::icon_from_memory(include_bytes!("../assets/icon/catbot-256.png")) {
+            Ok(icon) => config = config.with_icon(icon),
+            Err(err) => eprintln!("catbot: couldn't load the window icon: {err}"),
+        }
+        dioxus::LaunchBuilder::desktop().with_cfg(config).launch(App);
     }
     #[cfg(not(feature = "desktop"))]
     dioxus::launch(App);
@@ -110,6 +121,8 @@ fn App() -> Element {
         }
     });
     rsx! {
+        document::Link { rel: "icon", r#type: "image/svg+xml", href: ICON }
+        document::Link { rel: "icon", r#type: "image/png", sizes: "32x32", href: ICON_SMALL }
         document::Stylesheet { href: "{FONTS}/fonts.css" }
         document::Stylesheet { href: STYLES }
         document::Stylesheet { href: MASCOT_STYLES }
