@@ -12,4 +12,5 @@ if ! command -v dx >/dev/null 2>&1; then
 fi
 dx build -p catbot-ui --platform web --release
 echo
-echo "Built. Start Catbot with: cargo run -- serve   then open http://127.0.0.1:8788"
+echo "Built. If Catbot runs as a service: systemctl --user restart catbot. Otherwise: cargo run -- serve."
+echo "Then open http://127.0.0.1:8788"

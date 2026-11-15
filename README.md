@@ -42,6 +42,24 @@ cargo run -- serve        # then open http://127.0.0.1:8788
 `target/dx/catbot-ui/release/web/public` (`--ui` to change). OpenMausBot's interface on port 5199
 keeps working at the same time.
 
+## Running Catbot in the background
+
+So your bots keep running with no terminal or window open, Catbot can run as your own user
+service (systemd): it starts when you log in and comes back by itself if it ever stops.
+
+```sh
+scripts/install-service.sh            # build, install the service and start it
+systemctl --user status catbot        # is it running?
+journalctl --user -u catbot -f        # what it's saying
+systemctl --user restart catbot       # after a new build (the Claude helper does this itself)
+scripts/install-service.sh --remove   # back to starting it by hand
+```
+
+Run the install from your normal terminal: the service takes that terminal's `PATH` (to find
+`claude`) and any `CATBOT_HOME` / `CATBOT_CODEX`. Run it again after moving or reinstalling Claude
+Code; running it again also restarts Catbot on the new build. Stop any Catbot you started by hand
+first, since only one can use port 8788.
+
 ## Running OpenMausBot's interface on Catbot
 
 ```sh
