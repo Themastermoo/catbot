@@ -23,6 +23,7 @@ pub fn open(mut state: Signal<State>, mut ui: Ui, bot_id: &str, thread: &str) {
         bot.thread_id = thread.to_string();
     }
     ui.selected.set(Some(bot_id.to_string()));
+    ui.showing_chat.set(true);
     let path = format!("/api/bots/{bot_id}/tasks/{thread}?messages=0");
     spawn(async move {
         // Only remembers the choice; this window already shows the chat.
@@ -42,6 +43,7 @@ pub fn start(mut state: Signal<State>, mut ui: Ui, bot_id: String) {
             bot.thread_id = thread;
         }
         ui.selected.set(Some(bot_id));
+        ui.showing_chat.set(true);
     });
 }
 

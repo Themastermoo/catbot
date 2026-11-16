@@ -6,3 +6,14 @@ title = "Catbot"
 
 [web.watcher]
 watch_path = ["src", "assets", "tailwind.css"]
+
+# The phone app (dx build --platform android) and other bundles.
+[bundle]
+identifier = "com.moo.catbot"
+publisher = "Moo"
+product_name = "Catbot"
+icon = ["assets/icon/catbot-512.png"]
+
+# The phone app scans the pairing QR code with its camera.
+[permissions]
+camera = { description = "Scan the pairing code shown by Catbot on your computer" }

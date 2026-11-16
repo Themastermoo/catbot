@@ -32,14 +32,18 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     let ui = use_context::<Ui>();
     let shown: Vec<Bot> = bots.read().iter().filter(|b| b.matches(&query.read())).cloned().collect();
     let empty = bots.read().is_empty();
+    // On a phone the list gives way to the open chat.
+    let phone = if (ui.showing_chat)() { "max-md:hidden" } else { "" };
+    // Pairing other devices is done at home; the phone app has no devices button.
+    let at_home = !crate::link::pairs();
     rsx! {
         aside {
             "aria-label": "Bots",
             "data-sidebar": true,
-            class: "relative flex h-full w-[320px] shrink-0 flex-col border-r-[0.5px] border-edge bg-panel",
+            class: "relative flex h-full w-[320px] shrink-0 flex-col border-r-[0.5px] border-edge bg-panel max-md:w-full max-md:border-r-0 {phone}",
             div { "data-sidebar-top-row": true, class: "relative flex h-12 items-center pl-4 pr-2",
                 span { class: "min-w-0 flex-1 text-[15px] font-semibold text-ink", "Catbot" }
-                button {
+                if at_home { button {
                     r#type: "button",
                     "aria-label": "Devices",
                     title: "Devices away from home",
@@ -51,7 +55,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                         rect { x: "5", y: "2", width: "14", height: "20", rx: "2" }
                         path { d: "M12 18h.01" }
                     }
-                }
+                } }
                 button {
                     r#type: "button",
                     "aria-label": "New Bot",
@@ -104,7 +108,11 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                             unfolded: unfolded.read().contains(&bot.id) || chat_found(&bot, &query.read()),
                             query: query.read().clone(),
                             bot,
-                            on_select: move |id| selected.set(Some(id)),
+                            on_select: move |id| {
+                                selected.set(Some(id));
+                                let mut showing = ui.showing_chat;
+                                showing.set(true);
+                            },
                             on_fold: move |id: String| {
                                 let mut open = unfolded.write();
                                 if !open.remove(&id) {

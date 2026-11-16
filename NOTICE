@@ -18,6 +18,9 @@ OpenMausBot contributors, licensed under the Apache License, Version 2.0
   src/components/mascot-motion.ts, CursorAvatar.tsx and Avatar.tsx: the per-state
   body motions, blink cadence and pointer gaze, rewritten as CSS animations and a
   small script. The pictures themselves are Catbot's own.
+- jsQR 1.4.0 (crates/catbot-ui/assets/jsQR.js), by Cosmo Wolfe, Apache-2.0
+  (third_party/jsQR-LICENSE): the phone app reads pairing QR codes with it
+  when the phone's browser engine has no BarcodeDetector of its own.
 - How Catbot names chats (crates/catbot/src/titles.rs) is adapted from
   OpenMausBot's server/thread-title.ts and thread-title-generate.ts: the
   first-line name, the naming prompt and how the reply is cleaned.

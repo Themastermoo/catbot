@@ -24,8 +24,9 @@ pub async fn follow(mut on_frame: impl FnMut(Value)) {
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn follow(mut on_frame: impl FnMut(Value)) {
     use futures_util::StreamExt;
-    let url = format!("{}/api/events", crate::api::server());
-    let Ok(response) = crate::api::client().get(url).header("accept", "text/event-stream").send().await else { return };
+    let request = crate::api::request(reqwest::Method::GET, "/api/events").header("accept", "text/event-stream");
+    let Ok(response) = request.send().await else { return };
+    crate::api::check_paired(response.status().as_u16());
     if !response.status().is_success() {
         return;
     }

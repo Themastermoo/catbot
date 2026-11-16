@@ -77,6 +77,25 @@ The first run may print a link to turn on HTTPS and Funnel for your tailnet; app
 the script again. It ends by checking the address from outside, where Catbot's door should
 answer 401 (locked). Then pair a phone from the phone button at the top of the sidebar.
 
+## The phone app (Android)
+
+The same interface, as an Android app that talks to Catbot at home through its public address.
+It opens on **Pair with Catbot**: scan the QR code from the home screen's Devices dialog (or type
+the address and code), and it keeps its key in its own private storage. If home removes the
+phone, the app says so and asks to pair again. On a phone, the bot list and a chat take turns
+filling the screen (a back arrow in the chat header returns to the list).
+
+```sh
+bash scripts/build-android.sh   # → dist/catbot.apk, signed with Catbot's own key
+```
+
+It needs the Android SDK and NDK (`ANDROID_HOME`, `ANDROID_NDK_HOME`; installing them means
+accepting Google's Android SDK licence), Java 17+, `dx`, and `rustup target add
+aarch64-linux-android`. The signing key is made on the first build in
+`~/.local/share/catbot/android-key` (`CATBOT_ANDROID_KEY_DIR` to move it); keep it, since updates
+must be signed with the same key. To install: copy `dist/catbot.apk` to the phone, open it, and
+allow installing apps from that source when Android asks.
+
 ## The desktop app
 
 Catbot's interface also runs as its own window (WebKitGTK), with Catbot's icon in the KDE menu:

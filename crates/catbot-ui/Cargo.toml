@@ -23,7 +23,7 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 # In the desktop app: the same, natively.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "rustls-tls"] }
 tokio = { version = "1", features = ["time"] }
 
 [features]

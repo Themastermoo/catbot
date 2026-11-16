@@ -2,7 +2,9 @@
 //!
 //! Two ways in, one shape: in a browser (wasm) through the browser's own fetch, from the page's
 //! own server; in the desktop app (native) through reqwest, to `catbot serve` on this computer
-//! (`CATBOT_URL`, else http://127.0.0.1:8788).
+//! (`CATBOT_URL`, else http://127.0.0.1:8788). The phone app goes to Catbot's public address
+//! instead, with its device key (`link.rs`); if home has removed the device, the link is
+//! forgotten and the app asks to pair again.
 
 use serde_json::Value;
 
@@ -29,10 +31,31 @@ pub async fn call(method: &str, path: &str, body: Option<&Value>) -> Result<Valu
     serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))
 }
 
-/// Where `catbot serve` is, for the desktop app.
+/// Where `catbot serve` is: the paired public address (the phone app), else this computer.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn server() -> String {
+    if let Some(link) = crate::link::current() {
+        return link.url;
+    }
     std::env::var("CATBOT_URL").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "http://127.0.0.1:8788".into()).trim_end_matches('/').to_string()
+}
+
+/// A request to Catbot, with this device's key when it's paired.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn request(method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
+    let request = client().request(method, format!("{}{path}", server()));
+    match crate::link::current() {
+        Some(link) => request.bearer_auth(link.key),
+        None => request,
+    }
+}
+
+/// After an answer: a paired device that's told it isn't paired forgets its link.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn check_paired(status: u16) {
+    if status == 401 && crate::link::current().is_some() {
+        crate::link::forget();
+    }
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -57,14 +80,14 @@ async fn send(method: &str, path: &str, body: Option<&Value>) -> Result<(u16, St
 
 #[cfg(not(target_arch = "wasm32"))]
 async fn send(method: &str, path: &str, body: Option<&Value>) -> Result<(u16, String), String> {
-    let client = client();
     let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-    let mut request = client.request(method, format!("{}{path}", server()));
+    let mut request = request(method, path);
     if let Some(body) = body {
         request = request.json(body);
     }
     let response = request.send().await.map_err(|e| format!("Catbot didn't answer at {} ({e})", server()))?;
     let status = response.status().as_u16();
+    check_paired(status);
     Ok((status, response.text().await.unwrap_or_default()))
 }
 

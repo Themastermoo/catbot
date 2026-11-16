@@ -8,6 +8,8 @@ mod bots;
 mod chat;
 mod chats;
 mod devices;
+mod link;
+mod pair;
 mod events;
 mod live;
 mod mascots;
@@ -42,10 +44,10 @@ fn main() {
             Ok(icon) => config = config.with_icon(icon),
             Err(err) => eprintln!("catbot: couldn't load the window icon: {err}"),
         }
-        dioxus::LaunchBuilder::desktop().with_cfg(config).launch(App);
+        dioxus::LaunchBuilder::desktop().with_cfg(config).launch(Root);
     }
     #[cfg(not(feature = "desktop"))]
-    dioxus::launch(App);
+    dioxus::launch(Root);
 }
 
 /// Follows the system's light or dark setting, live, as OpenMausBot does by default:
@@ -71,16 +73,48 @@ const NEW_CHAT_KEY: &str = r#"
 "#;
 
 #[component]
-fn App() -> Element {
+fn Root() -> Element {
     use_hook(|| {
         document::eval(FOLLOW_SYSTEM_SKIN);
         document::eval(mascots::MASCOT_LIFE);
         document::eval(NEW_CHAT_KEY);
     });
+    // Whether this app is paired with Catbot: always, for the web and desktop apps. The phone
+    // app starts unpaired, and goes back to the pairing screen if home removes it.
+    let mut paired = use_signal(|| !link::pairs() || link::current().is_some());
+    // Set once a paired phone has been told it isn't paired any more.
+    let mut removed = use_signal(|| false);
+    rsx! {
+        document::Link { rel: "icon", r#type: "image/svg+xml", href: ICON }
+        document::Link { rel: "icon", r#type: "image/png", sizes: "32x32", href: ICON_SMALL }
+        document::Meta { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" }
+        document::Stylesheet { href: "{FONTS}/fonts.css" }
+        document::Stylesheet { href: STYLES }
+        document::Stylesheet { href: MASCOT_STYLES }
+        if paired() {
+            App { on_unpaired: move |_| {
+                removed.set(true);
+                paired.set(false);
+            } }
+        } else {
+            pair::PairScreen { removed: removed(), on_paired: move |_| {
+                removed.set(false);
+                paired.set(true);
+            } }
+        }
+    }
+}
+
+#[component]
+fn App(on_unpaired: EventHandler<()>) -> Element {
     let mut state = use_context_provider(|| Signal::new(live::State::default()));
     let mut selected = use_signal(|| None::<String>);
     let settings_open = use_signal(|| false);
-    use_context_provider(|| settings::Ui { selected, settings_open });
+    // On a phone, the bot list and a chat take turns filling the screen.
+    let showing_chat = use_signal(|| false);
+    use_context_provider(|| settings::Ui { selected, settings_open, showing_chat });
+    // A paired phone that home has removed: back to pairing.
+    let unpaired = move || link::pairs() && link::current().is_none();
     let mut problem = use_signal(|| None::<String>);
 
     // Fetches the bot list, and has every open conversation fetched again: at start, and after
@@ -102,6 +136,7 @@ fn App() -> Element {
                     }
                     problem.set(None);
                 }
+                Err(_) if unpaired() => on_unpaired.call(()),
                 Err(err) => problem.set(Some(err)),
             }
         });
@@ -120,6 +155,10 @@ fn App() -> Element {
                 }
             })
             .await;
+            if unpaired() {
+                on_unpaired.call(());
+                return;
+            }
             // The stream ended (Catbot restarted, or the network dropped): try again shortly.
             events::pause(2_000).await;
         }
@@ -137,11 +176,6 @@ fn App() -> Element {
         }
     });
     rsx! {
-        document::Link { rel: "icon", r#type: "image/svg+xml", href: ICON }
-        document::Link { rel: "icon", r#type: "image/png", sizes: "32x32", href: ICON_SMALL }
-        document::Stylesheet { href: "{FONTS}/fonts.css" }
-        document::Stylesheet { href: STYLES }
-        document::Stylesheet { href: MASCOT_STYLES }
         div { class: "flex h-screen flex-col bg-app text-ink",
             div { class: "relative flex min-h-0 flex-1",
                 Sidebar { bots, selected }
@@ -156,7 +190,19 @@ fn App() -> Element {
 fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, problem: ReadSignal<Option<String>>) -> Element {
     let ui = use_context::<settings::Ui>();
     let open = selected.read().as_ref().and_then(|id| bots.read().iter().find(|b| &b.id == id).cloned());
-    match (problem(), open) {
+    // On a phone, the chat shows only once a bot has been opened from the list.
+    let phone = if (ui.showing_chat)() { "" } else { "max-md:hidden" };
+    rsx! {
+        div { class: "relative flex h-full min-w-0 flex-1 {phone}",
+            MainView { open, problem: problem() }
+        }
+    }
+}
+
+#[component]
+fn MainView(open: Option<Bot>, problem: Option<String>) -> Element {
+    let ui = use_context::<settings::Ui>();
+    match (problem, open) {
         (Some(err), _) => rsx! {
             main { class: "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center bg-app",
                 p { role: "alert", class: "text-[13px] text-danger", "Can't reach Catbot: {err}" }

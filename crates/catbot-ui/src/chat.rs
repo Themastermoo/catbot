@@ -588,6 +588,17 @@ fn ChatHead(bot: Bot) -> Element {
                     }
                 }
             }
+            // On a phone: back to the bot list.
+            button {
+                r#type: "button",
+                "data-back-to-list": true,
+                "aria-label": "Back to bots",
+                class: "absolute left-3 top-1/2 flex size-9 -translate-y-1/2 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink md:hidden",
+                onclick: move |_| ui.showing_chat.set(false),
+                svg { "aria-hidden": "true", width: "20", height: "20", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                    path { d: "m15 18-6-6 6-6" }
+                }
+            }
             button {
                 r#type: "button",
                 "data-new-chat": true,

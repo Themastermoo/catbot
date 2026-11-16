@@ -18,6 +18,8 @@ use crate::mascots::{BotMark, COLORS, MARKS};
 pub struct Ui {
     pub selected: Signal<Option<String>>,
     pub settings_open: Signal<bool>,
+    /// On a phone (narrow screens), whether the open chat fills the screen rather than the list.
+    pub showing_chat: Signal<bool>,
 }
 
 /// Their approval levels, in their words.
