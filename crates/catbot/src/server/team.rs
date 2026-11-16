@@ -288,17 +288,27 @@ pub async fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -
         remember(app, thread, &format!("The person declined: {title}."));
         return Ok((StatusCode::OK, json!({ "ok": true, "state": "declined" })));
     }
-    // Sending an email takes a moment: the card says so meanwhile.
-    if detail["action"] == "send_mail" {
-        let mut sending = detail.clone();
-        sending["state"] = json!("sending");
-        update(app, thread, id, &sending);
+    // Sending an email or publishing a page takes a moment: the card says so meanwhile.
+    let slow = match detail["action"].as_str() {
+        Some("send_mail") => Some("sending"),
+        Some("publish_page") => Some("publishing"),
+        _ => None,
+    };
+    if let Some(state) = slow {
+        let mut working = detail.clone();
+        working["state"] = json!(state);
+        update(app, thread, id, &working);
     }
     let outcome = apply(app, &detail).await;
     match &outcome {
-        Ok(()) => {
+        Ok(note) => {
             detail["state"] = json!("done");
-            remember(app, thread, &format!("The person approved, and it's done: {title}."));
+            // What came of it (a page's link), on the card and for the bot.
+            if let Some(note) = note {
+                detail["doneText"] = json!(note);
+            }
+            let more = note.as_deref().map(|n| format!(" {n}")).unwrap_or_default();
+            remember(app, thread, &format!("The person approved, and it's done: {title}.{more}"));
         }
         Err(why) => {
             detail["state"] = json!("failed");
@@ -311,13 +321,14 @@ pub async fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -
 }
 
 /// Does an approved change.
-async fn apply(app: &Arc<App>, detail: &Value) -> Result<(), String> {
+async fn apply(app: &Arc<App>, detail: &Value) -> Result<Option<String>, String> {
     let target = detail["target"].as_str().unwrap_or_default();
     let body = detail["body"].clone();
     let refused = |(_, why): (StatusCode, String)| why;
     let bot = || app.with_store(|store| store.bot_by_id(target)).flatten().ok_or_else(|| "that bot is gone".to_string());
     let channel = || app.with_store(|store| store.channel(target)).flatten().ok_or_else(|| "that channel is gone".to_string());
-    match detail["action"].as_str().unwrap_or_default() {
+    let done = match detail["action"].as_str().unwrap_or_default() {
+        "publish_page" => return super::pages::publish(app, &body).await.map(Some),
         "create_bot" => super::make_bot(app, &body).map(|_| ()).map_err(refused),
         "change_bot" => super::patch_bot(app, bot()?, body).map(|_| ()).map_err(refused),
         "delete_bot" => super::remove_bot(app, &bot()?).map(|_| ()).map_err(refused),
@@ -327,7 +338,8 @@ async fn apply(app: &Arc<App>, detail: &Value) -> Result<(), String> {
         "save_skill" => super::skills::save_approved(app, target, body["text"].as_str().unwrap_or_default()),
         "send_mail" => super::email::send(app, &body).await,
         other => Err(format!("{other} isn't a change Catbot knows")),
-    }
+    };
+    done.map(|_| None)
 }
 
 fn update(app: &App, thread: &str, id: i64, detail: &Value) {

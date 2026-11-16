@@ -59,6 +59,12 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
     if segments.as_slice() == ["api", "pair"] && method == Method::POST {
         return respond(pair(&app, req).await);
     }
+    // Published pages are for anyone with the link (`pages.rs`).
+    if let ["p", id, rest @ ..] = segments.as_slice()
+        && method == Method::GET
+    {
+        return super::pages::serve(&app, id, rest).await;
+    }
     let Some(device) = device(&app, &req) else { return unauthorized() };
     match segments.as_slice() {
         ["api", "device"] if method == Method::GET => {
@@ -71,6 +77,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "usage", rest @ ..] if method == Method::GET => super::usage_route(&app, rest, super::usage_query(&req)).await,
         ["api", "limits"] if method == Method::GET => respond(super::limits::route(&app, &method, None, false).await),
         ["api", "handoffs"] if method == Method::GET => respond(super::handoffs::route(&app, None)),
+        ["api", "pages"] if method == Method::GET => respond(super::pages::route(&app, &method, &[]).await),
         ["api", "email"] if method == Method::GET => respond(super::email::route(&app, &method, &[], None, None).await),
         ["api", "skills"] if method == Method::GET => respond(super::skills::route(&app, &method, &[], None).await),
         ["api", "chief"] if method == Method::GET => respond(super::chief::route(&app, &method, &[], None)),

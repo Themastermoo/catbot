@@ -131,6 +131,16 @@ impl Setup {
         (status, kind, resp.into_body().collect().await.unwrap().to_bytes().to_vec())
     }
 
+    /// A GET at either door, with no key: its status, its Content-Security-Policy, and its text.
+    async fn page(&self, away: bool, path: &str) -> (u16, String, String) {
+        let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
+        let base = if away { &self.away } else { &self.base };
+        let resp = client.request(hyper::Request::get(format!("{base}{path}")).body(Full::new(Bytes::new())).unwrap()).await.unwrap();
+        let status = resp.status().as_u16();
+        let csp = resp.headers().get("content-security-policy").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        (status, csp, String::from_utf8_lossy(&resp.into_body().collect().await.unwrap().to_bytes()).to_string())
+    }
+
     /// Opens the live stream; frames arrive on the returned channel.
     async fn events(&self) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
         self.stream(&self.base, None).await
@@ -1624,4 +1634,66 @@ async fn a_chosen_bot_reads_the_mailbox_through_catbots_tools() {
     s.call("DELETE", "/api/email", None).await;
     assert!(reply(&s, &mut events, "catbot-tool: mail_search {}").await.contains("no tool mail_search"));
     imap.kill().unwrap();
+}
+
+#[tokio::test]
+async fn a_bot_publishes_a_page_once_approved_and_it_can_be_taken_down() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let site = s._dir.path().join("home/bots/scout/site");
+    std::fs::create_dir_all(site.join("img")).unwrap();
+    std::fs::write(site.join("index.html"), "<h1>Garden plan</h1>").unwrap();
+    std::fs::write(site.join("img/bed.svg"), "<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap();
+    let ask = async |s: &Setup, events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, text: &str| -> String {
+        s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": text }))).await;
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+
+    let outside = ask(&s, &mut events, r#"catbot-tool: page_publish {"path": "../../skills", "title": "Sneaky"}"#).await;
+    assert!(outside.starts_with("ERROR: "), "{outside}");
+    let waiting = ask(&s, &mut events, r#"catbot-tool: page_publish {"path": "site", "title": "Garden plan"}"#).await;
+    assert!(waiting.contains("waiting for the person's approval"), "{waiting}");
+    let (_, bot) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    let thread = bot["bot"]["threadId"].as_str().unwrap().to_string();
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=50"), None).await;
+    let card = page["messages"].as_array().unwrap().iter().rev().find(|m| m["kind"] == "team-change").unwrap().clone();
+    assert_eq!(card["teamChange"]["title"], "Publish “Garden plan”");
+    assert!(card["teamChange"]["lines"][0].as_str().unwrap().starts_with("Files: img/bed.svg, index.html (2 in all"), "{card}");
+    let (_, listed) = s.call("GET", "/api/pages", None).await;
+    assert_eq!(listed["pages"], json!([]), "nothing online before the yes");
+
+    let id = card["id"].as_str().unwrap();
+    let (_, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{id}"), Some(json!({ "approve": true }))).await;
+    assert_eq!(answered["state"], "done", "{answered}");
+    let (_, listed) = s.call("GET", "/api/pages", None).await;
+    let published = &listed["pages"][0];
+    assert_eq!((published["title"].as_str(), published["botName"].as_str(), published["files"].as_u64()), (Some("Garden plan"), Some("Scout"), Some(2)));
+    let page_id = published["id"].as_str().unwrap().to_string();
+    assert!(published["url"].as_str().unwrap().ends_with(&format!("/p/{page_id}/")));
+
+    // Served at both doors, with no key, sandboxed; nothing outside it.
+    let (status, csp, html) = s.page(false, &format!("/p/{page_id}/")).await;
+    assert_eq!((status, html.as_str()), (200, "<h1>Garden plan</h1>"));
+    assert!(csp.starts_with("sandbox"), "{csp}");
+    assert_eq!(s.page(true, &format!("/p/{page_id}/img/bed.svg")).await.0, 200);
+    assert_eq!(s.page(true, &format!("/p/{page_id}/..%2F..%2Fdata.db")).await.0, 404);
+    assert_eq!(s.page(true, "/p/0123456789abcdef0123456789abcdef/").await.0, 404);
+    std::fs::write(site.join("index.html"), "<h1>Changed</h1>").unwrap();
+    assert_eq!(s.page(false, &format!("/p/{page_id}/")).await.2, "<h1>Garden plan</h1>", "a copy: changes show once published again");
+
+    // Updated in place, then taken down.
+    ask(&s, &mut events, &format!(r#"catbot-tool: page_publish {{"path": "site", "title": "Garden plan", "update": "{page_id}"}}"#)).await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+    let card = page["messages"].as_array().unwrap().iter().rev().find(|m| m["kind"] == "team-change").unwrap().clone();
+    assert_eq!(card["teamChange"]["title"], "Update “Garden plan”");
+    s.call("POST", &format!("/api/threads/{thread}/team/{}", card["id"].as_str().unwrap()), Some(json!({ "approve": true }))).await;
+    assert_eq!(s.page(false, &format!("/p/{page_id}/")).await.2, "<h1>Changed</h1>");
+    assert_eq!(s.call("GET", "/api/pages", None).await.1["pages"].as_array().unwrap().len(), 1);
+    assert_eq!(s.call("DELETE", &format!("/api/pages/{page_id}"), None).await.0, 200);
+    assert_eq!(s.page(true, &format!("/p/{page_id}/")).await.0, 404);
 }

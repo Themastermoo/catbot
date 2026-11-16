@@ -32,9 +32,11 @@ impl Drop for Open {
     }
 }
 
-/// The tools a bot has: none unless something gives it some (its mailbox, for one).
+/// The tools a bot has: publishing pages, and its mailbox if it may use one.
 pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
-    super::email::tools_for(app, bot_id)
+    let mut tools = super::pages::tools();
+    tools.extend(super::email::tools_for(app, bot_id));
+    tools
 }
 
 /// A key for a turn, if the bot has any tools and Catbot knows its own address.
@@ -68,7 +70,11 @@ pub async fn route(app: &Arc<App>, call: bool, req: Request) -> Answer {
     if !tools_for(app, &grant.bot_id).iter().any(|t| t["name"] == name) {
         return Ok((StatusCode::OK, json!({ "text": format!("There's no Catbot tool called {name} for this bot."), "isError": true })));
     }
-    let answer = if name.starts_with("mail_") { super::email::call(app, &grant, name, &args).await } else { Err(format!("unknown tool {name}")) };
+    let answer = match name {
+        "page_publish" => super::pages::propose(app, &grant, &args).await,
+        _ if name.starts_with("mail_") => super::email::call(app, &grant, name, &args).await,
+        _ => Err(format!("unknown tool {name}")),
+    };
     Ok((StatusCode::OK, match answer {
         Ok(text) => json!({ "text": text }),
         Err(text) => json!({ "text": text, "isError": true }),

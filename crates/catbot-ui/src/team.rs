@@ -81,8 +81,21 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                     p { class: "pl-6 text-warning", "{warning}" }
                 }
                 match change.state.as_str() {
-                    "done" => rsx! { p { class: "text-ink-tertiary", "{change.done_text.clone().unwrap_or_else(|| \"Approved and done.\".into())}" } },
+                    "done" => {
+                        let text = change.done_text.clone().unwrap_or_else(|| "Approved and done.".into());
+                        let (before, link, after) = with_link(&text);
+                        rsx! {
+                            p { class: "text-ink-tertiary",
+                                "{before}"
+                                if !link.is_empty() {
+                                    a { class: "text-accent underline", href: "{link}", target: "_blank", rel: "noopener", "data-done-link": true, "{link}" }
+                                }
+                                "{after}"
+                            }
+                        }
+                    }
                     "sending" => rsx! { p { class: "text-ink-secondary", "Sending…" } },
+                    "publishing" => rsx! { p { class: "text-ink-secondary", "Publishing…" } },
                     "declined" => rsx! { p { class: "text-ink-tertiary", "Declined. Nothing changed." } },
                     _ => rsx! {},
                 }
@@ -114,5 +127,27 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                 }
             }
         }
+    }
+}
+
+/// Splits a note around its first web address, so the card can make it a link: a published
+/// page's "It's at https://…".
+fn with_link(text: &str) -> (String, String, String) {
+    let Some(start) = text.find("https://").or_else(|| text.find("http://")) else {
+        return (text.to_string(), String::new(), String::new());
+    };
+    let rest = &text[start..];
+    let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+    let link = rest[..end].trim_end_matches(['.', ',', ')', ';', ':']);
+    (text[..start].to_string(), link.to_string(), text[start + link.len()..].to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_note_with_an_address_becomes_a_link() {
+        let (a, l, b) = super::with_link("It's at http://x.test/p/1/, on this computer only.");
+        assert_eq!((a.as_str(), l.as_str(), b.as_str()), ("It's at ", "http://x.test/p/1/", ", on this computer only."));
+        assert_eq!(super::with_link("Sent.").1, "");
     }
 }

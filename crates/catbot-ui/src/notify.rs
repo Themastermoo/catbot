@@ -211,6 +211,10 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"team\"}", "data-settings-team": true, class: tab(page() == "team"), onclick: move |_| page.set("team"), "Team" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"skills\"}", "data-settings-skills": true, class: tab(page() == "skills"), onclick: move |_| page.set("skills"), "Skills" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"email\"}", "data-settings-email": true, class: tab(page() == "email"), onclick: move |_| page.set("email"), "Email" }
+                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"pages\"}", "data-settings-pages-list": true, class: tab(page() == "pages"), onclick: move |_| page.set("pages"), "Pages" }
+                }
+                if page() == "pages" {
+                    crate::pages::PagesList {}
                 }
                 if page() == "email" {
                     crate::email::EmailSettings {}
