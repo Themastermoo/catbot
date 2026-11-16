@@ -1444,3 +1444,45 @@ async fn the_chief_writes_the_daily_brief_from_catbots_facts() {
     assert_eq!(set["chief"]["brief"], json!({ "on": true, "time": "07:30", "days": [1, 2, 3, 4, 5, 6] }));
     assert_eq!(s.call("PUT", "/api/chief", Some(json!({ "brief": { "time": "half seven" } }))).await.0, 400);
 }
+
+#[tokio::test]
+async fn a_team_comes_in_from_a_file_after_a_look_and_goes_out_as_one() {
+    let s = setup().await;
+    let file = "---\nbotmrr: 1\nid: garden\nname: Garden Crew\ntagline: Grow things.\nagents:\n  - key: ada\n    name: Ada\n    title: Lead Gardener\n    description: Plans the beds.\n    appearance:\n      color: purple\n  - key: lin\n    name: Lin\n    description: Waters.\n  - key: moss\n    name: Moss\n    description: Composts.\nchiefOfStaff: ada\nrooms:\n  - key: shed\n    name: Shed\n    members: [ada, lin, moss]\n    bulletin: Keep it tidy.\n    defaultResponder:\n      kind: agent\n      agent: lin\nroutines:\n  - key: daily\n    enabledAfterInstall: false\nrequirements:\n  apps:\n    - slug: gmail\n      label: Gmail\n---\n\n# Garden Crew\n\n## Activation\n\nRead it all.\n";
+
+    // The look before anything is made.
+    let (status, looked) = s.call("POST", "/api/teams/preview", Some(json!({ "text": file }))).await;
+    assert_eq!(status, 200, "{looked}");
+    let plan = &looked["plan"];
+    assert_eq!(plan["bots"].as_array().unwrap().len(), 3);
+    assert_eq!((plan["chief"]["name"].as_str(), plan["channels"][0]["lead"].as_str()), (Some("Ada"), Some("Lin")));
+    let left = plan["leftOut"].to_string();
+    assert!(left.contains("1 routine") && left.contains("Gmail"), "{left}");
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    assert!(!list["bots"].as_array().unwrap().iter().any(|b| b["name"] == "Ada"), "nothing made by looking");
+    assert_eq!(s.call("POST", "/api/teams/preview", Some(json!({ "text": "hello" }))).await.0, 400);
+
+    // Made, leaving Moss out, with Ada as Chief.
+    let (status, made) = s.call("POST", "/api/teams/import", Some(json!({ "text": file, "leaveOut": ["moss"], "makeChief": true }))).await;
+    assert_eq!(status, 201, "{made}");
+    assert_eq!(made["bots"], json!(["Ada", "Lin"]));
+    assert_eq!((made["channels"][0].as_str(), made["chief"].as_str()), (Some("Shed"), Some("Ada")));
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    let bots = list["bots"].as_array().unwrap();
+    let ada = bots.iter().find(|b| b["name"] == "Ada").unwrap();
+    assert_eq!((ada["chief"].as_bool(), ada["approvalMode"].as_str(), ada["color"].as_str()), (Some(true), Some("ask"), Some("purple")));
+    assert!(ada["soul"].as_str().unwrap().contains("Your role on the Garden Crew team: Lead Gardener."));
+    assert!(s._dir.path().join("home/bots/ada/TEAM.md").is_file());
+    let shed = bots.iter().find(|b| b["name"] == "Shed").unwrap();
+    assert_eq!((shed["soul"].as_str(), shed["channel"]["members"].as_array().unwrap().len()), (Some("Keep it tidy."), 2));
+
+    // Out again as a file that reads back in.
+    let (status, out) = s.call("POST", "/api/teams/export", Some(json!({ "name": "Garden Crew", "tagline": "Grow things." }))).await;
+    assert_eq!(status, 200, "{out}");
+    let markdown = out["markdown"].as_str().unwrap();
+    assert!(markdown.starts_with("---\nbotmrr: 1") && markdown.contains("chiefOfStaff: ada") && markdown.contains("## Completion rule"), "{markdown}");
+    assert_eq!(out["filename"], "garden-crew.md");
+    let (_, again) = s.call("POST", "/api/teams/preview", Some(json!({ "text": markdown }))).await;
+    assert_eq!(again["plan"]["bots"].as_array().unwrap().len(), 2);
+    assert_eq!(again["plan"]["channels"][0]["lead"], "Lin");
+}

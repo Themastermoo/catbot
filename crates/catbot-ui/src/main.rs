@@ -11,6 +11,7 @@ mod bots;
 mod changes;
 mod channels;
 mod team;
+mod teams;
 mod chief;
 mod handoffs;
 mod chat;

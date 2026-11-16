@@ -11,6 +11,7 @@ pub mod backups;
 pub mod changes;
 pub mod channels;
 pub mod team;
+pub mod teams;
 pub mod chief;
 pub mod handoffs;
 pub mod limits;
@@ -326,6 +327,18 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(limits::route(&app, &method, body, true).await)
         }
         ["api", "handoffs"] if method == Method::GET => respond(handoffs::route(&app, None)),
+        ["api", "teams", which] if method == Method::POST => {
+            let body = match json_body(req).await {
+                Ok(body) => body,
+                Err(err) => return respond(Err(err)),
+            };
+            respond(match *which {
+                "preview" => teams::preview(&app, &body).await,
+                "import" => teams::import(&app, &body),
+                "export" => teams::export(&app, &body),
+                _ => Err((StatusCode::NOT_FOUND, "no such team route".into())),
+            })
+        }
         ["api", "chief", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

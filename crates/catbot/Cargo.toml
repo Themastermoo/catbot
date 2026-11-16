@@ -27,6 +27,8 @@ base64 = "0.22"
 # Turns the SVG drawings Claude makes into pictures.
 resvg = "0.45"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "rustls-tls"] }
+# Reads and writes the YAML at the top of a team file (MausBot's portable format).
+serde_yaml_ng = "0.10"
 
 [dev-dependencies]
 tempfile = "3"

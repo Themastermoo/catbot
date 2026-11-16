@@ -188,6 +188,13 @@ pub fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>
     }
 }
 
+/// Makes a bot the Chief.
+pub fn make_chief(app: &App, bot_id: &str) {
+    let mut next = options(app);
+    next.bot_id = Some(bot_id.to_string());
+    set(app, next);
+}
+
 /// Saves the options, and shows the change: an old and new Chief lose and gain their star.
 fn set(app: &App, next: Options) {
     let before = options(app);

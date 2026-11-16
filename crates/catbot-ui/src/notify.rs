@@ -208,6 +208,10 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
                 div { role: "tablist", class: "flex gap-1", "data-settings-pages": true,
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"general\"}", class: tab(page() == "general"), onclick: move |_| page.set("general"), "General" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"chief\"}", "data-settings-chief": true, class: tab(page() == "chief"), onclick: move |_| page.set("chief"), "Chief of Staff" }
+                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"team\"}", "data-settings-team": true, class: tab(page() == "team"), onclick: move |_| page.set("team"), "Team" }
+                }
+                if page() == "team" {
+                    crate::teams::TeamFiles {}
                 }
                 if page() == "chief" {
                     crate::chief::ChiefOptions {}
