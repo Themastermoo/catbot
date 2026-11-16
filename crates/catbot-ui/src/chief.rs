@@ -82,6 +82,7 @@ pub fn ChiefOptions() -> Element {
             }
         }
         if !chief_id.is_empty() {
+            DailyBrief { options: current["chief"].clone(), on_change: move |answer: Value| found.set(Some(answer)) }
             CheckIns { options: current["chief"].clone(), on_change: move |answer: Value| found.set(Some(answer)) }
         }
     }
@@ -101,6 +102,92 @@ fn save(change: Value, on_change: EventHandler<Value>, mut problem: Signal<Optio
             Err(err) => problem.set(Some(format!("Couldn't save: {err}"))),
         }
     });
+}
+
+/// Day buttons, Monday to Sunday; a press saves the new set under `key`.
+#[component]
+fn Days(days: Vec<u64>, key_name: String, label: String, on_change: EventHandler<Value>, problem: Signal<Option<String>>) -> Element {
+    rsx! {
+        div { class: "flex flex-wrap gap-1", role: "group", "aria-label": "{label}",
+            for (day, name) in DAYS {
+                {
+                    let on = days.contains(&day);
+                    let others = days.clone();
+                    let key_name = key_name.clone();
+                    rsx! {
+                        button {
+                            key: "{day}",
+                            r#type: "button",
+                            "aria-pressed": "{on}",
+                            "data-day": "{name}",
+                            class: if on { "rounded-full bg-accent px-2.5 py-1 text-[12px] font-semibold text-white" } else { "rounded-full bg-control px-2.5 py-1 text-[12px] text-ink-secondary hover:text-ink" },
+                            onclick: move |_| {
+                                let mut next: Vec<u64> = others.iter().copied().filter(|d| *d != day).collect();
+                                if !on {
+                                    next.push(day);
+                                    next.sort_unstable();
+                                }
+                                save(json!({ key_name.clone(): { "days": next } }), on_change, problem);
+                            },
+                            "{name}"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The daily brief: on or off, its time and days, and one now.
+#[component]
+fn DailyBrief(options: Value, on_change: EventHandler<Value>) -> Element {
+    let problem = use_signal(|| None::<String>);
+    let mut sent = use_signal(|| None::<String>);
+    let brief = options["brief"].clone();
+    let on = brief["on"].as_bool().unwrap_or(true);
+    let time = brief["time"].as_str().unwrap_or("08:00").to_string();
+    let days: Vec<u64> = brief["days"].as_array().map(|d| d.iter().filter_map(Value::as_u64).collect()).unwrap_or_default();
+    let send_now = move |_| {
+        spawn(async move {
+            match api::post("/api/chief/brief", &json!({})).await {
+                Ok(answer) if answer["woke"] == true => sent.set(Some("The Chief is writing it.".into())),
+                Ok(_) => sent.set(Some("The Chief is busy; try again in a moment.".into())),
+                Err(err) => sent.set(Some(err)),
+            }
+        });
+    };
+    rsx! {
+        section { class: "flex flex-col gap-3", "data-chief-brief": true,
+            h2 { class: HEADING, "Daily brief" }
+            div { class: "flex items-center gap-3",
+                div { class: "min-w-0 flex-1",
+                    div { class: "text-[14px] text-ink", "Send me a daily brief" }
+                    div { class: "text-[12px] leading-snug text-ink-secondary", "Catbot gathers what each bot did, what's waiting on you, what went wrong and what you've spent; the Chief writes it up in its chat. One AI turn a day." }
+                }
+                crate::settings::Switch { checked: on, disabled: false, label: "Daily brief".to_string(), on_toggle: move |_| save(json!({ "brief": { "on": !on } }), on_change, problem) }
+            }
+            if on {
+                div { class: "flex flex-wrap items-center gap-2 pl-1 text-[13px] text-ink",
+                    span { "At" }
+                    input { key: "brief-{time}", class: FIELD, r#type: "time", "data-brief-time": true, initial_value: "{time}",
+                        onchange: move |e| save(json!({ "brief": { "time": e.value() } }), on_change, problem) }
+                    span { class: "text-ink-secondary", "this computer's time, on" }
+                }
+                div { class: "pl-1", "data-brief-days": true,
+                    Days { days, key_name: "brief", label: "Brief days", on_change, problem }
+                }
+            }
+            div { class: "flex flex-wrap items-center gap-2",
+                button { r#type: "button", "data-brief-now": true, class: "rounded-lg bg-control px-3 py-1.5 text-[13px] font-medium text-ink hover:bg-raised", onclick: send_now, "Send a brief now" }
+                if let Some(said) = sent() {
+                    span { class: "text-[12px] text-ink-secondary", "{said}" }
+                }
+            }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "text-[12px] text-danger", "{err}" }
+            }
+        }
+    }
 }
 
 /// The watch, timed check-ins, and a look now.
@@ -155,31 +242,8 @@ fn CheckIns(options: Value, on_change: EventHandler<Value>) -> Element {
                     input { key: "to-{to}", class: FIELD, r#type: "time", "data-checkin-to": true, initial_value: "{to}",
                         onchange: move |e| save(json!({ "checkins": { "to": e.value() } }), on_change, problem) }
                 }
-                div { class: "flex flex-wrap gap-1 pl-1", role: "group", "aria-label": "Check-in days",
-                    for (day, label) in DAYS {
-                        {
-                            let on = days.contains(&day);
-                            let others = days.clone();
-                            rsx! {
-                                button {
-                                    key: "{day}",
-                                    r#type: "button",
-                                    "aria-pressed": "{on}",
-                                    "data-checkin-day": "{label}",
-                                    class: if on { "rounded-full bg-accent px-2.5 py-1 text-[12px] font-semibold text-white" } else { "rounded-full bg-control px-2.5 py-1 text-[12px] text-ink-secondary hover:text-ink" },
-                                    onclick: move |_| {
-                                        let mut next: Vec<u64> = others.iter().copied().filter(|d| *d != day).collect();
-                                        if !on {
-                                            next.push(day);
-                                            next.sort_unstable();
-                                        }
-                                        save(json!({ "checkins": { "days": next } }), on_change, problem);
-                                    },
-                                    "{label}"
-                                }
-                            }
-                        }
-                    }
+                div { class: "pl-1", "data-checkin-days": true,
+                    Days { days, key_name: "checkins", label: "Check-in days", on_change, problem }
                 }
             }
             div { class: "flex flex-wrap items-center gap-2",

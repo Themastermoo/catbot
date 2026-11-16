@@ -1416,3 +1416,31 @@ async fn the_watch_wakes_the_chief_when_something_goes_wrong() {
     let status = asked["message"]["text"].as_str().unwrap();
     assert!(status.contains("Timed check-in") && status.contains("Scout: idle"), "{status}");
 }
+
+#[tokio::test]
+async fn the_chief_writes_the_daily_brief_from_catbots_facts() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": "Plan the beds" }))).await;
+    until(&mut events, "scout done", |f| runtime(f, "turn.completed")).await;
+    s.call("POST", "/api/chief/ready-made", None).await;
+    let (_, options) = s.call("GET", "/api/chief", None).await;
+    assert_eq!(options["chief"]["brief"], json!({ "on": true, "time": "08:00", "days": [1, 2, 3, 4, 5] }));
+
+    let (_, sent) = s.call("POST", "/api/chief/brief", None).await;
+    assert_eq!(sent["woke"], true);
+    let asked = until(&mut events, "facts", |f| f["kind"] == "message" && f["message"]["fromCatbot"] == "brief").await;
+    let facts = asked["message"]["text"].as_str().unwrap();
+    for part in ["Daily brief from Catbot", "Waiting on the person:\n- nothing", "Scout: 1 reply", "Hello, Plan the beds", "Spending:\n- This month: $0.00"] {
+        assert!(facts.contains(part), "{part} in {facts}");
+    }
+    until(&mut events, "brief written", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+
+    let (status, set) = s.call("PUT", "/api/chief", Some(json!({ "brief": { "time": "07:30", "days": [1, 2, 3, 4, 5, 6] } }))).await;
+    assert_eq!(status, 200);
+    assert_eq!(set["chief"]["brief"], json!({ "on": true, "time": "07:30", "days": [1, 2, 3, 4, 5, 6] }));
+    assert_eq!(s.call("PUT", "/api/chief", Some(json!({ "brief": { "time": "half seven" } }))).await.0, 400);
+}

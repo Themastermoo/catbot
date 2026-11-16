@@ -25,11 +25,30 @@ pub struct Options {
     pub watch: bool,
     /// The Chief also looks the team over on a timer (Moo: an option, off by default).
     pub checkins: Checkins,
+    /// The daily brief (Moo: weekdays by default, changeable).
+    pub brief: Brief,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { bot_id: None, watch: true, checkins: Checkins::default() }
+        Options { bot_id: None, watch: true, checkins: Checkins::default(), brief: Brief::default() }
+    }
+}
+
+/// The daily brief: the Chief writes it from facts Catbot gathers, at a time, on some days.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct Brief {
+    pub on: bool,
+    /// "HH:MM", this computer's time.
+    pub time: String,
+    /// 1 Monday … 7 Sunday.
+    pub days: Vec<u32>,
+}
+
+impl Default for Brief {
+    fn default() -> Self {
+        Brief { on: true, time: "08:00".into(), days: vec![1, 2, 3, 4, 5] }
     }
 }
 
@@ -120,6 +139,18 @@ pub fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>
                 checkins.days.retain(|d| (1..=7).contains(d));
                 next.checkins = checkins;
             }
+            if let Some(brief) = body.get("brief") {
+                let mut merged = serde_json::to_value(&next.brief).unwrap_or_default();
+                for (key, value) in brief.as_object().into_iter().flatten() {
+                    merged[key] = value.clone();
+                }
+                let mut brief: Brief = serde_json::from_value(merged).map_err(|e| bad(format!("brief: {e}")))?;
+                if minutes(&brief.time).is_none() {
+                    return Err(bad("the brief's time is HH:MM"));
+                }
+                brief.days.retain(|d| (1..=7).contains(d));
+                next.brief = brief;
+            }
             set(app, next);
             Ok((StatusCode::OK, wire(app)))
         }
@@ -130,6 +161,10 @@ pub fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>
         }
         (&Method::POST, ["check-in"]) => {
             let woke = check_in(app);
+            Ok((StatusCode::OK, json!({ "woke": woke })))
+        }
+        (&Method::POST, ["brief"]) => {
+            let woke = brief(app);
             Ok((StatusCode::OK, json!({ "woke": woke })))
         }
         (&Method::POST, ["ready-made"]) => {
@@ -226,6 +261,9 @@ struct Watched {
     seen: i64,
     looked_at: Option<String>,
     checked_in_at: Option<String>,
+    /// When the last brief went out, and on which day ("YYYY-MM-DD").
+    briefed_at: Option<String>,
+    briefed_on: Option<String>,
     /// Approval cards already reported as waiting.
     waiting_told: Vec<i64>,
 }
@@ -275,6 +313,127 @@ fn tick(app: &Arc<App>) {
     if check_in_due(&options.checkins, chrono::Local::now(), since_minutes(&w.checked_in_at)) {
         check_in(app);
     }
+    if brief_due(&options.brief, chrono::Local::now(), w.briefed_on.as_deref()) {
+        brief(app);
+    }
+}
+
+/// Whether the day's brief is due: on, on one of its days, its time passed, not yet sent today.
+/// (A computer asleep at the time gets it when Catbot next runs that day.)
+fn brief_due(brief: &Brief, now: chrono::DateTime<chrono::Local>, briefed_on: Option<&str>) -> bool {
+    use chrono::{Datelike, Timelike};
+    let Some(at) = minutes(&brief.time) else { return false };
+    let today = now.format("%Y-%m-%d").to_string();
+    brief.on && brief.days.contains(&now.weekday().number_from_monday()) && now.hour() * 60 + now.minute() >= at && briefed_on != Some(today.as_str())
+}
+
+/// Messages after a time, in a chat.
+fn since_in(store: &Store, thread: &str, since: chrono::DateTime<chrono::FixedOffset>) -> Vec<crate::store::Message> {
+    store
+        .messages(thread, 400)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|m| chrono::DateTime::parse_from_rfc3339(&m.at).is_ok_and(|at| at > since))
+        .collect()
+}
+
+/// The facts the brief is written from: what each bot did, what waits on the person, what went
+/// wrong, and spending.
+fn brief_facts(app: &App, chief: &Bot, since: chrono::DateTime<chrono::FixedOffset>) -> String {
+    use crate::store::Role;
+    let mut done = Vec::new();
+    let mut waiting = Vec::new();
+    let mut wrong = Vec::new();
+    app.with_store(|store| {
+        for bot in store.bots()? {
+            let mut replies = 0;
+            let mut latest: Option<crate::store::Message> = None;
+            for c in store.conversations(&bot.id)? {
+                if app.turns.activity(&c.id) == "waiting-on-you" {
+                    waiting.push(format!("{} is waiting for your approval ({})", bot.name, place(store, &c.id)));
+                }
+                for m in since_in(store, &c.id, since) {
+                    let detail = m.detail.clone().unwrap_or_default();
+                    match m.role {
+                        Role::Bot if !m.body.trim().is_empty() && detail["botId"].as_str().is_none_or(|b| b == bot.id) => {
+                            replies += 1;
+                            latest = Some(m);
+                        }
+                        Role::Step if detail["kind"] == "error" => wrong.push(format!("{}: {}", place(store, &c.id), short(&m.body, 160))),
+                        Role::Step if detail["kind"] == "team-change" && detail["state"] == "asking" => {
+                            waiting.push(format!("A team change to approve: {} ({})", detail["title"].as_str().unwrap_or_default(), place(store, &c.id)))
+                        }
+                        Role::Step if detail["kind"] == "image" && detail["state"] == "choosing" => {
+                            waiting.push(format!("A picture waiting for you to pick who draws it ({})", place(store, &c.id)))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if bot.id == chief.id {
+                continue;
+            }
+            match latest {
+                Some(m) => done.push(format!("{}: {replies} repl{} — latest at {}: “{}”", bot.name, if replies == 1 { "y" } else { "ies" }, clock(&m.at), short(&m.body, 200))),
+                None => done.push(format!("{}: nothing new", bot.name)),
+            }
+        }
+        for channel in store.channels()? {
+            let Some(c) = store.channel_conversation(&channel.id)? else { continue };
+            let said = since_in(store, &c.id, since).iter().filter(|m| m.role == Role::Bot).count();
+            if said > 0 {
+                done.push(format!("#{}: {said} bot repl{}", channel.name, if said == 1 { "y" } else { "ies" }));
+            }
+        }
+        Ok(())
+    });
+    let status = super::limits::status(app);
+    let spend = &status["spend"];
+    let mut money = match spend["capUsd"].as_f64() {
+        Some(cap) => format!("This month: ${:.2} of the ${cap:.2} limit.", spend["usedUsd"].as_f64().unwrap_or(0.0)),
+        None => format!("This month: ${:.2} (no monthly limit set).", spend["usedUsd"].as_f64().unwrap_or(0.0)),
+    };
+    for engine in status["engines"].as_array().into_iter().flatten() {
+        let (used, limit) = (engine["week"]["used"].as_u64().unwrap_or(0), engine["week"]["limit"].as_u64());
+        if let Some(limit) = limit.filter(|l| *l > 0) {
+            money.push_str(&format!(" {}: {}% of this week's tokens.", engine["name"].as_str().unwrap_or_default(), used * 100 / limit));
+        }
+    }
+    let list = |items: &[String], none: &str| if items.is_empty() { format!("- {none}") } else { items.iter().map(|i| format!("- {i}")).collect::<Vec<_>>().join("\n") };
+    format!(
+        "Waiting on the person:\n{}\n\nWhat each bot did:\n{}\n\nWhat went wrong:\n{}\n\nSpending:\n- {money}",
+        list(&waiting, "nothing"),
+        list(&done, "no other bots yet"),
+        list(&wrong, "nothing"),
+    )
+}
+
+/// The daily brief: Catbot gathers the facts, the Chief writes them up in its main chat.
+pub fn brief(app: &Arc<App>) -> bool {
+    let Some(chief) = chief(app) else { return false };
+    let now = chrono::Local::now();
+    let mut w = watched(app);
+    let since = w
+        .briefed_at
+        .as_deref()
+        .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+        .unwrap_or_else(|| (now - chrono::Duration::hours(24)).fixed_offset());
+    let facts = brief_facts(app, &chief, since);
+    let text = format!(
+        "Daily brief from Catbot. Write the person's brief for {} from the facts below, as a chief of staff would: \
+         lead with what needs them, then what got done, what's stuck, and spending. A few short lines, no filler, \
+         nothing the facts don't say. If something needs following up, hand it on with @Name after the brief.\n\n\
+         Since {}:\n\n{facts}",
+        now.format("%A, %B %-d"),
+        since.with_timezone(&chrono::Local).format("%A %-I:%M %p"),
+    );
+    if !wake(app, &chief, "brief", &text) {
+        return false;
+    }
+    w.briefed_at = Some(now.to_rfc3339());
+    w.briefed_on = Some(now.format("%Y-%m-%d").to_string());
+    keep(app, &w);
+    true
 }
 
 /// Whether a timed check-in is due: on, on one of its days, between its times, and long enough after the last.
@@ -450,6 +609,20 @@ mod tests {
         assert!(!check_in_due(&on, sunday, i64::MAX));
         assert!(!check_in_due(&Checkins::default(), at(10, 0), i64::MAX), "off by default");
         assert_eq!((minutes("08:30"), minutes("24:00")), (Some(510), None));
+    }
+
+    #[test]
+    fn the_brief_comes_once_on_its_days_after_its_time() {
+        use chrono::TimeZone;
+        let brief = Brief::default();
+        let monday = |h, m| chrono::Local.with_ymd_and_hms(2026, 11, 16, h, m, 0).unwrap();
+        assert!(!brief_due(&brief, monday(7, 59), None));
+        assert!(brief_due(&brief, monday(8, 0), None));
+        assert!(brief_due(&brief, monday(13, 0), Some("2026-11-13")), "late, if Catbot wasn't running at 8");
+        assert!(!brief_due(&brief, monday(9, 0), Some("2026-11-16")), "once a day");
+        let saturday = chrono::Local.with_ymd_and_hms(2026, 11, 21, 9, 0, 0).unwrap();
+        assert!(!brief_due(&brief, saturday, None), "weekdays by default");
+        assert!(!brief_due(&Brief { on: false, ..Brief::default() }, monday(9, 0), None));
     }
 
     #[test]
