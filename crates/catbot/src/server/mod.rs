@@ -7,6 +7,7 @@
 //! more, until the reference server has nothing left to do.
 
 pub mod attachments;
+pub mod reactions;
 pub mod devices;
 pub mod engines;
 pub mod events;
@@ -554,6 +555,11 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     if !described.is_empty() {
         detail["attachments"] = json!(described);
     }
+    // Reactions the bot hasn't heard about go with this message.
+    let reacted = reactions::untold_note(app, &conversation.id);
+    if !reacted.is_empty() {
+        detail["reactionNote"] = json!(reacted);
+    }
     let detail = (detail != json!({})).then_some(detail);
     let message = turns::save_and_send(app, &conversation.id, Role::Person, &text, detail.as_ref())
         .ok_or_else(|| fail("couldn't save the message"))?;
@@ -566,7 +572,7 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     }
     let request_id = message["id"].as_str().and_then(wire::parse_message_id).unwrap_or_default();
     let thread = conversation.id.clone();
-    let said = format!("{text}{}", attachments::note(&described));
+    let said = format!("{text}{}{reacted}", attachments::note(&described));
     turns::start(app.clone(), bot, conversation, request_id, said.trim().to_string()).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
     Ok((StatusCode::ACCEPTED, json!({ "ok": true, "threadId": thread, "message": message })))
 }
@@ -671,6 +677,10 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
             let (latest, _) = app.try_store(|store| store.page(thread, None, 1)).map_err(fail)?;
             let leaf = latest.first().map(|m| json!(wire::message_id(m.id))).unwrap_or(Value::Null);
             Ok((StatusCode::OK, json!({ "messages": messages, "hasMore": more, "activeLeafId": leaf })))
+        }
+        (Method::POST, ["messages", message, "reactions"]) => {
+            let message = urlencoding_decode(message);
+            reactions::react(app, thread, &message, &json_body(req).await?)
         }
         (Method::POST, ["respond"]) => {
             let body = json_body(req).await?;

@@ -790,3 +790,46 @@ async fn attachments_reach_the_bot_and_the_chat() {
     assert!(last["content"][0]["text"].as_str().unwrap().starts_with("and this one?"));
     assert!(last["content"][1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
 }
+
+#[tokio::test]
+async fn reactions_show_on_messages_and_reach_the_bot_once() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Plan the garden", "threadId": thread }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let reply_id = reply["message"]["id"].as_str().unwrap().to_string();
+    let path = format!("/api/threads/{thread}/messages/{reply_id}/reactions");
+
+    // On, shown live and when the chat is read again; twice is still once.
+    let (status, answer) = s.call("POST", &path, Some(json!({ "emoji": "👍" }))).await;
+    assert_eq!(status, 200, "{answer}");
+    let patch = until(&mut events, "patch", |f| f["kind"] == "message.patch").await;
+    assert_eq!(patch["message"]["reactions"], json!(["👍"]));
+    s.call("POST", &path, Some(json!({ "emoji": "👍" }))).await;
+    s.call("POST", &path, Some(json!({ "emoji": "🌱" }))).await;
+    s.call("POST", &path, Some(json!({ "emoji": "🌱", "on": false }))).await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=10"), None).await;
+    let shown = page["messages"].as_array().unwrap().iter().find(|m| m["id"] == reply_id.as_str()).unwrap().clone();
+    assert_eq!(shown["reactions"], json!(["👍"]));
+    assert!(shown.get("reactionsUntold").is_none());
+
+    // Words, and other chats' messages, aren't reactions.
+    assert_eq!(s.call("POST", &path, Some(json!({ "emoji": "nice" }))).await.0, 400);
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/messages/cb-999999/reactions"), Some(json!({ "emoji": "👍" }))).await.0, 404);
+
+    // The next message tells the bot, once.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Thanks", "threadId": thread }))).await;
+    let next = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let said = next["message"]["text"].as_str().unwrap();
+    assert!(said.contains("the person reacted: 👍 on your reply"), "{said}");
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Again", "threadId": thread }))).await;
+    let again = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(!again["message"]["text"].as_str().unwrap().contains("reacted"));
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+}

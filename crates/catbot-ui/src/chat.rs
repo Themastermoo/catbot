@@ -36,6 +36,8 @@ pub struct Msg {
     pub body: Body,
     /// Files it came with.
     pub attachments: Vec<Attached>,
+    /// The person's reactions on it.
+    pub reactions: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -101,7 +103,8 @@ impl Msg {
         };
         let send_id = wire["sendId"].as_str().map(str::to_string);
         let attachments = Attached::list(&wire["attachments"]);
-        Some(Msg { id, at, send_id, body, attachments })
+        let reactions = wire["reactions"].as_array().map(|r| r.iter().filter_map(|e| e.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        Some(Msg { id, at, send_id, body, attachments, reactions })
     }
 
     fn is_step(&self) -> bool {
@@ -328,7 +331,7 @@ pub fn Chat(bot: Bot) -> Element {
                             }
                             {
                                 match item {
-                                    Item::One(m) => rsx! { Row { message: m, bot_name: bot.name.clone(), asking } },
+                                    Item::One(m) => rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone() } },
                                     Item::Run(steps) => rsx! { Run { steps, bot_name: bot.name.clone(), asking } },
                                 }
                             }
@@ -357,7 +360,7 @@ fn LiveTurn(live: Live) -> Element {
             if live.text.is_empty() {
                 Working {}
             } else {
-                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new() } }
+                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new() } }
             }
         }
     }
@@ -748,7 +751,7 @@ fn EmptyChat(bot: Bot) -> Element {
 
 /// One message: the person's bubble on the right, the bot's reply on the left, a step, or a card.
 #[component]
-fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] asking: bool) -> Element {
+fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] asking: bool, #[props(default)] thread: String) -> Element {
     let when = clock(message.at);
     let full_time = full_date(message.at);
     match &message.body {
@@ -765,6 +768,7 @@ fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] askin
                     }
                 }
                 }
+                crate::react::Reactions { thread: thread.clone(), message: message.id.clone(), reactions: message.reactions.clone(), end: true }
             }
         },
         Body::Reply(text) => {
@@ -782,6 +786,7 @@ fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] askin
                         }
                         span { class: "ml-2 self-end pb-1 text-[11px] tabular-nums text-ink-tertiary opacity-0 transition-opacity group-hover:opacity-100", "{when}" }
                     }
+                    crate::react::Reactions { thread: thread.clone(), message: message.id.clone(), reactions: message.reactions.clone(), end: false }
                 }
             }
         }
@@ -1173,7 +1178,7 @@ mod tests {
     use serde_json::json;
 
     fn step(id: &str, name: &str, at: f64) -> Msg {
-        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) }, attachments: Vec::new() }
+        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) }, attachments: Vec::new(), reactions: Vec::new() }
     }
 
     #[test]
@@ -1195,7 +1200,7 @@ mod tests {
 
     #[test]
     fn steps_fold_into_runs() {
-        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()), attachments: Vec::new() };
+        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()), attachments: Vec::new(), reactions: Vec::new() };
         let items = group(&[step("a", "Read", 1.0), step("b", "Read", 1.0), step("c", "Bash", 2.0), reply.clone(), step("d", "Edit", 4.0)]);
         assert_eq!(items.len(), 3);
         assert!(matches!(&items[0], Item::Run(steps) if steps.len() == 3));

@@ -5,6 +5,8 @@
 
 mod api;
 mod attach;
+mod emoji_list;
+mod react;
 mod bots;
 mod chat;
 mod chats;

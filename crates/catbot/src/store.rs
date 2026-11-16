@@ -760,6 +760,18 @@ impl Store {
         Ok(())
     }
 
+    /// A message, if it's in this conversation.
+    pub fn message_in(&self, conversation_id: &str, id: i64) -> Result<Option<Message>, BoxError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, role, body, detail, at FROM messages WHERE id = ?1 AND conversation_id = ?2",
+                params![id, conversation_id],
+                message_from_row,
+            )
+            .optional()?)
+    }
+
     pub fn message(&self, id: i64) -> Result<Option<Message>, BoxError> {
         Ok(self
             .conn

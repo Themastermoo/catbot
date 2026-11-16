@@ -124,7 +124,7 @@ pub fn note(attachments: &[Value]) -> String {
 /// A person's message as the bot reads it: the words, and where its attachments are.
 pub fn person_text(m: &Message) -> String {
     let attached = m.detail.as_ref().and_then(|d| d["attachments"].as_array().cloned()).unwrap_or_default();
-    format!("{}{}", m.body, note(&attached))
+    format!("{}{}{}", m.body, note(&attached), super::reactions::note_of(m)).trim().to_string()
 }
 
 /// The pictures attached to a message, read from the bot's folder: (type, bytes).

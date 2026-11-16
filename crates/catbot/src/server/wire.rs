@@ -214,6 +214,9 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
     if let (Value::Object(wire), Value::Object(fields)) = (&mut wire, fields) {
         wire.extend(fields);
     }
+    if let Some(reactions) = detail.get("reactions").filter(|r| r.as_array().is_some_and(|r| !r.is_empty())) {
+        wire["reactions"] = reactions.clone();
+    }
     wire
 }
 

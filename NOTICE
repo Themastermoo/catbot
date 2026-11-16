@@ -44,3 +44,8 @@ crates/catbot-ui/assets/fonts/):
 
 Icons: shapes from Lucide (https://lucide.dev), ISC License, Copyright (c)
 Lucide Icons and Contributors (third_party/Lucide-LICENSE).
+
+Emoji names and groups (crates/catbot-ui/src/emoji_list.rs) are taken from
+the Unicode emoji data and CLDR, Copyright © Unicode, Inc., under the Unicode
+License v3 (https://www.unicode.org/license.txt), as packaged by the emojis
+crate (MIT or Apache-2.0).
