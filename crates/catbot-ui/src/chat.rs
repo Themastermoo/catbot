@@ -188,7 +188,7 @@ pub fn describe_run(steps: &[Msg]) -> String {
 }
 
 /// The person's local day number for a time, so two times can be compared by day.
-fn day(at: f64) -> i64 {
+pub fn day(at: f64) -> i64 {
     let offset_ms = js_offset_minutes(at) * 60_000.0;
     ((at - offset_ms) / 86_400_000.0).floor() as i64
 }
@@ -1168,6 +1168,17 @@ pub fn short_when(at: f64) -> String {
         0 => clock(at),
         1 => "Yesterday".into(),
         _ => date_string(at, &[("month", "short"), ("day", "numeric")], false),
+    }
+}
+
+/// "Tuesday".
+pub fn weekday(at: f64) -> String {
+    #[cfg(target_arch = "wasm32")]
+    return date_string(at, &[("weekday", "long")], false);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use chrono::{Local, TimeZone};
+        Local.timestamp_millis_opt(at as i64).single().map(|t| t.format("%A").to_string()).unwrap_or_default()
     }
 }
 

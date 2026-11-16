@@ -91,4 +91,6 @@ for piece in (reply[:3], reply[3:]):
          "event": {"type": "content_block_delta", "delta": {"type": "text_delta", "text": piece}}})
 out({"type": "assistant", "message": {"content": [{"type": "text", "text": reply}]}})
 out({"type": "result", "is_error": False, "result": reply, "session_id": session, "total_cost_usd": 0.0012,
+     "usage": {"input_tokens": 10 + len(prompt) // 4, "output_tokens": 5 + len(reply) // 4, "cache_read_input_tokens": 1000,
+               "cache_creation_input_tokens": 200},
      "duration_ms": 850, "stop_reason": "end_turn", "permission_denials": denials})

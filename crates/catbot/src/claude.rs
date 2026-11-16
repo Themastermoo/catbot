@@ -112,6 +112,42 @@ pub struct Outcome {
     pub stop_reason: Option<String>,
     /// Tool calls refused because they needed approval.
     pub permission_denials: Vec<Value>,
+    /// What the turn used, if the AI said (or Catbot could guess).
+    pub tokens: Option<Tokens>,
+}
+
+/// Tokens a turn used.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize)]
+pub struct Tokens {
+    /// Sent to the model, not counting what it re-read from its cache.
+    pub input: u64,
+    pub output: u64,
+    /// Re-read from the provider's cache (cheap, and not new work).
+    pub cache_read: u64,
+    /// Written to the provider's cache.
+    pub cache_write: u64,
+    /// Guessed by Catbot from the text (about four characters a token): the AI didn't say.
+    pub estimated: bool,
+}
+
+impl Tokens {
+    /// New tokens: what limits count (cache re-reads are left out).
+    pub fn new_tokens(&self) -> u64 {
+        self.input + self.output + self.cache_write
+    }
+
+    pub fn add(&mut self, other: Tokens) {
+        self.input += other.input;
+        self.output += other.output;
+        self.cache_read += other.cache_read;
+        self.cache_write += other.cache_write;
+        self.estimated |= other.estimated;
+    }
+
+    /// A guess from text: about four characters a token.
+    pub fn guess(sent: usize, written: usize) -> Tokens {
+        Tokens { input: sent.div_ceil(4) as u64, output: written.div_ceil(4) as u64, estimated: true, ..Tokens::default() }
+    }
 }
 
 /// The command line for a turn, after the program name.
@@ -234,6 +270,13 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             duration_ms: o["duration_ms"].as_u64(),
             stop_reason: s(&o["terminal_reason"]).or_else(|| s(&o["stop_reason"])),
             permission_denials: o["permission_denials"].as_array().cloned().unwrap_or_default(),
+            tokens: o["usage"].as_object().map(|_| Tokens {
+                input: o["usage"]["input_tokens"].as_u64().unwrap_or(0),
+                output: o["usage"]["output_tokens"].as_u64().unwrap_or(0),
+                cache_read: o["usage"]["cache_read_input_tokens"].as_u64().unwrap_or(0),
+                cache_write: o["usage"]["cache_creation_input_tokens"].as_u64().unwrap_or(0),
+                estimated: false,
+            }),
         })],
         _ => Vec::new(),
     }

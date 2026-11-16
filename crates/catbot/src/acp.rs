@@ -155,7 +155,10 @@ async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: 
             if !ok {
                 let _ = tx.send(Event::Error { message: format!("{} declined to answer.", turn.engine.name) }).await;
             }
-            Outcome { ok, session_id: Some(session), result: Some(text), stop_reason: Some(stop), ..Outcome::default() }
+            // Agent programs don't say what they used: a guess from what went in and came out.
+            let sent = first_prompt(&turn).len();
+            let tokens = Some(crate::claude::Tokens::guess(sent, text.len()));
+            Outcome { ok, session_id: Some(session), result: Some(text), stop_reason: Some(stop), tokens, ..Outcome::default() }
         }
         Err(problem) => {
             let _ = child.start_kill();

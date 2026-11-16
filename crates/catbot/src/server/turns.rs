@@ -122,6 +122,8 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
 /// What one run of the CLI produced.
 #[derive(Default)]
 struct Result_ {
+    /// The model the AI said it's using.
+    model: Option<String>,
     reply: String,
     steps: Vec<Step>,
     outcome: Option<Outcome>,
@@ -198,6 +200,10 @@ async fn run(
         save_and_send(app, thread, Role::Bot, &result.reply, Some(&detail));
     }
     super::changes::after_turn(app, thread, points, before).await;
+    if let Some(outcome) = &result.outcome {
+        let model = result.model.clone().or_else(|| bot.model.clone()).unwrap_or_default();
+        super::usage::record(app, bot, thread, &bot.engine, &model, outcome.tokens, outcome.cost_usd);
+    }
     if result.stopped {
         save_and_send(app, thread, Role::Note, "Stopped.", None);
     }
@@ -259,6 +265,9 @@ async fn drive(
         let Some(event) = event else { break };
         match event {
             Event::Started { session_id, model } => {
+                if model.is_some() {
+                    result.model = model.clone();
+                }
                 emit(json!({ "type": "session.started", "sessionId": session_id, "model": model }));
             }
             Event::TextDelta { text } => {

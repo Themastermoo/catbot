@@ -25,6 +25,7 @@ mod notify;
 mod markdown;
 mod memory;
 mod settings;
+mod usage;
 mod sidebar;
 
 use dioxus::prelude::*;

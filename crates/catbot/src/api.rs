@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
 use crate::approval::{Answerer, Decision};
-use crate::claude::{Event, Outcome, Running};
+use crate::claude::{Event, Outcome, Running, Tokens};
 use crate::engines::{Access, Engine};
 use crate::tools::{self, Workspace};
 
@@ -60,18 +60,36 @@ pub fn start(turn: ApiTurn) -> Running {
 async fn run(turn: ApiTurn, tx: mpsc::Sender<Event>, answers: Answerer) {
     let started = std::time::Instant::now();
     let _ = tx.send(Event::Started { session_id: String::new(), model: Some(turn.model.clone()) }).await;
-    let (ok, result) = match converse(&turn, &tx, &answers).await {
+    let mut used = Used::default();
+    let (ok, result) = match converse(&turn, &tx, &answers, &mut used).await {
         Ok(reply) => (true, Some(reply)),
         Err(message) => {
             let _ = tx.send(Event::Error { message: message.clone() }).await;
             (false, Some(message))
         }
     };
-    let outcome = Outcome { ok, result, duration_ms: Some(started.elapsed().as_millis() as u64), ..Outcome::default() };
+    let outcome = Outcome {
+        ok,
+        result,
+        duration_ms: Some(started.elapsed().as_millis() as u64),
+        cost_usd: used.cost,
+        tokens: (used.tokens != Tokens::default()).then_some(used.tokens),
+        ..Outcome::default()
+    };
     let _ = tx.send(Event::Finished(outcome)).await;
 }
 
-async fn converse(turn: &ApiTurn, tx: &mpsc::Sender<Event>, answers: &Answerer) -> Result<String, String> {
+/// What a turn used, round by round: what the API reported, or Catbot's guess where it didn't.
+#[derive(Debug, Default)]
+struct Used {
+    tokens: Tokens,
+    /// Money, where the API says (OpenRouter does).
+    cost: Option<f64>,
+    /// The API turned `stream_options` away: don't ask again this turn.
+    no_usage_option: bool,
+}
+
+async fn converse(turn: &ApiTurn, tx: &mpsc::Sender<Event>, answers: &Answerer, used: &mut Used) -> Result<String, String> {
     if turn.model.trim().is_empty() {
         return Err(format!("Pick a model for this bot: {} has no default one.", turn.engine.name));
     }
@@ -97,15 +115,33 @@ async fn converse(turn: &ApiTurn, tx: &mpsc::Sender<Event>, answers: &Answerer) 
     let mut use_tools = true;
     let mut reply = String::new();
     for _ in 0..MOST_ROUNDS {
-        let round = match ask(&client, turn, &messages, use_tools, tx).await {
+        let mut attempt = ask(&client, turn, &messages, use_tools, used, tx).await;
+        if let Err(Failure::NoUsageOption) = attempt {
+            used.no_usage_option = true;
+            attempt = ask(&client, turn, &messages, use_tools, used, tx).await;
+        }
+        let round = match attempt {
             Err(Failure::NoTools) if use_tools => {
                 // Some models (often small local ones) can't take tools: carry on without them.
                 use_tools = false;
-                ask(&client, turn, &messages, false, tx).await
+                ask(&client, turn, &messages, false, used, tx).await
             }
             other => other,
         }
         .map_err(|f| f.to_string())?;
+        match round.usage {
+            Some((tokens, cost)) => {
+                used.tokens.add(tokens);
+                if let Some(cost) = cost {
+                    *used.cost.get_or_insert(0.0) += cost;
+                }
+            }
+            None => {
+                let sent: usize = messages.iter().map(|m| m.to_string().len()).sum();
+                let written = round.text.len() + round.calls.iter().map(|c| c.arguments.len() + c.name.len()).sum::<usize>();
+                used.tokens.add(Tokens::guess(sent, written));
+            }
+        }
         if !round.text.trim().is_empty() {
             let _ = tx.send(Event::Text { text: round.text.clone() }).await;
             if !reply.is_empty() {
@@ -167,6 +203,8 @@ async fn use_tool(turn: &ApiTurn, call: &Call, tx: &mpsc::Sender<Event>, answers
 struct Round {
     text: String,
     calls: Vec<Call>,
+    /// The tokens (and any cost) the API reported for this round.
+    usage: Option<(Tokens, Option<f64>)>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -180,6 +218,8 @@ struct Call {
 enum Failure {
     /// The model or API doesn't take tools.
     NoTools,
+    /// The API doesn't take `stream_options` (asking for the usage at the end).
+    NoUsageOption,
     Other(String),
 }
 
@@ -187,14 +227,19 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failure::NoTools => f.write_str("This model can't use tools."),
+            Failure::NoUsageOption => f.write_str("This API doesn't report usage."),
             Failure::Other(text) => f.write_str(text),
         }
     }
 }
 
 /// Sends the conversation and streams the answer, passing its text on as it comes.
-async fn ask(client: &reqwest::Client, turn: &ApiTurn, messages: &[Value], with_tools: bool, tx: &mpsc::Sender<Event>) -> Result<Round, Failure> {
+async fn ask(client: &reqwest::Client, turn: &ApiTurn, messages: &[Value], with_tools: bool, used: &Used, tx: &mpsc::Sender<Event>) -> Result<Round, Failure> {
     let mut body = json!({ "model": turn.model, "messages": messages, "stream": true });
+    if !used.no_usage_option {
+        // The usage comes in a last chunk of the stream.
+        body["stream_options"] = json!({ "include_usage": true });
+    }
     if with_tools {
         body["tools"] = tools::definitions();
     }
@@ -210,6 +255,9 @@ async fn ask(client: &reqwest::Client, turn: &ApiTurn, messages: &[Value], with_
             .ok()
             .and_then(|v| v["error"]["message"].as_str().or(v["error"].as_str()).or(v["message"].as_str()).map(str::to_string))
             .unwrap_or_else(|| text.chars().take(300).collect());
+        if status.as_u16() == 400 && !used.no_usage_option && said.to_lowercase().contains("stream_options") {
+            return Err(Failure::NoUsageOption);
+        }
         if with_tools && status.as_u16() == 400 && said.to_lowercase().contains("tool") {
             return Err(Failure::NoTools);
         }
@@ -247,6 +295,17 @@ async fn apply_line(line: &str, round: &mut Round, calls: &mut BTreeMap<u64, Cal
         return true;
     }
     let Ok(chunk) = serde_json::from_str::<Value>(data) else { return false };
+    if let Some(usage) = chunk["usage"].as_object().filter(|u| u.contains_key("prompt_tokens") || u.contains_key("completion_tokens")) {
+        let cached = usage.get("prompt_tokens_details").and_then(|d| d["cached_tokens"].as_u64()).unwrap_or(0);
+        let prompt = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let tokens = Tokens {
+            input: prompt.saturating_sub(cached),
+            output: usage.get("completion_tokens").and_then(Value::as_u64).unwrap_or(0),
+            cache_read: cached,
+            ..Tokens::default()
+        };
+        round.usage = Some((tokens, usage.get("cost").and_then(Value::as_f64)));
+    }
     let delta = &chunk["choices"][0]["delta"];
     if let Some(text) = delta["content"].as_str().filter(|t| !t.is_empty()) {
         round.text.push_str(text);

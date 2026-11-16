@@ -9,6 +9,7 @@
 pub mod attachments;
 pub mod changes;
 pub mod reactions;
+pub mod usage;
 pub mod devices;
 pub mod engines;
 pub mod events;
@@ -80,6 +81,8 @@ pub struct App {
     pub remote: std::sync::OnceLock<SocketAddr>,
     /// The pairing code waiting for a device, if any (`devices.rs`).
     pub pairing: std::sync::Mutex<Option<devices::Pairing>>,
+    /// The plans' usage windows as last fetched (`usage.rs`), and when.
+    pub plan_usage: std::sync::Mutex<Option<(std::time::Instant, Value)>>,
 }
 
 impl App {
@@ -105,6 +108,7 @@ impl App {
             title_model: titles::model_from_env(),
             remote: std::sync::OnceLock::new(),
             pairing: std::sync::Mutex::new(None),
+            plan_usage: std::sync::Mutex::new(None),
         })
     }
 
@@ -265,6 +269,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "events"] if method == Method::GET => events::events(app, req, events::Door::Home).await,
         ["api", "memory", rest @ ..] if method == Method::GET => respond(memory::route(&app, rest, &req)),
         ["api", "attachments", id] if method == Method::GET => attachments::serve(&app, id).await,
+        ["api", "usage", rest @ ..] if method == Method::GET => usage_route(&app, rest, usage_query(&req)).await,
         ["api", "engines", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
@@ -320,6 +325,18 @@ fn owns_thread(app: &App, id: &str) -> bool {
 
 /// An answer: a status and a JSON body.
 type Answer = Result<(StatusCode, Value), (StatusCode, String)>;
+
+/// The usage route's query, read before waiting (a request can't be held across a wait).
+fn usage_query(req: &Request) -> std::collections::HashMap<&'static str, String> {
+    ["period", "by"].into_iter().filter_map(|name| Some((name, urlencoding_decode(query_param(req, name)?)))).collect()
+}
+
+/// `GET /api/usage…`, at either door.
+async fn usage_route(app: &Arc<App>, rest: &[&str], query: std::collections::HashMap<&'static str, String>) -> Response {
+    let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+    let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+    respond(usage::route(app, &rest, |name| query.get(name).cloned()).await)
+}
 
 fn respond(answer: Answer) -> Response {
     match answer {

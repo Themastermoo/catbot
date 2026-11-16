@@ -47,6 +47,24 @@ pub fn default_codex() -> PathBuf {
     user_home().join("VaultCodex")
 }
 
+/// What one turn used.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UsageRow {
+    pub bot_id: String,
+    pub conversation_id: String,
+    pub engine: String,
+    pub model: String,
+    /// "plan" (a subscription covers it), "key" (an API key, paid by use) or "free" (local).
+    pub billing: String,
+    pub at: String,
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub estimated: bool,
+    pub cost_usd: Option<f64>,
+}
+
 /// A file attached to a message: kept in its bot's folder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attachment {
@@ -349,7 +367,100 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 7 {
+            // Version 7: what each turn used (for the usage view and limits), and Catbot's own
+            // settings (limits, backups) as JSON by name.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE usage (
+                     id              INTEGER PRIMARY KEY,
+                     bot_id          TEXT NOT NULL,
+                     conversation_id TEXT NOT NULL,
+                     engine          TEXT NOT NULL,
+                     model           TEXT NOT NULL,
+                     billing         TEXT NOT NULL,
+                     at              TEXT NOT NULL,
+                     input           INTEGER NOT NULL,
+                     output          INTEGER NOT NULL,
+                     cache_read      INTEGER NOT NULL,
+                     cache_write     INTEGER NOT NULL,
+                     estimated       INTEGER NOT NULL,
+                     cost_usd        REAL
+                 );
+                 CREATE INDEX usage_at ON usage(at);
+                 CREATE TABLE settings (
+                     key   TEXT PRIMARY KEY,
+                     value TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 7;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { conn, home: home.to_path_buf() })
+    }
+
+    /// Records what a turn used.
+    pub fn add_usage(&self, row: &UsageRow) -> Result<(), BoxError> {
+        self.conn.execute(
+            "INSERT INTO usage (bot_id, conversation_id, engine, model, billing, at, input, output, cache_read, cache_write, estimated, cost_usd)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![
+                row.bot_id,
+                row.conversation_id,
+                row.engine,
+                row.model,
+                row.billing,
+                row.at,
+                row.input as i64,
+                row.output as i64,
+                row.cache_read as i64,
+                row.cache_write as i64,
+                row.estimated,
+                row.cost_usd
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Every turn's usage since a time (an RFC 3339 string, as stored), oldest first.
+    pub fn usage_since(&self, since: &str) -> Result<Vec<UsageRow>, BoxError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT bot_id, conversation_id, engine, model, billing, at, input, output, cache_read, cache_write, estimated, cost_usd
+             FROM usage WHERE at >= ?1 ORDER BY id",
+        )?;
+        let rows = stmt
+            .query_map([since], |r| {
+                Ok(UsageRow {
+                    bot_id: r.get(0)?,
+                    conversation_id: r.get(1)?,
+                    engine: r.get(2)?,
+                    model: r.get(3)?,
+                    billing: r.get(4)?,
+                    at: r.get(5)?,
+                    input: r.get::<_, i64>(6)? as u64,
+                    output: r.get::<_, i64>(7)? as u64,
+                    cache_read: r.get::<_, i64>(8)? as u64,
+                    cache_write: r.get::<_, i64>(9)? as u64,
+                    estimated: r.get(10)?,
+                    cost_usd: r.get(11)?,
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// One of Catbot's settings, or None.
+    pub fn setting(&self, key: &str) -> Result<Option<Value>, BoxError> {
+        let raw: Option<String> = self.conn.query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| r.get(0)).optional()?;
+        Ok(raw.and_then(|raw| serde_json::from_str(&raw).ok()))
+    }
+
+    pub fn set_setting(&self, key: &str, value: &Value) -> Result<(), BoxError> {
+        self.conn.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value.to_string()],
+        )?;
+        Ok(())
     }
 
     /// Keeps a file attached to a bot's message (already saved at `path`).
@@ -1034,7 +1145,7 @@ mod tests {
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
         assert_eq!(bot.engine, "claude", "bots from before run on Claude");
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 6);
+        assert_eq!(version, 7);
         // And keys for the chat APIs.
         assert_eq!(store.engine_key("xai").unwrap(), None);
         store.set_engine_key("xai", "xai-1", None).unwrap();

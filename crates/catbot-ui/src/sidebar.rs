@@ -28,6 +28,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     let mut pairing = use_signal(|| false);
     let mut remembering = use_signal(|| false);
     let mut configuring = use_signal(|| false);
+    let mut measuring = use_signal(|| false);
     // Bots whose chats are showing.
     let mut unfolded = use_signal(HashSet::<String>::new);
     let state = use_context::<Signal<State>>();
@@ -60,6 +61,19 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                     svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
                         path { d: "M12 7v14" }
                         path { d: "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" }
+                    }
+                }
+                button {
+                    r#type: "button",
+                    "aria-label": "Usage",
+                    title: "Usage and limits",
+                    "data-open-usage": true,
+                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                    onclick: move |_| measuring.set(true),
+                    // Lucide `Gauge` (ISC).
+                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        path { d: "m12 14 4-4" }
+                        path { d: "M3.34 19a10 10 0 1 1 17.32 0" }
                     }
                 }
                 if crate::notify::AVAILABLE { button {
@@ -104,6 +118,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             }
             if pairing() {
                 crate::devices::DevicesDialog { on_close: move |_| pairing.set(false) }
+            }
+            if measuring() {
+                crate::usage::UsageDialog { on_close: move |_| measuring.set(false) }
             }
             if configuring() {
                 crate::notify::SettingsDialog { on_close: move |_| configuring.set(false) }

@@ -594,6 +594,10 @@ fn fake_api(seen: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Router {
                         json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "\"content\":\"carrots\"}" } }] } }] }),
                     ]
                 };
+                let mut chunks = chunks;
+                if body["stream_options"]["include_usage"] == true {
+                    chunks.push(json!({ "choices": [], "usage": { "prompt_tokens": 120, "completion_tokens": 30, "prompt_tokens_details": { "cached_tokens": 20 } } }));
+                }
                 let mut text: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
                 text.push_str("data: [DONE]\n\n");
                 Response::builder().header("content-type", "text/event-stream").body(Body::from(text)).unwrap()
@@ -922,4 +926,64 @@ async fn a_turns_file_changes_are_shown_and_undone() {
     s.call("POST", &format!("/api/threads/{thread}/changes/{id}/redo"), Some(json!({}))).await;
     assert_eq!(std::fs::read_to_string(folder.join("plan.md")).unwrap(), "carrots and beans\n");
     assert_eq!(s.call("GET", &format!("/api/threads/{thread}/changes/cb-99999"), None).await.0, 404);
+}
+
+#[tokio::test]
+async fn usage_is_recorded_broken_down_and_the_plan_read() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Plan the garden", "threadId": thread }))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // A Claude turn on the plan: its tokens, and no money (the plan covers it).
+    let (status, by_bot) = s.call("GET", "/api/usage?period=this-month&by=bot", None).await;
+    assert_eq!(status, 200, "{by_bot}");
+    let row = &by_bot["rows"][0];
+    assert_eq!((row["label"].as_str(), row["turns"].as_u64()), (Some("Scout"), Some(1)));
+    assert!(row["newTokens"].as_u64().unwrap() > 200, "{row}");
+    assert_eq!(row["cachedTokens"], 1000);
+    assert!(row["costUsd"].is_null(), "{row}");
+
+    // A turn on a chat API: the usage it reports.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let api = listen(fake_api(seen.clone())).await;
+    s.call("PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-test", "url": format!("http://{api}/v1") }))).await;
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "openai", "model": "gpt-test" } }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Write it down", "threadId": thread }))).await;
+    let ask = until(&mut events, "ask", |f| runtime(f, "request.opened")).await;
+    let request = ask["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    assert_eq!(seen.lock().unwrap()[0]["body"]["stream_options"]["include_usage"], true);
+    let (_, by_engine) = s.call("GET", "/api/usage?period=30d&by=engine", None).await;
+    let openai = by_engine["rows"].as_array().unwrap().iter().find(|r| r["label"] == "OpenAI").unwrap().clone();
+    // Two rounds of 100 new + 30 written, and 20 re-read from the cache each.
+    assert_eq!((openai["newTokens"].as_u64(), openai["cachedTokens"].as_u64(), openai["estimated"].as_bool()), (Some(260), Some(40), Some(false)));
+    let (_, by_day) = s.call("GET", "/api/usage?period=this-month&by=day", None).await;
+    assert_eq!(by_day["total"]["turns"], 2);
+    assert_eq!(s.call("GET", "/api/usage?period=forever", None).await.0, 400);
+
+    // Claude's plan windows, read with Claude Code's sign-in.
+    let plan_api = listen(Router::new().route("/usage", get(|headers: axum::http::HeaderMap| async move {
+        assert_eq!(headers.get("authorization").unwrap(), "Bearer oat-test");
+        axum::Json(json!({ "five_hour": { "utilization": 78.0, "resets_at": "2099-01-01T00:00:00Z" }, "seven_day": { "utilization": 61.0, "resets_at": "2099-01-02T00:00:00Z" } }))
+    }))).await;
+    let config = s._dir.path().join("claude-config");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::write(config.join(".credentials.json"), r#"{"claudeAiOauth":{"accessToken":"oat-test","expiresAt":4102444800000}}"#).unwrap();
+    // SAFETY: only this test reads these.
+    unsafe {
+        std::env::set_var("CLAUDE_CONFIG_DIR", &config);
+        std::env::set_var("CATBOT_CLAUDE_USAGE_URL", format!("http://{plan_api}/usage"));
+    }
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "claude", "model": "" } }))).await;
+    let (_, plans) = s.call("GET", "/api/usage/plans", None).await;
+    let claude = &plans["plans"][0];
+    assert_eq!(claude["ok"], true, "{plans}");
+    assert_eq!(claude["windows"][0]["usedPercent"], 78.0);
+    assert!(!plans.to_string().contains("oat-test"), "the sign-in never goes out");
 }
