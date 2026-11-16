@@ -7,6 +7,7 @@
 //! more, until the reference server has nothing left to do.
 
 pub mod attachments;
+pub mod changes;
 pub mod reactions;
 pub mod devices;
 pub mod engines;
@@ -557,7 +558,7 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
         detail["attachments"] = json!(described);
     }
     // Reactions the bot hasn't heard about go with this message.
-    let reacted = reactions::untold_note(app, &conversation.id);
+    let reacted = format!("{}{}", reactions::untold_note(app, &conversation.id), changes::untold_note(app, &conversation.id));
     if !reacted.is_empty() {
         detail["reactionNote"] = json!(reacted);
     }
@@ -701,6 +702,8 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
             let leaf = latest.first().map(|m| json!(wire::message_id(m.id))).unwrap_or(Value::Null);
             Ok((StatusCode::OK, json!({ "messages": messages, "hasMore": more, "activeLeafId": leaf })))
         }
+        (Method::GET, ["changes", message]) => changes::route(app, thread, &urlencoding_decode(message), None).await,
+        (Method::POST, ["changes", message, action]) => changes::route(app, thread, &urlencoding_decode(message), Some(action)).await,
         (Method::POST, ["messages", message, "reactions"]) => {
             let message = urlencoding_decode(message);
             reactions::react(app, thread, &message, &json_body(req).await?)

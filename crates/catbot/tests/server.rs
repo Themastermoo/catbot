@@ -875,3 +875,51 @@ async fn a_chat_branches_from_a_message_and_the_bot_is_shown_it() {
     // Unknown messages are refused.
     assert_eq!(s.call("POST", &format!("/api/bots/{bot}/tasks/{thread}/branch"), Some(json!({ "messageId": "cb-99999" }))).await.0, 404);
 }
+
+#[tokio::test]
+async fn a_turns_file_changes_are_shown_and_undone() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let folder = s._dir.path().join("home/bots/scout");
+    let say = |words: &'static str| {
+        let (s, bot, thread) = (&s, bot.clone(), thread.clone());
+        async move { s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": words, "threadId": thread }))).await }
+    };
+
+    // A turn that writes nothing has no changes row.
+    say("Plan the garden").await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    say("write plan.md: carrots and beans").await;
+    let row = until(&mut events, "changes", |f| f["kind"] == "message" && f["message"]["kind"] == "changes").await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let changes = &row["message"]["changes"];
+    assert_eq!(changes["summary"], "Added plan.md");
+    assert_eq!(changes["files"][0]["how"], "added");
+    assert_eq!(changes["undone"], false);
+    let id = row["message"]["id"].as_str().unwrap().to_string();
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=20"), None).await;
+    assert_eq!(page["messages"].as_array().unwrap().iter().filter(|m| m["kind"] == "changes").count(), 1);
+
+    let (_, patch) = s.call("GET", &format!("/api/threads/{thread}/changes/{id}"), None).await;
+    assert!(patch["patch"].as_str().unwrap().contains("+carrots and beans"), "{patch}");
+
+    // Undo: the file is gone, the row says so, and the bot is told once.
+    let (status, undone) = s.call("POST", &format!("/api/threads/{thread}/changes/{id}/undo"), Some(json!({}))).await;
+    assert_eq!(status, 200, "{undone}");
+    assert_eq!(undone["message"]["changes"]["undone"], true);
+    assert!(!folder.join("plan.md").exists());
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/changes/{id}/undo"), Some(json!({}))).await.0, 409);
+    say("Thanks").await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(reply["message"]["text"].as_str().unwrap().contains("the person undid your changes to your folder (Added plan.md)"), "{reply}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Redo puts it back.
+    s.call("POST", &format!("/api/threads/{thread}/changes/{id}/redo"), Some(json!({}))).await;
+    assert_eq!(std::fs::read_to_string(folder.join("plan.md")).unwrap(), "carrots and beans\n");
+    assert_eq!(s.call("GET", &format!("/api/threads/{thread}/changes/cb-99999"), None).await.0, 404);
+}

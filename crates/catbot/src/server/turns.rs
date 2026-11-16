@@ -154,6 +154,10 @@ async fn run(
         app.with_store(|store| store.set_session(thread, id));
     }
 
+    // The bot's folder as it was before the turn, to show (and undo) what the turn changes.
+    let points = super::changes::of(app, bot);
+    let before = super::changes::snapshot(points.clone(), "before a turn").await;
+
     let item_id = format!("item-{turn_id}");
     // A fresh session (a branched chat, or one Claude lost) is shown what was said before.
     let with_earlier = |session: &Session| match session {
@@ -193,6 +197,7 @@ async fn run(
         });
         save_and_send(app, thread, Role::Bot, &result.reply, Some(&detail));
     }
+    super::changes::after_turn(app, thread, points, before).await;
     if result.stopped {
         save_and_send(app, thread, Role::Note, "Stopped.", None);
     }

@@ -8,6 +8,7 @@ mod attach;
 mod emoji_list;
 mod react;
 mod bots;
+mod changes;
 mod chat;
 mod chats;
 mod devices;

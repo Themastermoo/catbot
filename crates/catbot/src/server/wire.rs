@@ -199,6 +199,11 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
             }
             fields
         }
+        Role::Step if detail["kind"] == "changes" => json!({
+            "role": "bot",
+            "kind": "changes",
+            "changes": { "summary": m.body, "files": detail["files"], "undone": detail["undone"].as_bool().unwrap_or(false) },
+        }),
         Role::Step => {
             let ok = match detail["kind"].as_str() {
                 Some("approval") => detail["allowed"].as_bool().unwrap_or(false),

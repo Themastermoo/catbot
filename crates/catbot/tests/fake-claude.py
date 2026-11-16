@@ -4,6 +4,7 @@ The prompt picks the behaviour:
   "crash"  -> writes to stderr and exits 1 with no result line
   "tool"   -> calls a tool that is refused, like an unapproved Bash command
   "approve" -> asks the permission prompt tool (as the real CLI does), and obeys the answer
+  "write <file>: <words>" -> writes the words to that file in its folder (as a bot's edit would)
   "Name the conversation…" -> a chat's name, the way Catbot asks for one
   anything else -> streams "Hello, <prompt>" back
 """
@@ -74,6 +75,10 @@ if prompt == "approve":
         out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t2", "is_error": True,
              "content": verdict["message"]}]}})
         denials = [{"tool_name": "Bash", "tool_use_id": "t2"}]
+if prompt.startswith("write ") and ":" in prompt.splitlines()[0]:
+    name, words = prompt.splitlines()[0][len("write "):].split(":", 1)
+    with open(os.path.join(os.getcwd(), name.strip()), "w") as f:
+        f.write(words.strip() + "\n")
 reply = f"Hello, {prompt}"
 # Catbot asking for a chat's name ("sleepy" in the message makes the namer slow).
 if prompt.startswith("Name the conversation"):

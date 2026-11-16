@@ -6,6 +6,7 @@ pub mod approval;
 pub mod ask;
 pub mod bots;
 pub mod chat;
+pub mod checkpoints;
 pub mod claude;
 pub mod console;
 pub mod engines;

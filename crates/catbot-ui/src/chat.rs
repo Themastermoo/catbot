@@ -48,6 +48,8 @@ pub enum Body {
     Reply(String),
     /// A step of the bot's work: a tool it used, or a note. `ok` is None while it runs.
     Step { name: String, ok: Option<bool> },
+    /// What a turn changed in the bot's folder, and whether it was undone.
+    Changes { summary: String, files: Vec<crate::changes::FileChange>, undone: bool },
     /// An approval card: what the bot asked to do, and how the person answered.
     Card {
         title: String,
@@ -81,6 +83,14 @@ impl Msg {
             ("activity", _) => {
                 let name = wire["tool"]["name"].as_str().unwrap_or_default();
                 Body::Step { name: name.strip_prefix("notice: ").unwrap_or(name).to_string(), ok: wire["tool"]["ok"].as_bool() }
+            }
+            ("changes", _) => {
+                let changes = &wire["changes"];
+                Body::Changes {
+                    summary: changes["summary"].as_str().unwrap_or("Changed files").to_string(),
+                    files: crate::changes::files(&changes["files"]),
+                    undone: changes["undone"].as_bool().unwrap_or(false),
+                }
             }
             ("options", _) => {
                 let card = &wire["card"];
@@ -819,6 +829,9 @@ fn Row(
             }
         }
         Body::Step { name, ok } => rsx! { Step { name: name.clone(), ok: *ok } },
+        Body::Changes { summary, files, undone } => rsx! {
+            crate::changes::ChangesRow { thread: thread.clone(), message: message.id.clone(), summary: summary.clone(), files: files.clone(), undone: *undone, working }
+        },
         Body::Card { subtitle, answer, tool, .. } => {
             let answer = settled_answer(*answer, asking);
             rsx! { ApprovalRow { line: approval_line(&bot_name, tool.as_deref()), detail: approval_detail(subtitle, tool.as_deref()), answer } }
