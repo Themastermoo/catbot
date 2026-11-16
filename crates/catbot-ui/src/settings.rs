@@ -254,7 +254,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
 
 /// Their settings switch (`SettingsPrimitives.tsx`).
 #[component]
-fn Switch(checked: bool, disabled: bool, label: String, on_toggle: EventHandler<()>) -> Element {
+pub fn Switch(checked: bool, disabled: bool, label: String, on_toggle: EventHandler<()>) -> Element {
     rsx! {
         button {
             r#type: "button",

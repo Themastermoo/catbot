@@ -27,6 +27,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     let mut making = use_signal(|| false);
     let mut pairing = use_signal(|| false);
     let mut remembering = use_signal(|| false);
+    let mut configuring = use_signal(|| false);
     // Bots whose chats are showing.
     let mut unfolded = use_signal(HashSet::<String>::new);
     let state = use_context::<Signal<State>>();
@@ -61,6 +62,19 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                         path { d: "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" }
                     }
                 }
+                if crate::notify::AVAILABLE { button {
+                    r#type: "button",
+                    "aria-label": "Settings",
+                    title: "Settings",
+                    "data-open-settings": true,
+                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                    onclick: move |_| configuring.set(true),
+                    // Lucide `Bell` (ISC).
+                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        path { d: "M10.268 21a2 2 0 0 0 3.464 0" }
+                        path { d: "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" }
+                    }
+                } }
                 if at_home { button {
                     r#type: "button",
                     "aria-label": "Devices",
@@ -90,6 +104,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             }
             if pairing() {
                 crate::devices::DevicesDialog { on_close: move |_| pairing.set(false) }
+            }
+            if configuring() {
+                crate::notify::SettingsDialog { on_close: move |_| configuring.set(false) }
             }
             if remembering() {
                 crate::memory::MemoryDialog { on_close: move |_| remembering.set(false) }

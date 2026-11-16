@@ -21,6 +21,7 @@ mod pair;
 mod events;
 mod live;
 mod mascots;
+mod notify;
 mod markdown;
 mod memory;
 mod settings;
@@ -137,7 +138,9 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let settings_open = use_signal(|| false);
     // On a phone, the bot list and a chat take turns filling the screen.
     let showing_chat = use_signal(|| false);
-    use_context_provider(|| settings::Ui { selected, settings_open, showing_chat });
+    let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat });
+    let notify_prefs = use_context_provider(|| Signal::new(notify::load()));
+    use_future(move || notify::follow_clicks(state, ui));
     // Talking to home through the link, and home has removed this device.
     let unpaired = move || place == link::Place::Home && link::current().is_none();
     let mut problem = use_signal(|| None::<String>);
@@ -172,7 +175,9 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
         let mut connected_before = false;
         loop {
             events::follow(|frame| {
-                if state.write().apply(&frame) == live::After::Resync {
+                let after = state.write().apply(&frame);
+                notify::on_frame(&frame, *notify_prefs.peek(), state, ui);
+                if after == live::After::Resync {
                     if connected_before {
                         catch_up();
                     }
