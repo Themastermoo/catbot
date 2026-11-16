@@ -1227,3 +1227,64 @@ async fn a_channel_is_answered_by_its_lead_or_whoever_is_named() {
     assert_eq!(s.call("DELETE", &format!("/api/bots/{channel}"), None).await.0, 200);
     assert_eq!(s.call("GET", &format!("/api/bots/{channel}"), None).await.0, 404);
 }
+
+#[tokio::test]
+async fn a_bot_hands_work_on_within_the_limits_set() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let mut ids = Vec::new();
+    for (name, soul) in [("Scout", "fake-pass @Kiwi"), ("Kiwi", "fake-pass @Scout")] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name, "soul": soul }))).await;
+        ids.push(made["bot"]["id"].as_str().unwrap().to_string());
+    }
+    let (_, limits) = s.call("GET", "/api/handoffs", None).await;
+    assert_eq!(limits["handoffs"], json!({ "unlimited": false, "depth": 3, "replies": 6 }));
+    let replies = |page: &Value| -> Vec<String> {
+        page["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").map(|m| m["botId"].as_str().unwrap_or_default().to_string()).collect()
+    };
+    let notes = |page: &Value| -> Vec<String> {
+        page["messages"].as_array().unwrap().iter().filter_map(|m| m["tool"]["name"].as_str()?.strip_prefix("notice: ").map(str::to_string)).collect()
+    };
+
+    // Three hand-offs deep: Scout, Kiwi, Scout, Kiwi; the fourth is refused.
+    let (status, sent) = s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Plan the beds" }))).await;
+    assert_eq!(status, 202, "{sent}");
+    let thread = sent["threadId"].as_str().unwrap().to_string();
+    until(&mut events, "too deep", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("3 deep"))).await;
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=50"), None).await;
+    assert_eq!(replies(&page), [ids[0].as_str(), &ids[1], &ids[0], &ids[1]], "{page}");
+    assert_eq!(notes(&page)[0], "Scout handed this to Kiwi.");
+    let texts: Vec<&str> = page["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").filter_map(|m| m["text"].as_str()).collect();
+    assert!(texts[1].contains("Scout: Hello, Plan the beds"), "Kiwi is shown the chat: {}", texts[1]);
+    assert!(texts[2].contains("[Kiwi]: Hello,") && texts[2].contains("handed this back"), "Scout is told what Kiwi said: {}", texts[2]);
+    // Kiwi was a guest: Scout's chat keeps Scout's own session.
+    let (_, scout) = s.call("GET", &format!("/api/bots/{}", ids[0]), None).await;
+    assert_eq!(scout["bot"]["tasks"].as_array().unwrap().len(), 1);
+
+    // Fewer replies allowed: Scout, Kiwi, Scout, then the limit.
+    let (status, _) = s.call("PUT", "/api/handoffs", Some(json!({ "depth": 10, "replies": 3 }))).await;
+    assert_eq!(status, 200);
+    s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Again", "threadId": thread }))).await;
+    until(&mut events, "too many", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("at most 3 bot replies"))).await;
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+    assert_eq!(replies(&page).len(), 4 + 3);
+
+    // Unlimited: it goes on until stopped.
+    s.call("PUT", "/api/handoffs", Some(json!({ "unlimited": true }))).await;
+    s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Keep going", "threadId": thread }))).await;
+    for n in 0..5 {
+        until(&mut events, &format!("reply {n}"), |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    }
+    let (status, stopped) = s.call("POST", &format!("/api/bots/{}/interrupt", ids[0]), Some(json!({ "threadId": thread }))).await;
+    assert_eq!((status, stopped["stopped"].as_bool()), (200, Some(true)));
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=200"), None).await;
+    let count = replies(&page).len();
+    assert!(count >= 7 + 5, "{count}");
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=200"), None).await;
+    assert!(replies(&page).len() <= count + 1, "stopped");
+}

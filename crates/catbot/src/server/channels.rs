@@ -190,6 +190,17 @@ pub fn responders(text: &str, members: &[Bot], lead: Option<&str>) -> Vec<Bot> {
     if lower.contains("@everyone") || lower.contains("@all ") || lower.ends_with("@all") {
         return members.to_vec();
     }
+    let named = named(text, members);
+    if named.is_empty() {
+        let lead = lead.and_then(|l| members.iter().find(|b| b.id == l)).or(members.first());
+        return lead.cloned().into_iter().collect();
+    }
+    named
+}
+
+/// The bots a text @names, in the order named.
+pub fn named(text: &str, members: &[Bot]) -> Vec<Bot> {
+    let lower = text.to_lowercase();
     let mut named: Vec<(usize, Bot)> = Vec::new();
     // Longer names first, so "@Kiwi Two" isn't taken as "@Kiwi".
     let mut by_length: Vec<&Bot> = members.iter().collect();
@@ -215,15 +226,11 @@ pub fn responders(text: &str, members: &[Bot], lead: Option<&str>) -> Vec<Bot> {
         }
     }
     named.sort_by_key(|(at, _)| *at);
-    if named.is_empty() {
-        let lead = lead.and_then(|l| members.iter().find(|b| b.id == l)).or(members.first());
-        return lead.cloned().into_iter().collect();
-    }
     named.into_iter().map(|(_, b)| b).collect()
 }
 
 /// A member as it works in this channel: in the channel's folder, told about the channel.
-fn in_channel(mut bot: Bot, channel: &Channel, members: &[Bot]) -> Bot {
+pub fn in_channel(mut bot: Bot, channel: &Channel, members: &[Bot]) -> Bot {
     let others: Vec<String> = members
         .iter()
         .filter(|m| m.id != bot.id)
@@ -237,7 +244,8 @@ fn in_channel(mut bot: Bot, channel: &Channel, members: &[Bot]) -> Bot {
     let mut note = format!(
         "\n\nYou're talking in the channel \"{}\", a group chat with the person and the bots {}.{lead_note} Others' messages \
          come marked with their names. The person picks who answers with @Name. Answer as yourself, briefly, \
-         without repeating what others have said.",
+         without repeating what others have said. To hand part of the work to another bot here, end your reply \
+         with @Name and what you need from them.",
         channel.name,
         if others.is_empty() { "(none but you)".to_string() } else { others.join(", ") },
     );
@@ -285,32 +293,11 @@ fn send(app: &Arc<App>, channel: Channel, body: Value) -> Answer {
     announce(app, &channel.id);
     let app = app.clone();
     let channel_id = channel.id.clone();
+    let thread = conversation.id.clone();
+    let asked = answering.len() as u32;
+    let queue = answering.into_iter().map(|bot| super::handoffs::Turn { bot, depth: 0, from: None }).collect();
     tokio::spawn(async move {
-        for (n, bot) in answering.into_iter().enumerate() {
-            if !app.channel_busy(&channel_id) {
-                break; // Stopped.
-            }
-            let Some(channel) = app.with_store(|store| store.channel(&channel_id)).flatten() else { break };
-            let Some(conversation) = app.with_store(|store| store.channel_conversation(&channel_id)).flatten() else { break };
-            let members: Vec<Bot> = channel.members.iter().filter_map(|id| app.with_store(|store| store.bot_by_id(id)).flatten()).collect();
-            // A backup takes the turn if the member's AI is at a limit; a member that can't go is noted.
-            let member = match super::backups::choose(&app, &bot) {
-                Ok(Some((stand_in, why))) => {
-                    turns::save_and_send(&app, &conversation.id, Role::Note, &format!("{}: {why}", bot.name), None);
-                    stand_in
-                }
-                Ok(None) => bot.clone(),
-                Err(why) => {
-                    turns::save_and_send(&app, &conversation.id, Role::Note, &format!("{} can't answer: {why}", bot.name), None);
-                    continue;
-                }
-            };
-            let speaker = in_channel(member, &channel, &members);
-            let cue = if n == 0 { format!("It's your turn to answer the person's last message, as {}.", speaker.name) } else { format!("It's your turn now, as {}.", speaker.name) };
-            if let Err(err) = turns::run_through(&app, &speaker, conversation, request_id, &cue).await {
-                eprintln!("catbot: {} couldn't answer in {}: {err}", bot.name, channel.name);
-            }
-        }
+        super::handoffs::follow(&app, &channel_id, &thread, request_id, queue, super::handoffs::Place::Channel(channel_id.clone()), asked, 0).await;
         app.set_channel_busy(&channel_id, false);
         announce(&app, &channel_id);
     });

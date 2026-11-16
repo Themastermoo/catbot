@@ -10,6 +10,7 @@ pub mod attachments;
 pub mod backups;
 pub mod changes;
 pub mod channels;
+pub mod handoffs;
 pub mod limits;
 pub mod reactions;
 pub mod usage;
@@ -141,7 +142,15 @@ impl App {
 
     /// What one chat is doing, for `wire::bot`.
     fn activity(&self) -> impl Fn(&str) -> &'static str + '_ {
-        |thread| self.turns.activity(thread)
+        |thread| self.chat_activity(thread)
+    }
+
+    /// A chat's activity, counting a chain of hand-offs between turns as working.
+    pub fn chat_activity(&self, thread: &str) -> &'static str {
+        match self.turns.activity(thread) {
+            "idle" if self.channel_busy(thread) => "working",
+            other => other,
+        }
     }
 
     /// A bot on the wire, with its chats' activity.
@@ -313,6 +322,11 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             };
             respond(limits::route(&app, &method, body, true).await)
         }
+        ["api", "handoffs"] if method == Method::GET => respond(handoffs::route(&app, None)),
+        ["api", "handoffs"] if method == Method::PUT => match json_body(req).await {
+            Ok(body) => respond(handoffs::route(&app, Some(body))),
+            Err(err) => respond(Err(err)),
+        },
         ["api", "engines", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
@@ -544,7 +558,10 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
                 Some(thread) => thread.to_string(),
                 None => app.try_store(|store| store.ensure_conversation(&bot.id)).map_err(fail)?.id,
             };
-            Ok((StatusCode::OK, json!({ "ok": true, "stopped": app.turns.interrupt(&thread) })))
+            // A chain of hand-offs stops too, not just the bot answering now.
+            let chained = app.channel_busy(&thread);
+            app.stop_channel(&thread);
+            Ok((StatusCode::OK, json!({ "ok": true, "stopped": app.turns.interrupt(&thread) || chained })))
         }
         (method, rest) => {
             eprintln!("catbot: {method} /api/bots/<{}>/{} isn't something Catbot bots do yet", bot.name, rest.join("/"));
@@ -620,7 +637,7 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
             }
         })
         .map_err(fail)?;
-    if app.turns.busy(&conversation.id) {
+    if app.turns.busy(&conversation.id) || app.channel_busy(&conversation.id) {
         return Err((StatusCode::CONFLICT, "this bot is still working on the last message".into()));
     }
     // A Claude plan's windows, read again in the background when they're getting old.
@@ -654,7 +671,11 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     }
     let request_id = message["id"].as_str().and_then(wire::parse_message_id).unwrap_or_default();
     let thread = conversation.id.clone();
-    let said = format!("{text}{}{reacted}", attachments::note(&described));
+    // What bots brought into this chat said, which the bot's own session didn't see.
+    let told = handoffs::untold_note(app, &conversation.id, &bot.id);
+    let said = format!("{text}{}{reacted}{told}", attachments::note(&described));
+    let mut bot = bot;
+    bot.instructions.push_str(&handoffs::roster_note(app, &bot));
     let bot = match switched {
         Some((stand_in, why)) => {
             turns::save_and_send(app, &conversation.id, Role::Note, &why, None);
@@ -761,7 +782,7 @@ fn change_chat(app: &Arc<App>, bot: Bot, thread: &str, body: Value) -> Answer {
         app.try_store(|store| store.set_archived(&conversation.id, !archived.is_null())).map_err(fail)?;
     }
     let conversation = chat_of(app, &bot, thread)?;
-    let task = wire::task(&bot, &conversation, app.turns.activity(&conversation.id));
+    let task = wire::task(&bot, &conversation, app.chat_activity(&conversation.id));
     app.announce_bot(&bot.id);
     Ok((StatusCode::OK, json!({ "task": task })))
 }

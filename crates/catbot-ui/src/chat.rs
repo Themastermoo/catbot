@@ -887,7 +887,17 @@ fn Row(
                 "w-fit max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct))] rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed text-ink"
             };
             let html = markdown::to_html(text);
-            let speaker = speakers.as_ref().and_then(|info| message.bot_id.as_ref().and_then(|id| info.members.iter().find(|m| &m.0 == id)).cloned());
+            let speaker = match (&speakers, &message.bot_id) {
+                (Some(info), Some(id)) => info.members.iter().find(|m| &m.0 == id).cloned(),
+                // Another bot, brought into this bot's chat by a hand-off.
+                (None, Some(id)) if *id != bot_id => consume_context::<Signal<State>>()
+                    .read()
+                    .bots
+                    .iter()
+                    .find(|b| &b.id == id)
+                    .map(|b| (b.id.clone(), b.name.clone(), b.mark.clone(), b.color.clone())),
+                _ => None,
+            };
             rsx! {
                 div { class: "group flex w-full flex-col items-start",
                     if let Some((_, name, mark, color)) = speaker {

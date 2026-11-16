@@ -101,20 +101,30 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
     let id = turn_id.clone();
     tokio::spawn(async move {
         let thread_id = conversation.id.clone();
-        run(&app, &bot, conversation, request_id, &text, &id, cancel).await;
+        let reply = run(&app, &bot, conversation, request_id, &text, &id, cancel, false).await;
+        // A reply that ends with @Name brings that bot in (`handoffs.rs`); the chat stays busy.
+        let next = reply.as_deref().map(|r| super::handoffs::next_after(&app, &bot, r)).unwrap_or_default();
+        if !next.is_empty() {
+            app.set_channel_busy(&thread_id, true);
+        }
         app.turns.finish(&thread_id);
         app.announce_bot(&bot.id);
+        if let Some(reply) = reply.filter(|_| !next.is_empty()) {
+            super::handoffs::after_reply(&app, &bot, &thread_id, request_id, &reply, next).await;
+        }
     });
     Ok(turn_id)
 }
 
-/// Runs a turn to its end (for a channel's bots, who answer one after another).
-pub async fn run_through(app: &Arc<App>, bot: &Bot, conversation: Conversation, request_id: i64, text: &str) -> Result<(), &'static str> {
+/// Runs a turn to its end, for bots answering one after another (a channel's, or a chain of
+/// hand-offs), and gives back its reply. A `guest` is a bot answering in another bot's chat: it
+/// starts afresh, shown the chat, and leaves that bot's session alone.
+pub async fn run_through(app: &Arc<App>, bot: &Bot, conversation: Conversation, request_id: i64, text: &str, guest: bool) -> Result<Option<String>, &'static str> {
     let (turn_id, cancel) = register(app, &conversation.id)?;
     let thread_id = conversation.id.clone();
-    run(app, bot, conversation, request_id, text, &turn_id, cancel).await;
+    let reply = run(app, bot, conversation, request_id, text, &turn_id, cancel, guest).await;
     app.turns.finish(&thread_id);
-    Ok(())
+    Ok(reply)
 }
 
 /// Marks a conversation busy with a new turn: its id and its stop signal.
@@ -150,7 +160,8 @@ async fn run(
     text: &str,
     turn_id: &str,
     cancel: Arc<Notify>,
-) {
+    guest: bool,
+) -> Option<String> {
     let thread = conversation.id.as_str();
     let emit = |event: Value| app.hub.send(runtime(thread, turn_id, event));
     app.announce_bot(&bot.id);
@@ -159,13 +170,14 @@ async fn run(
     let codex = chat::codex_dir(bot, &app.codex);
     app.seed_memory(bot);
     // In a channel several bots share the transcript, so each turn starts a fresh session shown
-    // everything said there (a bot's own session wouldn't hold what the others said).
-    let channel = conversation.channel_id.is_some();
+    // everything said there (a bot's own session wouldn't hold what the others said). A guest
+    // in another bot's chat does the same, and keeps out of that bot's session.
+    let fresh = conversation.channel_id.is_some() || guest;
     let mut session = match &conversation.session_id {
-        Some(id) if !channel => Session::Resume(id.clone()),
+        Some(id) if !fresh => Session::Resume(id.clone()),
         _ => Session::New(uuid::Uuid::new_v4().to_string()),
     };
-    if let Session::New(id) = &session {
+    if let (Session::New(id), false) = (&session, guest) {
         app.with_store(|store| store.set_session(thread, id));
     }
 
@@ -176,7 +188,7 @@ async fn run(
     let item_id = format!("item-{turn_id}");
     // A fresh session (a branched chat, or one Claude lost) is shown what was said before.
     let with_earlier = |session: &Session| match session {
-        Session::New(_) if bot.engine == engines::CLAUDE => format!("{}{text}", so_far(app, thread, if channel { i64::MAX } else { request_id }, bot)),
+        Session::New(_) if bot.engine == engines::CLAUDE => format!("{}{text}", so_far(app, thread, if fresh { i64::MAX } else { request_id }, bot)),
         _ => text.to_string(),
     };
     let mut result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit).await;
@@ -201,7 +213,9 @@ async fn run(
         super::usage::forget(app);
         if let Ok(Some((stand_in, why))) = super::backups::choose(app, bot) {
             save_and_send(app, thread, Role::Note, &why, None);
-            app.with_store(|store| store.clear_session(thread));
+            if !guest {
+                app.with_store(|store| store.clear_session(thread));
+            }
             let fresh = Session::New(uuid::Uuid::new_v4().to_string());
             result = drive(app, &stand_in, &fresh, text, codex, thread, &item_id, &cancel, &emit).await;
             ran_on = stand_in;
@@ -236,10 +250,10 @@ async fn run(
     for prompt in pictures {
         super::images::card(app, thread, &prompt, &bot.name);
     }
-    super::changes::after_turn(app, thread, points, before).await;
+    super::changes::after_turn(app, thread, &bot.id, points, before).await;
     // A backup answered: the bot's own AI starts afresh next time, shown everything said.
     let own_engine = app.with_store(|store| store.bot_by_id(&bot.id)).flatten().map(|b| b.engine);
-    if own_engine.is_some_and(|own| own != bot.engine) {
+    if !guest && own_engine.is_some_and(|own| own != bot.engine) {
         app.with_store(|store| store.clear_session(thread));
     }
     if let Some(outcome) = &result.outcome {
@@ -257,6 +271,7 @@ async fn run(
         "cost": outcome.cost_usd,
         "denials": outcome.permission_denials.iter().filter_map(|d| d["tool_name"].as_str()).collect::<Vec<_>>(),
     }));
+    (!result.stopped && !result.reply.trim().is_empty()).then_some(result.reply)
 }
 
 /// Runs the CLI once, turning its events into live frames.
@@ -396,7 +411,7 @@ fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::P
         .find(|m| m.role == Role::Person)
         .map(|m| super::attachments::pictures(m, &bot.folder))
         .unwrap_or_default();
-    let history = with_cue(lines(app, messages, bot), app, thread, bot);
+    let history = with_cue(lines(app, thread, messages, bot), app, thread, bot);
     let mut system = chat::system_prompt(bot, codex.as_deref(), app.memory.as_deref());
     system.push_str(&api::tool_guide(&bot.folder));
     let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
@@ -412,7 +427,7 @@ fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
         format!("{} isn't installed on this computer. Install it with `{}`, then sign in with `{}`.", engine.name, engine.install, engine.sign_in)
     })?;
     let messages = app.with_store(|store| store.messages(thread, 60)).unwrap_or_default();
-    let mut history = with_cue(lines(app, messages, bot), app, thread, bot);
+    let mut history = with_cue(lines(app, thread, messages, bot), app, thread, bot);
     let text = match history.last() {
         Some((true, _)) => history.pop().map(|(_, text)| text).unwrap_or_default(),
         _ => String::new(),
@@ -464,32 +479,42 @@ fn names(app: &App) -> std::collections::HashMap<String, String> {
 
 /// A conversation as an AI's history: the person's words (and other bots', named, in a
 /// channel) on one side, this bot's own replies on the other.
-fn lines(app: &App, messages: Vec<crate::store::Message>, bot: &Bot) -> Vec<(bool, String)> {
+fn lines(app: &App, thread: &str, messages: Vec<crate::store::Message>, bot: &Bot) -> Vec<(bool, String)> {
     let names = names(app);
+    let owner = owner_of(app, thread, bot);
     messages
         .into_iter()
         .filter_map(|m| {
-            let speaker = m.detail.as_ref().and_then(|d| d["botId"].as_str()).map(str::to_string);
+            let speaker = m.detail.as_ref().and_then(|d| d["botId"].as_str()).map(str::to_string).unwrap_or_else(|| owner.clone());
             match m.role {
                 Role::Person => Some((true, super::attachments::person_text(&m))),
                 Role::Bot if m.body.trim().is_empty() => None,
-                Role::Bot => match speaker {
-                    Some(id) if id != bot.id => Some((true, format!("[{}]: {}", names.get(&id).map(String::as_str).unwrap_or("Another bot"), m.body))),
-                    _ => Some((false, m.body)),
-                },
+                Role::Bot if speaker != bot.id => Some((true, format!("[{}]: {}", names.get(&speaker).map(String::as_str).unwrap_or("Another bot"), m.body))),
+                Role::Bot => Some((false, m.body)),
                 _ => None,
             }
         })
         .collect()
 }
 
-/// In a channel, where the last word may be another bot's: a cue that it's this bot's turn.
+/// Where the last word may be another bot's (a channel, or a hand-off): a cue that it's this
+/// bot's turn.
 fn with_cue(mut history: Vec<(bool, String)>, app: &App, thread: &str, bot: &Bot) -> Vec<(bool, String)> {
     let channel = app.with_store(|store| store.conversation(thread)).flatten().and_then(|c| c.channel_id).is_some();
-    if channel && history.last().is_none_or(|(person, text)| !person || text.starts_with('[')) {
-        history.push((true, format!("(It's your turn to answer in the channel, as {}.)", bot.name)));
+    let another_bot = history.last().is_some_and(|(person, text)| *person && text.starts_with('['));
+    if another_bot || (channel && history.last().is_none_or(|(person, _)| !person)) {
+        let place = if channel { "in the channel" } else { "in this chat" };
+        history.push((true, format!("(It's your turn to answer {place}, as {}.)", bot.name)));
     }
     history
+}
+
+/// Whose a reply with no name on it is: the chat's own bot (a channel's: none in particular).
+fn owner_of(app: &App, thread: &str, bot: &Bot) -> String {
+    match app.with_store(|store| store.conversation(thread)).flatten() {
+        Some(c) if c.channel_id.is_none() => c.bot_id,
+        _ => bot.id.clone(),
+    }
 }
 
 /// The chat before message `before`, for a session that starts without it: the last 30 of the
@@ -497,17 +522,15 @@ fn with_cue(mut history: Vec<(bool, String)>, app: &App, thread: &str, bot: &Bot
 fn so_far(app: &App, thread: &str, before: i64, bot: &Bot) -> String {
     let page = app.with_store(|store| store.page(thread, Some(before), 30).map(|(page, _)| page)).unwrap_or_default();
     let names = names(app);
+    let owner = owner_of(app, thread, bot);
     let earlier: Vec<(String, String)> = page
         .into_iter()
         .filter_map(|m| {
-            let speaker = m.detail.as_ref().and_then(|d| d["botId"].as_str()).map(str::to_string);
+            let speaker = m.detail.as_ref().and_then(|d| d["botId"].as_str()).map(str::to_string).unwrap_or_else(|| owner.clone());
             match m.role {
                 Role::Person => Some(("Person".to_string(), super::attachments::person_text(&m))),
                 Role::Bot if !m.body.trim().is_empty() => {
-                    let who = match speaker {
-                        Some(id) if id != bot.id => names.get(&id).cloned().unwrap_or_else(|| "Another bot".into()),
-                        _ => "You".to_string(),
-                    };
+                    let who = if speaker == bot.id { "You".to_string() } else { names.get(&speaker).cloned().unwrap_or_else(|| "Another bot".into()) };
                     Some((who, m.body))
                 }
                 _ => None,

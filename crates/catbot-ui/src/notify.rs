@@ -203,7 +203,7 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
                         "×"
                     }
                 }
-                section { class: "flex flex-col gap-3", "data-notification-settings": true,
+                if AVAILABLE { section { class: "flex flex-col gap-3", "data-notification-settings": true,
                     h2 { class: "text-[13px] font-semibold uppercase tracking-wide text-ink-tertiary", "Notifications" }
                     p { class: "text-[13px] text-ink-secondary", "Shown by this computer while Catbot is open, except for the chat you're looking at." }
                     div { class: "flex items-center gap-3",
@@ -224,7 +224,8 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
                             on_toggle: move |_| change(|p| p.asking = !p.asking),
                         }
                     }
-                }
+                } }
+                crate::handoffs::HandoffSettings {}
             }
         }
     }

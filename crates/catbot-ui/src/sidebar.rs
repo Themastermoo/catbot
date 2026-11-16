@@ -77,19 +77,18 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                         path { d: "M3.34 19a10 10 0 1 1 17.32 0" }
                     }
                 }
-                if crate::notify::AVAILABLE { button {
+                button {
                     r#type: "button",
                     "aria-label": "Settings",
                     title: "Settings",
                     "data-open-settings": true,
                     class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
                     onclick: move |_| configuring.set(true),
-                    // Lucide `Bell` (ISC).
+                    // Lucide `SlidersHorizontal` (ISC).
                     svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                        path { d: "M10.268 21a2 2 0 0 0 3.464 0" }
-                        path { d: "M3.262 15.326A1 1 0 0 0 4 17h16a1 1 0 0 0 .74-1.673C19.41 13.956 18 12.499 18 8A6 6 0 0 0 6 8c0 4.499-1.411 5.956-2.738 7.326" }
+                        path { d: "M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4" }
                     }
-                } }
+                }
                 if at_home { button {
                     r#type: "button",
                     "aria-label": "Devices",

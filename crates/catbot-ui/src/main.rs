@@ -10,6 +10,7 @@ mod react;
 mod bots;
 mod changes;
 mod channels;
+mod handoffs;
 mod chat;
 mod chats;
 mod devices;

@@ -50,7 +50,7 @@ pub async fn snapshot(points: Option<Checkpoints>, label: &'static str) -> Optio
 }
 
 /// After a turn: if it changed the folder, the row saying so.
-pub async fn after_turn(app: &Arc<App>, thread: &str, points: Option<Checkpoints>, before: Option<String>) {
+pub async fn after_turn(app: &Arc<App>, thread: &str, bot_id: &str, points: Option<Checkpoints>, before: Option<String>) {
     let (Some(points), Some(before)) = (points, before) else { return };
     let Some(after) = snapshot(Some(points.clone()), "after a turn").await else { return };
     if after == before {
@@ -61,7 +61,9 @@ pub async fn after_turn(app: &Arc<App>, thread: &str, points: Option<Checkpoints
     if files.is_empty() {
         return;
     }
-    let detail = checkpoints::detail(&before, &after, &files);
+    let mut detail = checkpoints::detail(&before, &after, &files);
+    // Whose folder it was: another bot's, when one was brought into this chat.
+    detail["botId"] = json!(bot_id);
     turns::save_and_send(app, thread, Role::Step, &checkpoints::summary(&files), Some(&detail));
 }
 
@@ -69,13 +71,18 @@ pub async fn route(app: &Arc<App>, thread: &str, message: &str, action: Option<&
     let id = wire::parse_message_id(message).ok_or_else(|| bad("which turn?"))?;
     let conversation = app.try_store(|store| store.conversation(thread)).map_err(fail)?.ok_or_else(|| bad("no such chat"))?;
     let mut bot = app.try_store(|store| store.bot_by_id(&conversation.bot_id)).map_err(fail)?.ok_or_else(|| bad("no such bot"))?;
+    let row = app.try_store(|store| store.message_in(thread, id)).map_err(fail)?;
+    // A bot brought into this chat changed its own folder.
+    if let Some(other) = row.as_ref().and_then(|m| m.detail.as_ref()).and_then(|d| d["botId"].as_str()).filter(|b| *b != bot.id)
+        && let Some(found) = app.with_store(|store| store.bot_by_id(other)).flatten()
+    {
+        bot = found;
+    }
     // A channel's turns changed the channel's folder.
     if let Some(channel) = conversation.channel_id.as_deref().and_then(|id| app.with_store(|store| store.channel(id)).flatten()) {
         bot.folder = channel.folder;
     }
-    let row = app
-        .try_store(|store| store.message_in(thread, id))
-        .map_err(fail)?
+    let row = row
         .filter(|m| m.detail.as_ref().is_some_and(|d| d["kind"] == "changes"))
         .ok_or((StatusCode::NOT_FOUND, "no such changes in this chat".to_string()))?;
     let mut detail = row.detail.clone().unwrap_or(Value::Null);

@@ -9,7 +9,8 @@ The prompt picks the behaviour:
   "limit"  -> turns the turn away at the plan's usage limit, as the real CLI does
   "write <file>: <words>" -> writes the words to that file in its folder (as a bot's edit would)
   "Name the conversation…" -> a chat's name, the way Catbot asks for one
-  anything else -> streams "Hello, <prompt>" back
+  anything else -> streams "Hello, <prompt>" back (ending "@Name, over to you." for a bot
+                   whose instructions say "fake-pass @Name")
 """
 import json, subprocess, sys
 
@@ -106,6 +107,11 @@ if prompt.startswith("write ") and ":" in prompt.splitlines()[0]:
     with open(os.path.join(os.getcwd(), name.strip()), "w") as f:
         f.write(words.strip() + "\n")
 reply = f"Hello, {prompt}"
+# A bot told "fake-pass @Name" (in its instructions, which come first) hands on to that bot.
+import re
+passing = re.search(r"fake-pass (@\w+)", system)
+if passing:
+    reply += f"\n\n{passing.group(1)}, over to you."
 # Catbot asking for a chat's name ("sleepy" in the message makes the namer slow).
 if prompt.startswith("Name the conversation"):
     if "sleepy" in prompt:
