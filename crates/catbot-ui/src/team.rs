@@ -14,6 +14,8 @@ pub struct Change {
     pub asked_by: String,
     /// What the card is about, when it isn't a team change (a skill a bot offers).
     pub heading: Option<String>,
+    /// What the card says once it's done ("Sent."), when not the usual.
+    pub done_text: Option<String>,
     pub state: String,
     pub error: Option<String>,
 }
@@ -26,6 +28,7 @@ impl Change {
             warning: wire["warning"].as_str().map(str::to_string),
             asked_by: wire["askedBy"].as_str().unwrap_or("The Chief").to_string(),
             heading: wire["heading"].as_str().map(str::to_string),
+            done_text: wire["doneText"].as_str().map(str::to_string),
             state: wire["state"].as_str().unwrap_or("asking").to_string(),
             error: wire["error"].as_str().map(str::to_string),
         }
@@ -70,7 +73,7 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                 if !change.lines.is_empty() {
                     ul { class: "flex flex-col gap-0.5 pl-6 text-ink",
                         for line in change.lines.iter() {
-                            li { class: "list-disc break-words", "{line}" }
+                            li { class: "list-disc whitespace-pre-wrap break-words", "{line}" }
                         }
                     }
                 }
@@ -78,7 +81,8 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                     p { class: "pl-6 text-warning", "{warning}" }
                 }
                 match change.state.as_str() {
-                    "done" => rsx! { p { class: "text-ink-tertiary", "Approved and done." } },
+                    "done" => rsx! { p { class: "text-ink-tertiary", "{change.done_text.clone().unwrap_or_else(|| \"Approved and done.\".into())}" } },
+                    "sending" => rsx! { p { class: "text-ink-secondary", "Sending…" } },
                     "declined" => rsx! { p { class: "text-ink-tertiary", "Declined. Nothing changed." } },
                     _ => rsx! {},
                 }

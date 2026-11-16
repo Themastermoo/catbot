@@ -314,6 +314,7 @@ pub fn propose(app: &App, thread: &str, bot: &Bot, found: Vec<String>) {
                     "lines": lines,
                     "warning": exists.then(|| "A skill with this name is in your library; approving replaces it.".to_string()),
                     "action": "save_skill",
+                    "doneText": "Saved to your skills, and turned on for this bot.",
                     "target": bot.id,
                     "body": { "text": text },
                     "state": "asking",

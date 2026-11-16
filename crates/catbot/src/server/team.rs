@@ -270,7 +270,7 @@ pub fn propose(app: &App, thread: &str, chief: &Bot, found: Vec<String>) {
 }
 
 /// `POST /api/threads/:thread/team/:message` `{ approve: true | false }`.
-pub fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -> Answer {
+pub async fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -> Answer {
     let id = wire::parse_message_id(message).ok_or_else(|| bad("which change?"))?;
     let row = app
         .try_store(|store| store.message_in(thread, id))
@@ -288,7 +288,13 @@ pub fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -> Answ
         remember(app, thread, &format!("The person declined: {title}."));
         return Ok((StatusCode::OK, json!({ "ok": true, "state": "declined" })));
     }
-    let outcome = apply(app, &detail);
+    // Sending an email takes a moment: the card says so meanwhile.
+    if detail["action"] == "send_mail" {
+        let mut sending = detail.clone();
+        sending["state"] = json!("sending");
+        update(app, thread, id, &sending);
+    }
+    let outcome = apply(app, &detail).await;
     match &outcome {
         Ok(()) => {
             detail["state"] = json!("done");
@@ -305,7 +311,7 @@ pub fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -> Answ
 }
 
 /// Does an approved change.
-fn apply(app: &Arc<App>, detail: &Value) -> Result<(), String> {
+async fn apply(app: &Arc<App>, detail: &Value) -> Result<(), String> {
     let target = detail["target"].as_str().unwrap_or_default();
     let body = detail["body"].clone();
     let refused = |(_, why): (StatusCode, String)| why;
@@ -319,6 +325,7 @@ fn apply(app: &Arc<App>, detail: &Value) -> Result<(), String> {
         "change_channel" => channels::change(app, channel()?, body).map(|_| ()).map_err(refused),
         "delete_channel" => channels::remove(app, &channel()?).map(|_| ()).map_err(refused),
         "save_skill" => super::skills::save_approved(app, target, body["text"].as_str().unwrap_or_default()),
+        "send_mail" => super::email::send(app, &body).await,
         other => Err(format!("{other} isn't a change Catbot knows")),
     }
 }

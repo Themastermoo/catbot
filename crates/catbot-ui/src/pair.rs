@@ -5,6 +5,8 @@
 //! has one, else jsQR (Apache-2.0, `assets/jsQR.js`, see NOTICE) reading frames off a canvas.
 
 use dioxus::prelude::*;
+// Only the apps pair over the network; the web page never does.
+#[cfg(not(target_arch = "wasm32"))]
 use serde_json::{Value, json};
 
 use crate::link::{self, Link};

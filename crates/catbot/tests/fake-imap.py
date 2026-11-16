@@ -1,4 +1,5 @@
-"""A tiny IMAP server for tests: two messages, plain on 127.0.0.1. Prints its port, then serves.
+"""A tiny IMAP server for tests: two messages, plain on 127.0.0.1; and a tiny SMTP server that
+appends what it's sent to the file named by FAKE_SMTP_LOG. Prints both ports, then serves.
 
 The password is "right". It answers LOGIN, EXAMINE/SELECT, UID SEARCH (ALL, TEXT, FROM, UNSEEN),
 UID FETCH (headers or whole messages), LIST and LOGOUT, which is what Catbot asks.
@@ -68,10 +69,53 @@ def serve(conn):
             send(f"{tag} BAD unknown\r\n")
     conn.close()
 
-listener = socket.socket()
-listener.bind(("127.0.0.1", 0))
-listener.listen()
-print(listener.getsockname()[1], flush=True)
-while True:
-    conn, _ = listener.accept()
-    threading.Thread(target=serve, args=(conn,), daemon=True).start()
+def serve_smtp(conn):
+    import os
+    f = conn.makefile("rb")
+    send = lambda s: conn.sendall(s.encode())
+    send("220 fake SMTP ready\r\n")
+    envelope = []
+    while True:
+        line = f.readline()
+        if not line: break
+        cmd = line.decode().rstrip("\r\n")
+        upper = cmd.upper()
+        if upper.startswith("EHLO") or upper.startswith("HELO"):
+            send("250-fake\r\n250 AUTH PLAIN LOGIN\r\n")
+        elif upper.startswith("AUTH PLAIN"):
+            import base64
+            parts = base64.b64decode(cmd.split()[-1]).split(b"\0")
+            send("235 ok\r\n" if parts[-1] == b"right" else "535 5.7.8 bad credentials\r\n")
+        elif upper.startswith("MAIL FROM") or upper.startswith("RCPT TO"):
+            envelope.append(cmd)
+            send("250 ok\r\n")
+        elif upper == "DATA":
+            send("354 go\r\n")
+            data = b""
+            while not data.endswith(b"\r\n.\r\n"):
+                data += f.readline()
+            if os.environ.get("FAKE_SMTP_LOG"):
+                with open(os.environ["FAKE_SMTP_LOG"], "ab") as log:
+                    log.write("\n".join(envelope).encode() + b"\n" + data + b"\n=====\n")
+            envelope = []
+            send("250 queued\r\n")
+        elif upper == "QUIT":
+            send("221 bye\r\n"); break
+        else:
+            send("250 ok\r\n")
+    conn.close()
+
+def listen(handler):
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen()
+    def loop():
+        while True:
+            conn, _ = listener.accept()
+            threading.Thread(target=handler, args=(conn,), daemon=True).start()
+    threading.Thread(target=loop, daemon=True).start()
+    return listener.getsockname()[1]
+
+imap_port, smtp_port = listen(serve), listen(serve_smtp)
+print(imap_port, smtp_port, flush=True)
+threading.Event().wait()

@@ -245,6 +245,7 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                 "warning": detail["warning"],
                 "askedBy": detail["askedBy"],
                 "heading": detail["heading"],
+                "doneText": detail["doneText"],
                 "state": detail["state"],
                 "error": detail["error"],
             },

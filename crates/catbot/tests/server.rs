@@ -1538,17 +1538,20 @@ async fn skills_come_from_the_library_and_a_bot_can_offer_one() {
     assert_eq!(list["skills"].as_array().unwrap().len(), 1);
 }
 
-/// The fake mail server (`tests/fake-imap.py`): its port, and the process to stop.
-fn fake_imap() -> (u16, std::process::Child) {
+/// The fake mail servers (`tests/fake-imap.py`): IMAP's port, SMTP's, and the process to stop.
+/// What it's sent goes in `sent`.
+fn fake_mail(sent: &std::path::Path) -> (u16, u16, std::process::Child) {
     use std::io::BufRead;
     let mut child = std::process::Command::new("python3")
         .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-imap.py"))
+        .env("FAKE_SMTP_LOG", sent)
         .stdout(std::process::Stdio::piped())
         .spawn()
         .unwrap();
     let mut line = String::new();
     std::io::BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
-    (line.trim().parse().unwrap(), child)
+    let ports: Vec<u16> = line.split_whitespace().map(|p| p.parse().unwrap()).collect();
+    (ports[0], ports[1], child)
 }
 
 #[tokio::test]
@@ -1556,8 +1559,9 @@ async fn a_chosen_bot_reads_the_mailbox_through_catbots_tools() {
     let s = setup().await;
     let mut events = s.events().await;
     until(&mut events, "hello", |f| f["kind"] == "hello").await;
-    let (port, mut imap) = fake_imap();
-    let mailbox = |password: &str, host: &str| json!({ "address": "moo@y.com", "password": password, "imapHost": host, "imapPort": port, "imapSecurity": "plain", "smtpHost": "127.0.0.1", "smtpPort": 1, "smtpSecurity": "plain" });
+    let sent = s._dir.path().join("sent.log");
+    let (port, smtp, mut imap) = fake_mail(&sent);
+    let mailbox = |password: &str, host: &str| json!({ "address": "moo@y.com", "password": password, "imapHost": host, "imapPort": port, "imapSecurity": "plain", "smtpHost": "127.0.0.1", "smtpPort": smtp, "smtpSecurity": "plain" });
 
     // Kept only once the mailbox lets Catbot in; never without TLS away from this computer.
     let (status, refused) = s.call("PUT", "/api/email", Some(mailbox("wrong", "127.0.0.1"))).await;
@@ -1596,6 +1600,25 @@ async fn a_chosen_bot_reads_the_mailbox_through_catbots_tools() {
     assert!(reply(&s, &mut events, "catbot-tool: mail_folders {}").await.contains("INBOX, Archive"));
     let missing = reply(&s, &mut events, r#"catbot-tool: mail_read {"id": 9}"#).await;
     assert!(missing.starts_with("ERROR: ") && missing.contains("no message 9"), "{missing}");
+
+    // Sending asks first: a card with exactly what would go; sent once approved, in the conversation it answers.
+    let waiting = reply(&s, &mut events, r#"catbot-tool: mail_send {"reply_to": 1, "body": "Thanks, Bob!"}"#).await;
+    assert!(waiting.contains("waiting for the person's approval"), "{waiting}");
+    let (_, page) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    let thread = page["bot"]["threadId"].as_str().unwrap().to_string();
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=50"), None).await;
+    let card = page["messages"].as_array().unwrap().iter().rev().find(|m| m["kind"] == "team-change").unwrap().clone();
+    let change = &card["teamChange"];
+    assert_eq!((change["title"].as_str(), change["heading"].as_str()), (Some("Send “Re: Seeds”"), Some("Scout wants to send an email")));
+    assert_eq!(change["lines"], json!(["From: moo@y.com", "To: Bob <bob@x.com>", "A reply, in the same conversation", "Thanks, Bob!"]));
+    assert!(!sent.exists(), "nothing goes before the yes");
+    let id = card["id"].as_str().unwrap();
+    let (_, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{id}"), Some(json!({ "approve": true }))).await;
+    assert_eq!(answered["state"], "done", "{answered}");
+    let mail = std::fs::read_to_string(&sent).unwrap();
+    assert!(mail.contains("RCPT TO:<bob@x.com>") && mail.contains("Subject: Re: Seeds") && mail.contains("In-Reply-To: <seeds@x.com>") && mail.contains("Thanks, Bob!"), "{mail}");
+    let bad = reply(&s, &mut events, r#"catbot-tool: mail_send {"to": ["not an address"], "body": "Hi"}"#).await;
+    assert!(bad.starts_with("ERROR: ") && bad.contains("isn't an email address"), "{bad}");
 
     // Disconnected: gone.
     s.call("DELETE", "/api/email", None).await;

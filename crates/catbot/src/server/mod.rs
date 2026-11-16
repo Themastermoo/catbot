@@ -901,7 +901,7 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
         }
         (Method::POST, ["team", message]) => {
             let body = json_body(req).await?;
-            team::answer(app, thread, &urlencoding_decode(message), &body)
+            team::answer(app, thread, &urlencoding_decode(message), &body).await
         }
         (Method::GET, ["changes", message]) => changes::route(app, thread, &urlencoding_decode(message), None).await,
         (Method::POST, ["changes", message, action]) => changes::route(app, thread, &urlencoding_decode(message), Some(action)).await,

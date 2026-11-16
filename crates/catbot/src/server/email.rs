@@ -353,6 +353,15 @@ pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
         json!({ "name": "mail_read", "description": "Read one message from the person's mailbox: who it's from and to, the subject, the text and the attachments' names.",
             "inputSchema": { "type": "object", "properties": { "id": { "type": "integer", "description": "The id from mail_search." }, "folder": folder }, "required": ["id"] } }),
         json!({ "name": "mail_folders", "description": "List the folders in the person's mailbox.", "inputSchema": { "type": "object", "properties": {} } }),
+        json!({ "name": "mail_send", "description": format!("Send an email from the person's mailbox ({}). It isn't sent straight away: the person sees exactly what you wrote and approves it first, and you hear whether it went with their next message. To reply, give reply_to (the id from mail_search) and the reply goes in that conversation. Write it as the person would, in plain text.", m.address),
+            "inputSchema": { "type": "object", "properties": {
+                "to": { "type": "array", "items": { "type": "string" }, "description": "Addresses, like ann@example.com or Ann <ann@example.com>. A reply goes to the sender if left out." },
+                "cc": { "type": "array", "items": { "type": "string" } },
+                "subject": { "type": "string", "description": "A reply keeps the original's (with Re:) if left out." },
+                "body": { "type": "string" },
+                "reply_to": { "type": "integer", "description": "The id of the message this answers." },
+                "folder": folder,
+            }, "required": ["body"] } }),
     ]
 }
 
@@ -366,8 +375,141 @@ pub async fn call(app: &Arc<App>, grant: &Grant, name: &str, args: &Value) -> Re
         "mail_search" => search(&m, args).await,
         "mail_read" => read(&m, args).await,
         "mail_folders" => folders(&m).await,
+        "mail_send" => propose(app, &m, grant, args).await,
         other => Err(format!("unknown mail tool {other}")),
     }
+}
+
+fn addresses(value: &Value) -> Vec<String> {
+    match value {
+        Value::String(s) => s.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+        Value::Array(list) => list.iter().filter_map(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn check(list: &[String]) -> Result<(), String> {
+    for one in list {
+        one.parse::<lettre::message::Mailbox>().map_err(|_| format!("“{one}” isn't an email address"))?;
+    }
+    Ok(())
+}
+
+/// What a reply needs from the message it answers: its sender, subject and ids.
+async fn original(m: &Mailbox, folder: &str, uid: u64) -> Result<(String, String, String, String), String> {
+    let mut session = open(m).await?;
+    session.examine(folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
+    let fetched: Vec<_> = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[HEADER])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
+    let _ = session.logout().await;
+    let header = fetched.iter().find_map(|f| f.header()).ok_or_else(|| format!("there's no message {uid} in {folder}"))?;
+    let parsed = mail_parser::MessageParser::default().parse(header).ok_or("the message to reply to couldn't be read")?;
+    let sender = parsed
+        .reply_to()
+        .or(parsed.from())
+        .and_then(|a| a.first())
+        .and_then(|a| a.address().map(|address| match a.name() {
+            Some(name) => format!("{name} <{address}>"),
+            None => address.to_string(),
+        }))
+        .unwrap_or_default();
+    let id = parsed.message_id().map(|i| format!("<{i}>")).unwrap_or_default();
+    let mut references: Vec<String> = parsed.references().as_text_list().map(|l| l.iter().map(|r| format!("<{r}>")).collect()).unwrap_or_default();
+    if !id.is_empty() {
+        references.push(id.clone());
+    }
+    Ok((sender, parsed.subject().unwrap_or_default().to_string(), id, references.join(" ")))
+}
+
+/// `mail_send`: a card in the bot's chat with exactly what would go, sent only when approved.
+async fn propose(app: &Arc<App>, m: &Mailbox, grant: &Grant, args: &Value) -> Result<String, String> {
+    let body = args["body"].as_str().map(str::trim).filter(|b| !b.is_empty()).ok_or("the email needs a body")?.to_string();
+    let mut to = addresses(&args["to"]);
+    let cc = addresses(&args["cc"]);
+    let mut subject = args["subject"].as_str().map(str::trim).unwrap_or_default().to_string();
+    let (mut in_reply_to, mut references) = (String::new(), String::new());
+    if let Some(uid) = args["reply_to"].as_u64().or_else(|| args["reply_to"].as_str().and_then(|s| s.trim().parse().ok())) {
+        let (sender, their_subject, id, refs) = original(m, &folder_of(args), uid).await?;
+        if to.is_empty() && !sender.is_empty() {
+            to.push(sender);
+        }
+        if subject.is_empty() {
+            subject = if their_subject.to_lowercase().starts_with("re:") { their_subject } else { format!("Re: {their_subject}") };
+        }
+        (in_reply_to, references) = (id, refs);
+    }
+    if to.is_empty() {
+        return Err("who is it to?".into());
+    }
+    check(&to)?;
+    check(&cc)?;
+    let bot = app.with_store(|store| store.bot_by_id(&grant.bot_id)).flatten().ok_or("the bot is gone")?;
+    let mut lines = vec![format!("From: {}", m.address), format!("To: {}", to.join(", "))];
+    if !cc.is_empty() {
+        lines.push(format!("Cc: {}", cc.join(", ")));
+    }
+    if !in_reply_to.is_empty() {
+        lines.push("A reply, in the same conversation".to_string());
+    }
+    lines.push(body.clone());
+    let detail = json!({
+        "kind": "team-change",
+        "heading": format!("{} wants to send an email", bot.name),
+        "askedBy": bot.name,
+        "title": format!("Send “{}”", if subject.is_empty() { "(no subject)" } else { subject.as_str() }),
+        "lines": lines,
+        "action": "send_mail",
+        "doneText": "Sent.",
+        "target": bot.id,
+        "body": { "to": to, "cc": cc, "subject": subject, "text": body, "inReplyTo": in_reply_to, "references": references },
+        "state": "asking",
+    });
+    super::turns::save_and_send(app, &grant.thread, crate::store::Role::Step, &format!("Email: {subject}"), Some(&detail));
+    Ok("It's waiting for the person's approval in the chat; they see exactly what you wrote. You'll hear whether it was sent with their next message. Don't send it again.".into())
+}
+
+/// An approved email: sent from the mailbox through its SMTP server.
+pub async fn send(app: &App, body: &Value) -> Result<(), String> {
+    use lettre::AsyncTransport;
+    let m = mailbox(app).ok_or("no mailbox is connected any more")?;
+    let from: lettre::message::Mailbox = m.address.parse().map_err(|_| format!("{} isn't an email address", m.address))?;
+    let mut message = lettre::Message::builder().from(from).subject(body["subject"].as_str().unwrap_or_default());
+    for to in addresses(&body["to"]) {
+        message = message.to(to.parse().map_err(|_| format!("“{to}” isn't an email address"))?);
+    }
+    for cc in addresses(&body["cc"]) {
+        message = message.cc(cc.parse().map_err(|_| format!("“{cc}” isn't an email address"))?);
+    }
+    if let Some(id) = body["inReplyTo"].as_str().filter(|i| !i.is_empty()) {
+        message = message.in_reply_to(id.to_string());
+    }
+    if let Some(refs) = body["references"].as_str().filter(|r| !r.is_empty()) {
+        message = message.references(refs.to_string());
+    }
+    let email = message.body(body["text"].as_str().unwrap_or_default().to_string()).map_err(|e| e.to_string())?;
+    let host = m.smtp_host.trim();
+    if host.is_empty() {
+        return Err("the mailbox has no outgoing (SMTP) server set: add it in Settings › Email".into());
+    }
+    type Smtp = lettre::AsyncSmtpTransport<lettre::Tokio1Executor>;
+    let builder = match m.smtp_security {
+        Security::Tls => Smtp::relay(host).map_err(|e| e.to_string())?,
+        Security::Starttls => Smtp::starttls_relay(host).map_err(|e| e.to_string())?,
+        Security::Plain if is_loopback(host) => Smtp::builder_dangerous(host),
+        Security::Plain => return Err("Catbot only sends without TLS on this computer itself".into()),
+    };
+    let transport = builder
+        .port(m.smtp_port)
+        .credentials(lettre::transport::smtp::authentication::Credentials::new(m.login().to_string(), m.password.clone()))
+        .timeout(Some(CONNECT_TIME))
+        .build();
+    transport.send(email).await.map(|_| ()).map_err(|e| {
+        let said = e.to_string();
+        if said.contains("535") || said.to_lowercase().contains("authentication") {
+            "the outgoing server didn't accept the address and password".into()
+        } else {
+            format!("the outgoing server said: {said}")
+        }
+    })
 }
 
 /// The mailbox as the app sees it: never the password.
