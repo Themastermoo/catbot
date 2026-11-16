@@ -21,7 +21,9 @@ pub struct Bot {
     pub mark: String,
     /// Its instructions.
     pub soul: String,
-    /// The model it asks for; empty for Claude Code's default.
+    /// Which AI runs it: "claude", or a chat API such as "openai" (the server's `engines.rs`).
+    pub engine: String,
+    /// The model it asks for; empty for its engine's default.
     pub model: String,
     /// What it may do without asking: "ask", "edits", "auto" or "full".
     pub approval_mode: String,
@@ -113,6 +115,7 @@ impl Bot {
             color: wire["color"].as_str().unwrap_or("blue").to_string(),
             mark: wire["mark"].as_str().unwrap_or("cat-head").to_string(),
             soul: wire["soul"].as_str().unwrap_or_default().to_string(),
+            engine: wire["modelSelection"]["instanceId"].as_str().filter(|e| !e.is_empty()).unwrap_or("claude").to_string(),
             model: wire["modelSelection"]["model"].as_str().unwrap_or_default().to_string(),
             approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
             codex: wire["codex"].as_bool().unwrap_or(true),

@@ -37,9 +37,6 @@ const LEVELS: [(&str, &str, &str); 4] = [
     ("full", "Full access", "Full computer access (elevated risk)"),
 ];
 
-/// The models offered by name; Claude Code takes these aliases. A bot set to another model keeps it.
-const MODELS: [(&str, &str); 4] = [("", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")];
-
 const CARD: &str = "rounded-xl bg-card p-4";
 const LABEL: &str = "block text-[12px] font-medium text-ink-secondary";
 const FIELD: &str = "mt-1 w-full rounded-lg bg-inset px-3 py-2 text-[14px] text-ink focus:outline-none focus:ring-1 focus:ring-accent";
@@ -96,7 +93,6 @@ pub fn SettingsPanel(bot: Bot) -> Element {
     };
 
     let close = move |_| ui.settings_open.set(false);
-    let known_model = MODELS.iter().any(|(m, _)| *m == bot.model);
     let full = bot.approval_mode == "full";
     rsx! {
         aside {
@@ -194,22 +190,9 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                         }
                         p { class: "mt-1.5 text-[12px] text-ink-tertiary", "Saved when you click away. Used from its next message." }
                     }
-                    // Model and approval level.
+                    // Which AI, its model, and approval level.
                     div { class: CARD,
-                        label { class: LABEL, "Model"
-                            select {
-                                class: FIELD,
-                                disabled: saving(),
-                                value: "{bot.model}",
-                                onchange: move |e| change(json!({ "modelSelection": { "instanceId": "claude", "model": e.value() } })),
-                                for (model, label) in MODELS {
-                                    option { key: "{model}", value: "{model}", selected: bot.model == model, "{label}" }
-                                }
-                                if !known_model {
-                                    option { value: "{bot.model}", selected: true, "{bot.model}" }
-                                }
-                            }
-                        }
+                        crate::engines::EnginePicker { bot: bot.clone(), saving: saving(), change }
                         div { class: "mt-4 {LABEL}", "Approval level" }
                         div { role: "radiogroup", "aria-label": "Approval level", class: "mt-1 flex flex-col gap-1",
                             for (level, label, desc) in LEVELS {

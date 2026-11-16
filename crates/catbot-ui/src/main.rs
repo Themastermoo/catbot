@@ -8,6 +8,7 @@ mod bots;
 mod chat;
 mod chats;
 mod devices;
+mod engines;
 mod link;
 #[cfg(not(target_arch = "wasm32"))]
 mod local;
