@@ -11,6 +11,7 @@ mod bots;
 mod chat;
 mod chats;
 mod devices;
+mod drafts;
 mod engines;
 mod link;
 #[cfg(not(target_arch = "wasm32"))]
@@ -130,6 +131,7 @@ fn Root() -> Element {
 #[component]
 fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let mut state = use_context_provider(|| Signal::new(live::State::default()));
+    use_context_provider(|| Signal::new(drafts::load()));
     let mut selected = use_signal(|| None::<String>);
     let settings_open = use_signal(|| false);
     // On a phone, the bot list and a chat take turns filling the screen.

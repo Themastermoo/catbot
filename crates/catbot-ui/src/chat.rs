@@ -388,11 +388,32 @@ fn Working() -> Element {
 #[component]
 fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandler<()>) -> Element {
     let mut state = use_context::<Signal<State>>();
-    let mut text = use_signal(String::new);
+    // This chat's draft, if one was left here (`drafts.rs`).
+    let drafts = use_context::<Signal<crate::drafts::Drafts>>();
+    let draft = use_hook(|| drafts.peek().get(&bot.thread_id).cloned().unwrap_or_default());
+    let mut text = use_signal(|| draft.text.clone());
     let mut queued = use_signal(|| None::<(String, Vec<Attached>)>);
     let mut problem = use_signal(|| None::<String>);
     // Files picked for the next message, uploading or ready.
-    let mut tray = use_signal(Vec::<Tray>::new);
+    let mut tray = use_signal(|| {
+        draft.files.iter().map(|f| Tray { key: live::send_id(), name: f.name.clone(), state: TrayState::Ready(f.clone()) }).collect::<Vec<_>>()
+    });
+    // The box keeps its own text, so a draft is put back into it once it's there.
+    let restored = draft.text.clone();
+    use_effect(move || {
+        if !restored.is_empty() {
+            set_box(&restored);
+        }
+    });
+    // Whatever's typed or attached is the chat's draft until it's sent.
+    let draft_thread = bot.thread_id.clone();
+    use_effect(move || {
+        let files = tray.read().iter().filter_map(|t| match &t.state {
+            TrayState::Ready(file) => Some(file.clone()),
+            _ => None,
+        }).collect();
+        crate::drafts::keep(drafts, &draft_thread, crate::drafts::Draft { text: text(), files });
+    });
     let waiting_on_you = bot.activity == Activity::WaitingOnYou;
 
     let add_bot = bot.id.clone();

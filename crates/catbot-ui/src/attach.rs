@@ -10,7 +10,7 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 /// A file on a message.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Attached {
     pub id: String,
     pub name: String,

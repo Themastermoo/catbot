@@ -114,6 +114,7 @@ fn ChatRow(bot_id: String, chat: Chat, current: bool) -> Element {
         "text-ink-secondary hover:text-ink"
     };
     let faded = if chat.archived && !current { "text-ink-tertiary" } else { "" };
+    let has_draft = use_context::<Signal<crate::drafts::Drafts>>().read().get(&chat.id).is_some();
 
     let (open_bot, open_thread) = (bot_id.clone(), chat.id.clone());
     let path = format!("/api/bots/{bot_id}/tasks/{}", chat.id);
@@ -202,6 +203,9 @@ fn ChatRow(bot_id: String, chat: Chat, current: bool) -> Element {
                         class: "flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pl-6 pr-1 text-left text-[13px] font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/60 {title_look}",
                         onclick: move |_| open(state, ui, &open_bot, &open_thread),
                         span { dir: "auto", class: "min-w-0 flex-1 truncate {faded}", "{chat.title}" }
+                        if has_draft && !current {
+                            span { "data-chat-draft": true, class: "shrink-0 text-[11px] font-semibold text-danger", "Draft" }
+                        }
                     }
                     span { class: "flex shrink-0 items-center gap-2 px-1",
                         span { class: "shrink-0 text-[10px] tabular-nums text-ink-secondary", "{when}" }

@@ -196,6 +196,12 @@ fn BotRow(
     let row_left = if has_list { "pl-6" } else { "pl-2.5" };
     let preview_color = if waiting { "font-semibold text-warning" } else { "text-ink-secondary" };
     let time = bot.last.as_ref().filter(|_| selected && !expanded).map(|last| clock(last.at));
+    // A draft left in the bot's open chat shows instead, unless the bot is busy or asking.
+    let draft = use_context::<Signal<crate::drafts::Drafts>>()
+        .read()
+        .get(&bot.thread_id)
+        .filter(|_| !selected && bot.activity == Activity::Idle)
+        .map(|d| d.line());
     let preview = bot.preview();
     let fold_label = if expanded { format!("Hide {} chats", bot.name) } else { format!("Show {} chats", bot.name) };
     rsx! {
@@ -243,7 +249,14 @@ fn BotRow(
                     if !expanded {
                         div { class: "flex items-center justify-between gap-2",
                             span { class: "flex min-w-0 items-center gap-1.5 truncate text-[13px] leading-[18px] {preview_color}",
-                                span { dir: "auto", class: "truncate", "{preview}" }
+                                if let Some(draft) = draft {
+                                    span { dir: "auto", class: "truncate", "data-sidebar-draft": true,
+                                        span { class: "font-semibold text-danger", "Draft: " }
+                                        span { class: "text-ink-secondary", "{draft}" }
+                                    }
+                                } else {
+                                    span { dir: "auto", class: "truncate", "{preview}" }
+                                }
                             }
                             if bot.unread {
                                 span { class: "size-2 shrink-0 rounded-full bg-accent", "aria-label": "Unread" }
