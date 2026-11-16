@@ -6,7 +6,7 @@ use dioxus::prelude::*;
 use serde_json::Value;
 
 use crate::api;
-use crate::chat::{clock, day, js_now, parse_time, weekday};
+use crate::chat::{clock, day, js_now, month_day, parse_time, weekday};
 
 #[component]
 pub fn UsageDialog(on_close: EventHandler<()>) -> Element {
@@ -15,10 +15,17 @@ pub fn UsageDialog(on_close: EventHandler<()>) -> Element {
     let mut by = use_signal(|| "bot".to_string());
     let mut table = use_signal(|| None::<Result<Value, String>>);
     let mut refreshed = use_signal(|| 0u32);
+    let mut limits = use_signal(|| None::<Result<Value, String>>);
+    let state = use_context::<Signal<crate::live::State>>();
 
     use_effect(move || {
         let _ = refreshed();
         spawn(async move { plans.set(Some(api::get("/api/usage/plans").await)) });
+    });
+    use_effect(move || {
+        let _ = refreshed();
+        let _ = state.read().limits_changed;
+        spawn(async move { limits.set(Some(api::get("/api/limits").await)) });
     });
     use_effect(move || {
         let (p, b) = (period(), by());
@@ -63,6 +70,10 @@ pub fn UsageDialog(on_close: EventHandler<()>) -> Element {
                                 }
                             }
                         }
+                    }
+                    // Catbot's own limits, and the spend.
+                    if let Some(Ok(found)) = limits() {
+                        Limits { found }
                     }
                     // The breakdown.
                     section { class: "mt-6 border-t-[0.5px] border-edge pt-4", "data-usage-breakdown": true,
@@ -203,7 +214,7 @@ pub fn Bar(
             div { class: "h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-control",
                 div { class: "h-full rounded-full {tone}", style: "width: {width}%" }
             }
-            span { class: "w-[86px] shrink-0 text-right text-[13px] tabular-nums {full}", "{used_words}" }
+            span { class: "w-[132px] shrink-0 text-right text-[13px] tabular-nums {full}", "{used_words}" }
         }
     }
 }
@@ -214,10 +225,10 @@ pub fn reset_words(at: &str) -> String {
     if when.is_nan() {
         return String::new();
     }
-    if day(when) == day(js_now()) {
-        format!("Resets at {}", clock(when))
-    } else {
-        format!("Resets {} {}", weekday(when), clock(when))
+    match day(when) - day(js_now()) {
+        0 => format!("Resets at {}", clock(when)),
+        1..=6 => format!("Resets {} {}", weekday(when), clock(when)),
+        _ => format!("Resets {}", month_day(when)),
     }
 }
 
@@ -280,8 +291,158 @@ fn Breakdown(found: Value) -> Element {
             }
         }
         p { class: "mt-3 text-[12px] text-ink-tertiary",
-            "New tokens leave out {tokens_words(cached, false)} the AIs re-read from their caches. Cost counts only AIs paid by use whose cost is known; plans and local AIs show “—”."
+            if cached > 0 { "New tokens leave out {tokens_words(cached, false)} the AIs re-read from their caches. " }
+            "Cost counts only AIs paid by use whose cost is known; plans and local AIs show “—”."
             if estimated { " Figures with ~ are Catbot's estimate: that AI doesn't report its usage." }
+        }
+    }
+}
+
+/// Catbot's limits: the spend this month, then each AI's session and week. Edited in place.
+#[component]
+fn Limits(found: Value) -> Element {
+    let mut editing = use_signal(|| false);
+    let spend = found["spend"].clone();
+    let engines = found["engines"].as_array().cloned().unwrap_or_default();
+    let used = spend["usedUsd"].as_f64().unwrap_or(0.0);
+    let cap = spend["capUsd"].as_f64();
+    rsx! {
+        section { class: "mb-2 flex flex-col", "data-catbot-limits": true,
+            div { class: "flex items-center",
+                p { class: "min-w-0 flex-1 text-[12px] font-semibold uppercase tracking-wide text-ink-tertiary", "Catbot's limits" }
+                button {
+                    r#type: "button",
+                    "data-edit-limits": true,
+                    class: "rounded-lg px-2 py-1 text-[13px] text-accent hover:bg-raised",
+                    onclick: move |_| editing.toggle(),
+                    if editing() { "Close" } else { "Change limits" }
+                }
+            }
+            if editing() {
+                LimitsEditor { found: found.clone(), on_done: move |_| editing.set(false) }
+            }
+            match cap {
+                Some(cap) => rsx! {
+                    Bar {
+                        label: "Spend this month".to_string(),
+                        used: if cap > 0.0 { used / cap * 100.0 } else { 100.0 },
+                        resets: spend["resetsAt"].as_str().map(str::to_string),
+                        tone: "bg-success",
+                        amount: format!("{} of {}", money(&serde_json::json!(used)), money(&serde_json::json!(cap))),
+                    }
+                },
+                None => rsx! {
+                    p { class: "py-2 text-[13px] text-ink-secondary", "data-spend-line": true,
+                        "{money(&serde_json::json!(used))} spent this month on AIs paid by use. No spend limit is set."
+                    }
+                },
+            }
+            for engine in engines {
+                {
+                    let name = engine["name"].as_str().unwrap_or_default().to_string();
+                    let windows = [("Current session", engine["session"].clone(), "bg-[#f4b11a]"), ("This week", engine["week"].clone(), "bg-[#2f7ae5]")];
+                    rsx! {
+                        p { key: "{name}", class: "mt-3 text-[13px] font-semibold text-ink", "{name}" }
+                        for (label, window, tone) in windows {
+                            if let Some(limit) = window["limit"].as_u64() {
+                                Bar {
+                                    key: "{name}-{label}",
+                                    label: label.to_string(),
+                                    used: window["usedPercent"].as_f64().unwrap_or(0.0),
+                                    resets: window["resetsAt"].as_str().map(str::to_string),
+                                    tone,
+                                    amount: format!("{} of {}", tokens_words(window["used"].as_u64().unwrap_or(0), false), tokens_words(limit, false)),
+                                }
+                            } else {
+                                p { key: "{name}-{label}", class: "py-1 text-[13px] text-ink-secondary", "{label}: {tokens_words(window[\"used\"].as_u64().unwrap_or(0), false)} tokens, no limit" }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Changing the limits: the month's spend overall and per bot, and each AI's token limits and price.
+#[component]
+fn LimitsEditor(found: Value, on_done: EventHandler<()>) -> Element {
+    let limits = found["limits"].clone();
+    let number = |v: &Value| v.as_f64().map(|n| if n.fract() == 0.0 { format!("{n:.0}") } else { n.to_string() }).unwrap_or_default();
+    let mut monthly = use_signal(|| number(&limits["monthlyUsd"]));
+    let bots: Vec<(String, String)> = found["spend"]["perBot"].as_array().into_iter().flatten()
+        .map(|b| (b["botId"].as_str().unwrap_or_default().to_string(), b["name"].as_str().unwrap_or_default().to_string())).collect();
+    let mut per_bot = use_signal(|| bots.iter().map(|(id, _)| (id.clone(), number(&limits["perBotUsd"][id]))).collect::<Vec<_>>());
+    let engines: Vec<Value> = found["engines"].as_array().cloned().unwrap_or_default();
+    let mut rows = use_signal(|| {
+        engines.iter().map(|e| {
+            let id = e["engine"].as_str().unwrap_or_default().to_string();
+            let tokens = |w: &Value| w["limit"].as_u64().map(|n| n.to_string()).unwrap_or_default();
+            [id, tokens(&e["session"]), tokens(&e["week"]), number(&e["priceIn"]), number(&e["priceOut"])]
+        }).collect::<Vec<_>>()
+    });
+    let mut problem = use_signal(|| None::<String>);
+    let save = move |_| {
+        let parse = |s: &str| s.trim().parse::<f64>().ok();
+        let mut body = serde_json::json!({ "monthlyUsd": parse(&monthly.peek()), "perBotUsd": {}, "engines": {} });
+        for (id, cap) in per_bot.peek().iter() {
+            if let Some(cap) = parse(cap) {
+                body["perBotUsd"][id] = serde_json::json!(cap);
+            }
+        }
+        for [id, session, week, price_in, price_out] in rows.peek().iter() {
+            body["engines"][id] = serde_json::json!({
+                "session": session.trim().replace(',', "").parse::<u64>().ok(),
+                "week": week.trim().replace(',', "").parse::<u64>().ok(),
+                "priceIn": parse(price_in),
+                "priceOut": parse(price_out),
+            });
+        }
+        spawn(async move {
+            match api::call("PUT", "/api/limits", Some(&body)).await {
+                Ok(_) => on_done.call(()),
+                Err(err) => problem.set(Some(err)),
+            }
+        });
+    };
+    let field = "h-8 w-full rounded-lg bg-raised px-2 text-[13px] text-ink outline-none";
+    rsx! {
+        div { class: "my-3 flex flex-col gap-3 rounded-xl border border-hairline/40 p-3 text-[13px]", "data-limits-editor": true,
+            label { class: "flex items-center gap-3",
+                span { class: "min-w-0 flex-1 text-ink", "Spend limit for the month, all bots ($)" }
+                input { class: "{field} max-w-[120px]", "data-limit-monthly": true, placeholder: "none", value: "{monthly}", oninput: move |e| monthly.set(e.value()) }
+            }
+            for (i, (_, name)) in bots.iter().enumerate() {
+                label { key: "{name}", class: "flex items-center gap-3",
+                    span { class: "min-w-0 flex-1 text-ink-secondary", "{name}'s spend limit ($)" }
+                    input { class: "{field} max-w-[120px]", placeholder: "none", value: "{per_bot.read()[i].1}", oninput: move |e| per_bot.write()[i].1 = e.value() }
+                }
+            }
+            if !engines.is_empty() {
+                p { class: "text-ink-tertiary", "Token limits count new tokens (leaving out cache re-reads). Leave a box empty for no limit. A price per million tokens lets the spend limit count an AI that doesn't report its cost; cache re-reads count at a tenth of the input price." }
+            }
+            for (i, engine) in engines.iter().enumerate() {
+                div { key: "{engine[\"engine\"].as_str().unwrap_or_default()}", class: "grid grid-cols-2 gap-2 border-t-[0.5px] border-edge pt-2 md:grid-cols-4", "data-limit-engine": "{engine[\"engine\"].as_str().unwrap_or_default()}",
+                    p { class: "col-span-full font-semibold text-ink", "{engine[\"name\"].as_str().unwrap_or_default()}" }
+                    label { class: "flex flex-col gap-1", span { class: "text-ink-tertiary", "Session (5 h) tokens" }
+                        input { class: field, "data-limit-session": true, placeholder: "no limit", value: "{rows.read()[i][1]}", oninput: move |e| rows.write()[i][1] = e.value() } }
+                    label { class: "flex flex-col gap-1", span { class: "text-ink-tertiary", "Week tokens" }
+                        input { class: field, placeholder: "no limit", value: "{rows.read()[i][2]}", oninput: move |e| rows.write()[i][2] = e.value() } }
+                    if engine["billing"] == "key" {
+                        label { class: "flex flex-col gap-1", span { class: "text-ink-tertiary", "$ per 1M in" }
+                            input { class: field, placeholder: "unknown", value: "{rows.read()[i][3]}", oninput: move |e| rows.write()[i][3] = e.value() } }
+                        label { class: "flex flex-col gap-1", span { class: "text-ink-tertiary", "$ per 1M out" }
+                            input { class: field, placeholder: "unknown", value: "{rows.read()[i][4]}", oninput: move |e| rows.write()[i][4] = e.value() } }
+                    }
+                }
+            }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "text-danger", "{err}" }
+            }
+            div { class: "flex justify-end gap-2",
+                button { r#type: "button", class: "rounded-lg px-3 py-1.5 text-ink-secondary hover:bg-raised", onclick: move |_| on_done.call(()), "Cancel" }
+                button { r#type: "button", "data-save-limits": true, class: "rounded-lg bg-accent px-3 py-1.5 font-semibold text-white", onclick: save, "Save limits" }
+            }
         }
     }
 }

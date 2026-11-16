@@ -1171,6 +1171,17 @@ pub fn short_when(at: f64) -> String {
     }
 }
 
+/// "Dec 1".
+pub fn month_day(at: f64) -> String {
+    #[cfg(target_arch = "wasm32")]
+    return date_string(at, &[("month", "short"), ("day", "numeric")], false);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use chrono::{Local, TimeZone};
+        Local.timestamp_millis_opt(at as i64).single().map(|t| t.format("%b %-d").to_string()).unwrap_or_default()
+    }
+}
+
 /// "Tuesday".
 pub fn weekday(at: f64) -> String {
     #[cfg(target_arch = "wasm32")]

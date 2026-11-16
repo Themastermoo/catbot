@@ -8,6 +8,7 @@
 
 pub mod attachments;
 pub mod changes;
+pub mod limits;
 pub mod reactions;
 pub mod usage;
 pub mod devices;
@@ -270,6 +271,17 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "memory", rest @ ..] if method == Method::GET => respond(memory::route(&app, rest, &req)),
         ["api", "attachments", id] if method == Method::GET => attachments::serve(&app, id).await,
         ["api", "usage", rest @ ..] if method == Method::GET => usage_route(&app, rest, usage_query(&req)).await,
+        ["api", "limits"] if method == Method::GET || method == Method::PUT => {
+            let body = if method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(limits::route(&app, &method, body, true).await)
+        }
         ["api", "engines", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
@@ -565,6 +577,10 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
         .map_err(fail)?;
     if app.turns.busy(&conversation.id) {
         return Err((StatusCode::CONFLICT, "this bot is still working on the last message".into()));
+    }
+    if let Some((why, until)) = limits::blocked(app, &bot, &bot.engine) {
+        let until = until.map(|t| format!(" until {}", t.with_timezone(&chrono::Local).format("%a %-I:%M %p"))).unwrap_or_default();
+        return Err((StatusCode::TOO_MANY_REQUESTS, format!("{why}{until}. Change the limits in Usage, or pick another AI for {}.", bot.name)));
     }
     let mut detail = json!({});
     if let Some(id) = body["sendId"].as_str() {

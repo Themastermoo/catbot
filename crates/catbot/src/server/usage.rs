@@ -37,6 +37,11 @@ pub fn record(app: &App, bot: &Bot, thread: &str, engine: &str, model: &str, tok
         // Claude on a plan reports what the turn would have cost on the API: not money spent.
         cost_usd: cost.filter(|_| billing(engine) == "key"),
     };
+    // An API that doesn't say what a turn cost: the price Moo entered for it, if any.
+    let mut row = row;
+    if row.cost_usd.is_none() && row.billing == "key" {
+        row.cost_usd = super::limits::priced(&super::limits::load(app), engine, &row);
+    }
     let _ = app.with_store(|store| store.add_usage(&row));
 }
 

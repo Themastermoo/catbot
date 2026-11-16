@@ -50,6 +50,8 @@ pub struct State {
     /// so the devices dialog knows to look again.
     /// Counts `engines` frames: an AI's key was saved or forgotten (the bot settings fetch again).
     pub engines_changed: u64,
+    /// Bumped when the limits change (a `limits` frame).
+    pub limits_changed: u64,
     pub devices_changed: u64,
 }
 
@@ -109,6 +111,7 @@ impl State {
             }
             Some("devices") => self.devices_changed += 1,
             Some("engines") => self.engines_changed += 1,
+            Some("limits") => self.limits_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();
                 self.bots.retain(|b| b.id != id);

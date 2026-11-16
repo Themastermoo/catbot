@@ -987,3 +987,54 @@ async fn usage_is_recorded_broken_down_and_the_plan_read() {
     assert_eq!(claude["windows"][0]["usedPercent"], 78.0);
     assert!(!plans.to_string().contains("oat-test"), "the sign-in never goes out");
 }
+
+#[tokio::test]
+async fn limits_stop_an_ai_and_say_until_when() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let api = listen(fake_api(seen.clone())).await;
+    s.call("PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-test", "url": format!("http://{api}/v1") }))).await;
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "openai", "model": "gpt-test" } }))).await;
+
+    // Catbot's starting limits for an AI without a plan's own.
+    let (_, status) = s.call("GET", "/api/limits", None).await;
+    let openai = status["engines"].as_array().unwrap().iter().find(|e| e["engine"] == "openai").unwrap().clone();
+    assert_eq!(openai["session"]["limit"], 1_000_000);
+    assert!(openai["session"]["resetsAt"].is_null(), "no session yet");
+    assert!(!status["engines"].as_array().unwrap().iter().any(|e| e["engine"] == "claude"), "Claude's plan has its own");
+
+    // A small session limit and a price: one turn goes over both.
+    let limits = json!({ "monthlyUsd": 0.0005, "engines": { "openai": { "session": 100, "week": 1000000, "priceIn": 2.0, "priceOut": 8.0 } } });
+    assert_eq!(s.call("PUT", "/api/limits", Some(limits)).await.0, 200);
+    assert_eq!(s.away(None, "PUT", "/api/limits", Some(json!({}))).await.0, 401);
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Write it down", "threadId": thread }))).await;
+    let ask = until(&mut events, "ask", |f| runtime(f, "request.opened")).await;
+    let request = ask["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    let (_, status) = s.call("GET", "/api/limits", None).await;
+    let openai = status["engines"].as_array().unwrap().iter().find(|e| e["engine"] == "openai").unwrap().clone();
+    assert_eq!(openai["session"]["used"], 260);
+    assert_eq!(openai["session"]["usedPercent"], 100.0);
+    assert!(openai["session"]["resetsAt"].is_string());
+    // 2 × 200 in + 8 × 60 out, plus 40 cache re-reads at a tenth: per million.
+    let spent = status["spend"]["usedUsd"].as_f64().unwrap();
+    assert!(spent > 0.0, "{status}");
+
+    let (status, refused) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Again", "threadId": thread }))).await;
+    assert_eq!(status, 429, "{refused}");
+    assert!(refused["error"].as_str().unwrap().contains("spend limit"), "{refused}");
+    s.call("PUT", "/api/limits", Some(json!({ "engines": { "openai": { "session": 100, "week": 1000000 } } }))).await;
+    let (status, refused) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Again", "threadId": thread }))).await;
+    assert_eq!(status, 429);
+    assert!(refused["error"].as_str().unwrap().contains("OpenAI is at Catbot's session limit until"), "{refused}");
+    // No limit, no stop.
+    s.call("PUT", "/api/limits", Some(json!({ "engines": { "openai": { "session": null, "week": null } } }))).await;
+    assert_eq!(s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Again", "threadId": thread }))).await.0, 202);
+}
