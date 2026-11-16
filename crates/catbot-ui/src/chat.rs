@@ -7,9 +7,11 @@
 //! a finished turn under "Worked for" is not copied yet.
 
 use dioxus::prelude::*;
+use dioxus::html::HasFileData;
 use serde_json::Value;
 
 use crate::api;
+use crate::attach::Attached;
 use crate::bots::{Activity, Bot};
 use crate::live::{self, Live, State};
 use crate::markdown;
@@ -32,6 +34,8 @@ pub struct Msg {
     /// while it was on its way.
     pub send_id: Option<String>,
     pub body: Body,
+    /// Files it came with.
+    pub attachments: Vec<Attached>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -96,7 +100,8 @@ impl Msg {
             _ => return None,
         };
         let send_id = wire["sendId"].as_str().map(str::to_string);
-        Some(Msg { id, at, send_id, body })
+        let attachments = Attached::list(&wire["attachments"]);
+        Some(Msg { id, at, send_id, body, attachments })
     }
 
     fn is_step(&self) -> bool {
@@ -352,7 +357,7 @@ fn LiveTurn(live: Live) -> Element {
             if live.text.is_empty() {
                 Working {}
             } else {
-                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text) } }
+                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new() } }
             }
         }
     }
@@ -381,20 +386,50 @@ fn Working() -> Element {
 fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandler<()>) -> Element {
     let mut state = use_context::<Signal<State>>();
     let mut text = use_signal(String::new);
-    let mut queued = use_signal(|| None::<String>);
+    let mut queued = use_signal(|| None::<(String, Vec<Attached>)>);
     let mut problem = use_signal(|| None::<String>);
+    // Files picked for the next message, uploading or ready.
+    let mut tray = use_signal(Vec::<Tray>::new);
     let waiting_on_you = bot.activity == Activity::WaitingOnYou;
 
+    let add_bot = bot.id.clone();
+    let add_files = use_callback(move |files: Vec<dioxus::html::FileData>| {
+        for file in files {
+            let bot_id = add_bot.clone();
+            let key = live::send_id();
+            let name = file.name();
+            tray.write().push(Tray { key: key.clone(), name: name.clone(), state: TrayState::Uploading });
+            spawn(async move {
+                let mime = file.content_type().filter(|m| !m.is_empty()).unwrap_or_else(|| "application/octet-stream".into());
+                let result = match file.read_bytes().await {
+                    Ok(bytes) => crate::attach::upload(&bot_id, &name, &mime, bytes.to_vec()).await,
+                    Err(err) => Err(format!("couldn't read {name}: {err}")),
+                };
+                if let Some(item) = tray.write().iter_mut().find(|t| t.key == key) {
+                    item.state = match result {
+                        Ok(attached) => TrayState::Ready(attached),
+                        Err(err) => TrayState::Failed(err),
+                    };
+                }
+            });
+        }
+    });
+
     let send_bot = bot.clone();
-    let send = use_callback(move |words: String| {
+    let send = use_callback(move |(words, files): (String, Vec<Attached>)| {
         let bot = send_bot.clone();
         spawn(async move {
             let id = live::send_id();
-            state.write().sending(&bot.thread_id, live::optimistic(&words, &id, js_now()));
-            let body = serde_json::json!({ "text": words, "threadId": bot.thread_id, "sendId": id });
+            state.write().sending(&bot.thread_id, live::optimistic(&words, &id, js_now(), files.clone()));
+            let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+            let body = serde_json::json!({ "text": words, "threadId": bot.thread_id, "sendId": id, "attachments": ids });
             if let Err(err) = api::post(&format!("/api/bots/{}/messages", bot.id), &body).await {
                 state.write().unsend(&bot.thread_id, &id);
                 problem.set(Some(err));
+                // Put the files back too.
+                for file in files {
+                    tray.write().push(Tray { key: live::send_id(), name: file.name.clone(), state: TrayState::Ready(file) });
+                }
                 // Give the words back, ahead of anything typed since.
                 let typed = text.peek().clone();
                 let back = if typed.trim().is_empty() { words } else { format!("{words}\n{typed}") };
@@ -406,28 +441,41 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
 
     // A message that waited goes once the bot is free.
     use_effect(use_reactive!(|working| {
-        if !working && let Some(words) = queued.take() {
-            send(words);
+        if !working && let Some(waiting) = queued.take() {
+            send(waiting);
         }
     }));
 
     let mut submit = move || {
         let words = text.peek().trim().to_string();
-        if words.is_empty() || waiting_on_you {
+        let uploading = tray.peek().iter().any(|t| t.state == TrayState::Uploading);
+        let files: Vec<Attached> = tray.peek().iter().filter_map(|t| match &t.state {
+            TrayState::Ready(file) => Some(file.clone()),
+            _ => None,
+        }).collect();
+        if (words.is_empty() && files.is_empty()) || waiting_on_you {
+            return;
+        }
+        if uploading {
+            problem.set(Some("Wait a moment: a file is still uploading.".into()));
             return;
         }
         problem.set(None);
         text.set(String::new());
+        tray.set(Vec::new());
         set_box("");
         on_send.call(());
         if working {
             let mut q = queued.write();
             *q = Some(match q.take() {
-                Some(earlier) => format!("{earlier}\n\n{words}"),
-                None => words,
+                Some((earlier, mut earlier_files)) => {
+                    earlier_files.extend(files);
+                    (format!("{earlier}\n\n{words}").trim().to_string(), earlier_files)
+                }
+                None => (words, files),
             });
         } else {
-            send(words);
+            send((words, files));
         }
     };
 
@@ -450,7 +498,12 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
     } else {
         format!("Message {}", bot.name)
     };
-    let has_text = !text.read().trim().is_empty();
+    let has_text = !text.read().trim().is_empty() || tray.read().iter().any(|t| matches!(t.state, TrayState::Ready(_)));
+    let pick = move |e: FormEvent| {
+        add_files(e.files());
+        // Picking the same file again should work too.
+        document::eval(r#"const input = document.getElementById("composer-file"); if (input) input.value = "";"#);
+    };
     let button_style = format!("--bot-button: var(--identity-{}); --bot-button-ink: #ffffff; --bot-button-hover: color-mix(in srgb, var(--identity-{}) 88%, #000000);", bot.color, bot.color);
     rsx! {
         div { class: "pointer-events-none relative shrink-0 px-5 pb-3",
@@ -464,16 +517,67 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                 if let Some(question) = pending.first() {
                     ApprovalPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len(), on_cancel_turn: move |_| stop(()) }
                 }
-                if let Some(words) = queued() {
+                if let Some((words, files)) = queued() {
                     div { class: "mb-2 flex items-center gap-2 rounded-lg border border-hairline/40 bg-panel px-3 py-2 text-[13px] text-ink-secondary",
-                        span { class: "min-w-0 flex-1 truncate", "Waiting to send: {words}" }
+                        span { class: "min-w-0 flex-1 truncate",
+                            "Waiting to send: {words}"
+                            if !files.is_empty() { " (+{files.len()} file(s))" }
+                        }
                         button { r#type: "button", class: "shrink-0 rounded px-2 py-1 font-medium hover:bg-raised", onclick: move |_| queued.set(None), "Cancel" }
                     }
                 }
                 div { class: "relative",
                     div { "aria-hidden": "true", class: "pointer-events-none absolute -left-5 -right-5 -bottom-3 top-1/2 bg-app" }
-                    div { "data-composer": true, class: "relative z-[1] rounded-2xl px-2 py-1.5 {ELEVATED_FLOAT}",
+                    div {
+                        "data-composer": true,
+                        class: "relative z-[1] rounded-2xl px-2 py-1.5 {ELEVATED_FLOAT}",
+                        ondragover: move |e| e.prevent_default(),
+                        ondrop: move |e| {
+                            e.prevent_default();
+                            add_files(e.files());
+                        },
+                        if !tray.read().is_empty() {
+                            div { class: "flex flex-wrap gap-1.5 px-1 pb-1.5 pt-1", "data-composer-tray": true,
+                                for item in tray.read().iter().cloned() {
+                                    {
+                                        let key = item.key.clone();
+                                        let (note, tone) = match &item.state {
+                                            TrayState::Uploading => ("uploading…".to_string(), "text-ink-tertiary"),
+                                            TrayState::Ready(file) => (crate::attach::size_words(file.size), "text-ink-tertiary"),
+                                            TrayState::Failed(err) => (err.clone(), "text-danger"),
+                                        };
+                                        rsx! {
+                                            span { key: "{key}", "data-tray-file": true, class: "flex max-w-[260px] items-center gap-1.5 rounded-lg bg-raised px-2 py-1 text-[12px] text-ink",
+                                                span { class: "min-w-0 truncate", "{item.name}" }
+                                                span { class: "shrink-0 truncate {tone}", "{note}" }
+                                                button {
+                                                    r#type: "button",
+                                                    "aria-label": "Remove {item.name}",
+                                                    class: "flex size-4 shrink-0 items-center justify-center rounded text-ink-secondary hover:bg-control",
+                                                    onclick: move |_| tray.write().retain(|t| t.key != key),
+                                                    "×"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         div { class: "flex items-end gap-1",
+                            input { id: "composer-file", r#type: "file", multiple: true, class: "hidden", onchange: pick }
+                            button {
+                                r#type: "button",
+                                "aria-label": "Attach files",
+                                title: "Attach files",
+                                "data-attach": true,
+                                disabled: waiting_on_you,
+                                class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink disabled:opacity-40",
+                                onclick: move |_| { document::eval(r#"document.getElementById("composer-file")?.click();"#); },
+                                // Lucide `Paperclip` (ISC).
+                                svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                    path { d: "m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551" }
+                                }
+                            }
                             textarea {
                                 id: "composer-box",
                                 rows: 1,
@@ -534,6 +638,21 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
             }
         }
     }
+}
+
+/// A file picked for the next message.
+#[derive(Clone, Debug, PartialEq)]
+struct Tray {
+    key: String,
+    name: String,
+    state: TrayState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum TrayState {
+    Uploading,
+    Ready(Attached),
+    Failed(String),
 }
 
 /// Puts text in the typing box (and fits its height to it).
@@ -634,7 +753,9 @@ fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] askin
     let full_time = full_date(message.at);
     match &message.body {
         Body::Person(text) => rsx! {
-            div { class: "group flex w-full flex-col items-end animate-msg-in",
+            div { class: "group flex w-full flex-col items-end gap-1.5 animate-msg-in",
+                crate::attach::Attachments { files: message.attachments.clone(), end: true }
+                if !text.trim().is_empty() {
                 div { class: "flex w-full items-center justify-end gap-1.5",
                     span { class: "order-first mr-2 self-end pb-1 text-[11px] tabular-nums text-ink-tertiary opacity-0 transition-opacity group-hover:opacity-100", "{when}" }
                     div {
@@ -642,6 +763,7 @@ fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] askin
                         title: "{full_time}",
                         div { class: "chat-text", "{text}" }
                     }
+                }
                 }
             }
         },
@@ -1051,7 +1173,7 @@ mod tests {
     use serde_json::json;
 
     fn step(id: &str, name: &str, at: f64) -> Msg {
-        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) } }
+        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) }, attachments: Vec::new() }
     }
 
     #[test]
@@ -1073,7 +1195,7 @@ mod tests {
 
     #[test]
     fn steps_fold_into_runs() {
-        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()) };
+        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()), attachments: Vec::new() };
         let items = group(&[step("a", "Read", 1.0), step("b", "Read", 1.0), step("c", "Bash", 2.0), reply.clone(), step("d", "Edit", 4.0)]);
         assert_eq!(items.len(), 3);
         assert!(matches!(&items[0], Item::Run(steps) if steps.len() == 3));

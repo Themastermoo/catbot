@@ -47,6 +47,19 @@ pub fn default_codex() -> PathBuf {
     user_home().join("VaultCodex")
 }
 
+/// A file attached to a message: kept in its bot's folder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attachment {
+    pub id: String,
+    pub bot_id: String,
+    /// The name it came with.
+    pub name: String,
+    pub path: PathBuf,
+    pub mime: String,
+    pub size: u64,
+    pub created_at: String,
+}
+
 /// A chat API's saved key, and its address if it isn't the usual one.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineKey {
@@ -318,7 +331,60 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 6 {
+            // Version 6: files the person attaches to messages. The file lives in the bot's folder
+            // (`attachments/`); this keeps what it is and who it belongs to.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE attachments (
+                     id         TEXT PRIMARY KEY,
+                     bot_id     TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                     name       TEXT NOT NULL,
+                     path       TEXT NOT NULL,
+                     mime       TEXT NOT NULL,
+                     size       INTEGER NOT NULL,
+                     created_at TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 6;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { conn, home: home.to_path_buf() })
+    }
+
+    /// Keeps a file attached to a bot's message (already saved at `path`).
+    pub fn add_attachment(&self, bot_id: &str, name: &str, path: &Path, mime: &str, size: u64) -> Result<Attachment, BoxError> {
+        let attachment = Attachment {
+            id: uuid::Uuid::new_v4().simple().to_string(),
+            bot_id: bot_id.to_string(),
+            name: name.to_string(),
+            path: path.to_path_buf(),
+            mime: mime.to_string(),
+            size,
+            created_at: now(),
+        };
+        self.conn.execute(
+            "INSERT INTO attachments (id, bot_id, name, path, mime, size, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![attachment.id, attachment.bot_id, attachment.name, attachment.path.to_string_lossy(), attachment.mime, attachment.size as i64, attachment.created_at],
+        )?;
+        Ok(attachment)
+    }
+
+    pub fn attachment(&self, id: &str) -> Result<Option<Attachment>, BoxError> {
+        Ok(self
+            .conn
+            .query_row("SELECT id, bot_id, name, path, mime, size, created_at FROM attachments WHERE id = ?1", [id], |r| {
+                Ok(Attachment {
+                    id: r.get(0)?,
+                    bot_id: r.get(1)?,
+                    name: r.get(2)?,
+                    path: PathBuf::from(r.get::<_, String>(3)?),
+                    mime: r.get(4)?,
+                    size: r.get::<_, i64>(5)? as u64,
+                    created_at: r.get(6)?,
+                })
+            })
+            .optional()?)
     }
 
     /// The key (and any other address) saved for a chat API.
@@ -943,7 +1009,7 @@ mod tests {
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
         assert_eq!(bot.engine, "claude", "bots from before run on Claude");
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 5);
+        assert_eq!(version, 6);
         // And keys for the chat APIs.
         assert_eq!(store.engine_key("xai").unwrap(), None);
         store.set_engine_key("xai", "xai-1", None).unwrap();

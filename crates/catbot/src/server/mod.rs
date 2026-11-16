@@ -6,6 +6,7 @@
 //! the live event stream are merged, so the interface sees one team. Over time Catbot answers
 //! more, until the reference server has nothing left to do.
 
+pub mod attachments;
 pub mod devices;
 pub mod engines;
 pub mod events;
@@ -261,6 +262,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
     match segments.as_slice() {
         ["api", "events"] if method == Method::GET => events::events(app, req, events::Door::Home).await,
         ["api", "memory", rest @ ..] if method == Method::GET => respond(memory::route(&app, rest, &req)),
+        ["api", "attachments", id] if method == Method::GET => attachments::serve(&app, id).await,
         ["api", "engines", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
@@ -453,6 +455,7 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             Ok((StatusCode::OK, json!({ "ok": true })))
         }
         (Method::POST, ["messages"]) => send_message(app, bot, json_body(req).await?),
+        (Method::POST, ["attachments"]) => attachments::upload(app, &bot, req).await,
         (Method::POST, ["tasks"]) => new_chat(app, bot, json_body(req).await?),
         (Method::POST, ["tasks", thread]) => {
             let limit = query_param(&req, "messages").and_then(|n| n.parse().ok()).unwrap_or(50usize).min(500);
@@ -526,7 +529,11 @@ fn apply_changes(bot: &mut Bot, body: &Value) -> Result<(), (StatusCode, String)
 
 /// `POST /api/bots/:id/messages`: keep the person's message, show it everywhere, start the turn.
 fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
-    let text = body["text"].as_str().map(str::trim).filter(|t| !t.is_empty()).ok_or_else(|| bad("nothing to send"))?.to_string();
+    let attached = attachments::for_message(app, &bot, &body["attachments"])?;
+    let text = body["text"].as_str().map(str::trim).unwrap_or("").to_string();
+    if text.is_empty() && attached.is_empty() {
+        return Err(bad("nothing to send"));
+    }
     let conversation = app
         .try_store(|store| {
             let wanted = body["threadId"].as_str().map(|id| store.conversation(id)).transpose()?.flatten();
@@ -539,18 +546,28 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     if app.turns.busy(&conversation.id) {
         return Err((StatusCode::CONFLICT, "this bot is still working on the last message".into()));
     }
-    let detail = body["sendId"].as_str().map(|id| json!({ "sendId": id }));
+    let mut detail = json!({});
+    if let Some(id) = body["sendId"].as_str() {
+        detail["sendId"] = json!(id);
+    }
+    let described: Vec<Value> = attached.iter().map(attachments::describe).collect();
+    if !described.is_empty() {
+        detail["attachments"] = json!(described);
+    }
+    let detail = (detail != json!({})).then_some(detail);
     let message = turns::save_and_send(app, &conversation.id, Role::Person, &text, detail.as_ref())
         .ok_or_else(|| fail("couldn't save the message"))?;
     if conversation.title.is_none() {
         // Named after the chat's first message: this one, or for a chat from before chats had
         // names, the first thing said in it.
-        let first = app.with_store(|store| store.first_words(&conversation.id)).flatten().unwrap_or_else(|| text.clone());
+        let named = if text.is_empty() { attached[0].name.clone() } else { text.clone() };
+        let first = app.with_store(|store| store.first_words(&conversation.id)).flatten().filter(|w| !w.trim().is_empty()).unwrap_or(named);
         name_chat(app, &bot, &conversation.id, &first);
     }
     let request_id = message["id"].as_str().and_then(wire::parse_message_id).unwrap_or_default();
     let thread = conversation.id.clone();
-    turns::start(app.clone(), bot, conversation, request_id, text).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+    let said = format!("{text}{}", attachments::note(&described));
+    turns::start(app.clone(), bot, conversation, request_id, said.trim().to_string()).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
     Ok((StatusCode::ACCEPTED, json!({ "ok": true, "threadId": thread, "message": message })))
 }
 

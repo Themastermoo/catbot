@@ -218,8 +218,8 @@ fn random() -> f64 {
 }
 
 /// The person's message as it's shown before the server has it.
-pub fn optimistic(text: &str, send_id: &str, now: f64) -> Msg {
-    Msg { id: format!("optimistic-{send_id}"), at: now, send_id: Some(send_id.to_string()), body: Body::Person(text.to_string()) }
+pub fn optimistic(text: &str, send_id: &str, now: f64, attachments: Vec<crate::attach::Attached>) -> Msg {
+    Msg { id: format!("optimistic-{send_id}"), at: now, send_id: Some(send_id.to_string()), body: Body::Person(text.to_string()), attachments }
 }
 
 #[cfg(test)]
@@ -243,7 +243,7 @@ mod tests {
     #[test]
     fn a_sent_message_is_replaced_by_the_saved_one() {
         let mut s = state();
-        s.sending("t1", optimistic("hello", "s-1", 1.0));
+        s.sending("t1", optimistic("hello", "s-1", 1.0, Vec::new()));
         s.apply(&message("cb-9", json!({ "role": "user", "text": "hello", "sendId": "s-1" })));
         let messages = &s.threads["t1"].messages;
         assert_eq!(messages.len(), 1);
@@ -316,7 +316,7 @@ mod tests {
     #[test]
     fn earlier_pages_go_in_front() {
         let mut s = state();
-        let m = |id: &str| Msg { id: id.into(), at: 0.0, send_id: None, body: Body::Reply(id.into()) };
+        let m = |id: &str| Msg { id: id.into(), at: 0.0, send_id: None, body: Body::Reply(id.into()), attachments: Vec::new() };
         s.loaded("t1", vec![m("c"), m("d")], true, false);
         s.loaded("t1", vec![m("a"), m("b")], false, true);
         let ids: Vec<_> = s.threads["t1"].messages.iter().map(|m| m.id.as_str()).collect();

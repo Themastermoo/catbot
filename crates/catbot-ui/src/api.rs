@@ -91,6 +91,54 @@ async fn send(method: &str, path: &str, body: Option<&Value>) -> Result<(u16, St
     Ok((status, response.text().await.unwrap_or_default()))
 }
 
+/// Sends a file's bytes as an upload (its name in `X-File-Name`), and reads the answer as JSON.
+pub async fn upload(path: &str, name: &str, mime: &str, bytes: Vec<u8>) -> Result<Value, String> {
+    let name = crate::markdown::encode(name);
+    #[cfg(target_arch = "wasm32")]
+    let (status, text) = {
+        use gloo_net::http::RequestBuilder;
+        let body = js_sys::Uint8Array::from(bytes.as_slice());
+        let request = RequestBuilder::new(path)
+            .method(gloo_net::http::Method::POST)
+            .header("content-type", mime)
+            .header("x-file-name", &name)
+            .body(body)
+            .map_err(|e| e.to_string())?;
+        let response = request.send().await.map_err(|e| format!("Catbot didn't answer ({e})"))?;
+        (response.status(), response.text().await.unwrap_or_default())
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let (status, text) = {
+        let response = request(reqwest::Method::POST, path)
+            .header("content-type", mime)
+            .header("x-file-name", name)
+            .body(bytes)
+            .send()
+            .await
+            .map_err(|e| format!("Catbot didn't answer at {} ({e})", server()))?;
+        let status = response.status().as_u16();
+        check_paired(status);
+        (status, response.text().await.unwrap_or_default())
+    };
+    if !(200..300).contains(&status) {
+        let said = serde_json::from_str::<Value>(&text).ok().and_then(|v| v["error"].as_str().map(str::to_string)).unwrap_or(text);
+        return Err(if said.trim().is_empty() { format!("the upload answered {status}") } else { said });
+    }
+    serde_json::from_str(&text).map_err(|e| e.to_string())
+}
+
+/// A file's bytes (an attachment, say), with this device's key when it's paired.
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn bytes(path: &str) -> Result<Vec<u8>, String> {
+    let response = request(reqwest::Method::GET, path).send().await.map_err(|e| e.to_string())?;
+    let status = response.status().as_u16();
+    check_paired(status);
+    if !(200..300).contains(&status) {
+        return Err(format!("{path} answered {status}"));
+    }
+    response.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+}
+
 /// One client for the app's life (it keeps connections open between calls).
 #[cfg(not(target_arch = "wasm32"))]
 pub fn client() -> reqwest::Client {

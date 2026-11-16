@@ -185,6 +185,9 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
             if let Some(send_id) = detail["sendId"].as_str() {
                 fields["sendId"] = json!(send_id);
             }
+            if let Some(attached) = detail.get("attachments").filter(|a| a.is_array()) {
+                fields["attachments"] = attached.clone();
+            }
             fields
         }
         Role::Bot => {

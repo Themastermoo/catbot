@@ -33,6 +33,8 @@ pub struct ApiTurn {
     /// The conversation so far, oldest first, ending with the person's new message:
     /// (true for the person, false for the bot, text).
     pub history: Vec<(bool, String)>,
+    /// Pictures attached to the person's newest message: (type, bytes), shown to the model.
+    pub pictures: Vec<(String, Vec<u8>)>,
     pub workspace: Workspace,
 }
 
@@ -80,6 +82,17 @@ async fn converse(turn: &ApiTurn, tx: &mpsc::Sender<Event>, answers: &Answerer) 
     let mut messages = vec![json!({ "role": "system", "content": turn.system })];
     for (person, text) in &turn.history {
         messages.push(json!({ "role": if *person { "user" } else { "assistant" }, "content": text }));
+    }
+    if !turn.pictures.is_empty()
+        && let Some(last) = messages.iter_mut().rev().find(|m| m["role"] == "user")
+    {
+        use base64::Engine as _;
+        let mut parts = vec![json!({ "type": "text", "text": last["content"] })];
+        for (mime, bytes) in &turn.pictures {
+            let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+            parts.push(json!({ "type": "image_url", "image_url": { "url": format!("data:{mime};base64,{data}") } }));
+        }
+        last["content"] = json!(parts);
     }
     let mut use_tools = true;
     let mut reply = String::new();

@@ -327,12 +327,18 @@ fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::P
     let access = engines::access(engine, saved.as_ref())
         .ok_or_else(|| format!("{} needs an API key first: add it in this bot's settings.", engine.name))?;
     let model = bot.model.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| engine.default_model.to_string());
-    let history = app
-        .with_store(|store| store.messages(thread, 60))
-        .unwrap_or_default()
+    let messages = app.with_store(|store| store.messages(thread, 60)).unwrap_or_default();
+    // The newest message's pictures, shown to the model itself.
+    let pictures = messages
+        .iter()
+        .rev()
+        .find(|m| m.role == Role::Person)
+        .map(|m| super::attachments::pictures(m, &bot.folder))
+        .unwrap_or_default();
+    let history = messages
         .into_iter()
         .filter_map(|m| match m.role {
-            Role::Person => Some((true, m.body)),
+            Role::Person => Some((true, super::attachments::person_text(&m))),
             Role::Bot if !m.body.trim().is_empty() => Some((false, m.body)),
             _ => None,
         })
@@ -341,7 +347,7 @@ fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::P
     system.push_str(&api::tool_guide(&bot.folder));
     let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
     let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode };
-    Ok(api::start(api::ApiTurn { engine, access, model, system, history, workspace }))
+    Ok(api::start(api::ApiTurn { engine, access, model, system, history, pictures, workspace }))
 }
 
 /// Starts a turn on an agent program: the program found on this computer, the session to carry
@@ -356,7 +362,7 @@ fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
         .unwrap_or_default()
         .into_iter()
         .filter_map(|m| match m.role {
-            Role::Person => Some((true, m.body)),
+            Role::Person => Some((true, super::attachments::person_text(&m))),
             Role::Bot if !m.body.trim().is_empty() => Some((false, m.body)),
             _ => None,
         })

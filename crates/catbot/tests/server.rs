@@ -107,6 +107,29 @@ impl Setup {
         (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
     }
 
+    /// Uploads a file as an attachment to a bot, the way the interface does.
+    async fn upload(&self, bot: &str, name: &str, mime: &str, bytes: &[u8]) -> (u16, Value) {
+        let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
+        let req = hyper::Request::post(format!("{}/api/bots/{bot}/attachments", self.base))
+            .header("content-type", mime)
+            .header("x-file-name", name.replace(' ', "%20"))
+            .body(Full::new(Bytes::from(bytes.to_vec())))
+            .unwrap();
+        let resp = client.request(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, serde_json::from_slice(&body).unwrap_or(Value::Null))
+    }
+
+    /// A GET whose body isn't JSON: its status, type and bytes.
+    async fn raw(&self, path: &str) -> (u16, String, Vec<u8>) {
+        let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
+        let resp = client.request(hyper::Request::get(format!("{}{path}", self.base)).body(Full::new(Bytes::new())).unwrap()).await.unwrap();
+        let status = resp.status().as_u16();
+        let kind = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+        (status, kind, resp.into_body().collect().await.unwrap().to_bytes().to_vec())
+    }
+
     /// Opens the live stream; frames arrive on the returned channel.
     async fn events(&self) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
         self.stream(&self.base, None).await
@@ -709,4 +732,61 @@ async fn a_bot_on_an_agent_program_streams_asks_and_resumes() {
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
     assert_eq!(reply["message"]["text"], "Edited.");
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello from the agent");
+}
+
+#[tokio::test]
+async fn attachments_reach_the_bot_and_the_chat() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+
+    // A picture, kept in the bot's folder.
+    let picture = b"\x89PNG\r\n\x1a\nfake picture";
+    let (status, up) = s.upload(&bot, "garden plan.png", "image/png", picture).await;
+    assert_eq!(status, 201, "{up}");
+    let attachment = up["attachment"].clone();
+    assert_eq!((attachment["name"].as_str(), attachment["mime"].as_str()), (Some("garden plan.png"), Some("image/png")));
+    let file = attachment["file"].as_str().unwrap().to_string();
+    assert_eq!(std::fs::read(s._dir.path().join("home/bots/scout/attachments").join(&file)).unwrap(), picture);
+    let (status, kind, bytes) = s.raw(attachment["url"].as_str().unwrap()).await;
+    assert_eq!((status, kind.as_str(), bytes.as_slice()), (200, "image/png", picture.as_slice()));
+    assert_eq!(s.raw("/api/attachments/nope").await.0, 404);
+
+    // Sent with a message: the chat shows it, and the bot is told where it is.
+    let (status, sent) = s
+        .call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "What's in this?", "threadId": thread, "attachments": [attachment["id"]] })))
+        .await;
+    assert_eq!(status, 202, "{sent}");
+    assert_eq!(sent["message"]["attachments"][0]["id"], attachment["id"]);
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    let said = reply["message"]["text"].as_str().unwrap();
+    assert!(said.contains(&format!("attachments/{file} (a picture)")), "{said}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=10"), None).await;
+    assert_eq!(page["messages"][0]["attachments"][0]["name"], "garden plan.png");
+    assert_eq!(page["messages"][0]["text"], "What's in this?", "the words are kept as typed");
+
+    // Someone else's attachment, or none and no words, is refused.
+    let (_, other) = s.call("POST", "/api/bots", Some(json!({ "name": "Kiwi" }))).await;
+    let other = other["bot"]["id"].as_str().unwrap().to_string();
+    assert_eq!(s.call("POST", &format!("/api/bots/{other}/messages"), Some(json!({ "text": "x", "attachments": [attachment["id"]] }))).await.0, 400);
+    assert_eq!(s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": " " }))).await.0, 400);
+
+    // A bot on a chat API is shown the picture itself.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let api = listen(fake_api(seen.clone())).await;
+    s.call("PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-test", "url": format!("http://{api}/v1") }))).await;
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "openai", "model": "gpt-test" } }))).await;
+    let (_, up) = s.upload(&bot, "leaf.png", "image/png", picture).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "and this one?", "threadId": thread, "attachments": [up["attachment"]["id"]] }))).await;
+    // (The stand-in answers by writing a file, which asks first: by then it has been sent everything.)
+    until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    let seen = seen.lock().unwrap().clone();
+    let last = seen[0]["body"]["messages"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["role"], "user");
+    assert!(last["content"][0]["text"].as_str().unwrap().starts_with("and this one?"));
+    assert!(last["content"][1]["image_url"]["url"].as_str().unwrap().starts_with("data:image/png;base64,"));
 }
