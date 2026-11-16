@@ -199,8 +199,26 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                     fields[to] = json!(value);
                 }
             }
+            if let Some(attached) = detail.get("attachments").filter(|a| a.is_array()) {
+                fields["attachments"] = attached.clone();
+            }
             fields
         }
+        Role::Step if detail["kind"] == "image" => json!({
+            "role": "bot",
+            "kind": "image",
+            "image": {
+                "prompt": detail["prompt"],
+                "askedBy": detail["askedBy"],
+                "state": detail["state"],
+                "options": detail["options"],
+                "choice": detail["choice"],
+                "choiceLabel": detail["choiceLabel"],
+                "script": detail["script"],
+                "error": detail["error"],
+                "attachment": detail["attachment"],
+            },
+        }),
         Role::Step if detail["kind"] == "changes" => json!({
             "role": "bot",
             "kind": "changes",

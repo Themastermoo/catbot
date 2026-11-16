@@ -14,6 +14,7 @@ pub mod reactions;
 pub mod usage;
 pub mod devices;
 pub mod engines;
+pub mod images;
 pub mod events;
 pub mod hub;
 pub mod memory;
@@ -491,6 +492,7 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
         }
         (Method::POST, ["messages"]) => send_message(app, bot, json_body(req).await?),
         (Method::POST, ["attachments"]) => attachments::upload(app, &bot, req).await,
+        (Method::POST, ["images"]) => images::ask(app, &bot, &json_body(req).await?),
         (Method::POST, ["tasks"]) => new_chat(app, bot, json_body(req).await?),
         (Method::POST, ["tasks", thread]) => {
             let limit = query_param(&req, "messages").and_then(|n| n.parse().ok()).unwrap_or(50usize).min(500);
@@ -753,6 +755,10 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
             let (latest, _) = app.try_store(|store| store.page(thread, None, 1)).map_err(fail)?;
             let leaf = latest.first().map(|m| json!(wire::message_id(m.id))).unwrap_or(Value::Null);
             Ok((StatusCode::OK, json!({ "messages": messages, "hasMore": more, "activeLeafId": leaf })))
+        }
+        (Method::POST, ["images", message]) => {
+            let body = json_body(req).await?;
+            images::answer(app, thread, &urlencoding_decode(message), &body).await
         }
         (Method::GET, ["changes", message]) => changes::route(app, thread, &urlencoding_decode(message), None).await,
         (Method::POST, ["changes", message, action]) => changes::route(app, thread, &urlencoding_decode(message), Some(action)).await,

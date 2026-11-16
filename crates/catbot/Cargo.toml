@@ -24,6 +24,8 @@ tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["fs"] }
 futures-util = "0.3"
 base64 = "0.22"
+# Turns the SVG drawings Claude makes into pictures.
+resvg = "0.45"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "rustls-tls"] }
 
 [dev-dependencies]

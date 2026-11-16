@@ -48,6 +48,8 @@ pub enum Body {
     Reply(String),
     /// A step of the bot's work: a tool it used, or a note. `ok` is None while it runs.
     Step { name: String, ok: Option<bool> },
+    /// A picture being asked for and drawn (`pictures.rs`).
+    Picture(Box<crate::pictures::Card>),
     /// What a turn changed in the bot's folder, and whether it was undone.
     Changes { summary: String, files: Vec<crate::changes::FileChange>, undone: bool },
     /// An approval card: what the bot asked to do, and how the person answered.
@@ -84,6 +86,7 @@ impl Msg {
                 let name = wire["tool"]["name"].as_str().unwrap_or_default();
                 Body::Step { name: name.strip_prefix("notice: ").unwrap_or(name).to_string(), ok: wire["tool"]["ok"].as_bool() }
             }
+            ("image", _) => Body::Picture(Box::new(crate::pictures::Card::from_wire(&wire["image"]))),
             ("changes", _) => {
                 let changes = &wire["changes"];
                 Body::Changes {
@@ -480,8 +483,28 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         }
     }));
 
+    // (A signal, so the submit stays copyable.)
+    let image_target = use_signal(|| (bot.id.clone(), bot.thread_id.clone()));
     let mut submit = move || {
         let words = text.peek().trim().to_string();
+        // `/image <what>`: a picture, whichever AI the person then picks to draw it.
+        if let Some(prompt) = words.strip_prefix("/image").filter(|p| p.starts_with(char::is_whitespace)).map(str::trim).filter(|p| !p.is_empty()) {
+            problem.set(None);
+            text.set(String::new());
+            set_box("");
+            on_send.call(());
+            let (bot_id, thread) = image_target.peek().clone();
+            let (prompt, typed) = (prompt.to_string(), words.clone());
+            spawn(async move {
+                let body = serde_json::json!({ "prompt": prompt, "threadId": thread });
+                if let Err(err) = api::post(&format!("/api/bots/{bot_id}/images"), &body).await {
+                    problem.set(Some(err));
+                    text.set(typed.clone());
+                    set_box(&typed);
+                }
+            });
+            return;
+        }
         let uploading = tray.peek().iter().any(|t| t.state == TrayState::Uploading);
         let files: Vec<Attached> = tray.peek().iter().filter_map(|t| match &t.state {
             TrayState::Ready(file) => Some(file.clone()),
@@ -824,11 +847,17 @@ fn Row(
                         }
                         span { class: "ml-2 self-end pb-1 text-[11px] tabular-nums text-ink-tertiary opacity-0 transition-opacity group-hover:opacity-100", "{when}" }
                     }
+                    if !message.attachments.is_empty() {
+                        div { class: "mt-1.5 w-full", crate::attach::Attachments { files: message.attachments.clone(), end: false } }
+                    }
                     crate::react::Reactions { thread: thread.clone(), message: message.id.clone(), reactions: message.reactions.clone(), end: false, bot_id: bot_id.clone(), working }
                 }
             }
         }
         Body::Step { name, ok } => rsx! { Step { name: name.clone(), ok: *ok } },
+        Body::Picture(card) => rsx! {
+            crate::pictures::PictureCard { thread: thread.clone(), message: message.id.clone(), card: (**card).clone() }
+        },
         Body::Changes { summary, files, undone } => rsx! {
             crate::changes::ChangesRow { thread: thread.clone(), message: message.id.clone(), summary: summary.clone(), files: files.clone(), undone: *undone, working }
         },

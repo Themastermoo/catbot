@@ -577,7 +577,16 @@ async fn devices_pair_at_home_and_reach_catbot_from_away() {
 /// tool's result, it answers. Every request it gets is kept, with its Authorization header.
 fn fake_api(seen: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Router {
     let kept = seen.clone();
+    let seen_images = seen.clone();
     Router::new()
+        .route("/v1/images/generations", post(move |axum::Json(body): axum::Json<Value>| {
+            let seen = seen_images.clone();
+            async move {
+                seen.lock().unwrap().push(json!({ "images": body }));
+                // A one-pixel PNG.
+                axum::Json(json!({ "data": [{ "b64_json": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==" }] }))
+            }
+        }))
         .route("/v1/models", get(|| async { axum::Json(json!({ "data": [{ "id": "gpt-test" }, { "id": "text-embedding-3" }] })) }))
         .route("/v1/chat/completions", post(move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
             let kept = kept.clone();
@@ -1090,4 +1099,74 @@ async fn a_backup_ai_answers_when_the_bots_own_is_at_a_limit() {
     let (status, refused) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Once more", "threadId": thread }))).await;
     assert_eq!(status, 429);
     assert!(refused["error"].as_str().unwrap().contains("its backups can't go either"), "{refused}");
+}
+
+#[tokio::test]
+async fn pictures_are_asked_for_drawn_and_kept() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let folder = s._dir.path().join("home/bots/scout/attachments");
+    // As if Blender weren't installed (it may be, where the tests run), until it's wanted below.
+    // SAFETY: only this test reads it.
+    unsafe { std::env::set_var("CATBOT_BLENDER", s._dir.path().join("no-blender")) };
+
+    // `/image`: the person's message, and a card offering the AIs that can draw.
+    let (status, asked) = s.call("POST", &format!("/api/bots/{bot}/images"), Some(json!({ "prompt": "a red barn at dusk", "threadId": thread }))).await;
+    assert_eq!(status, 202, "{asked}");
+    assert_eq!(asked["message"]["text"], "/image a red barn at dusk");
+    let card = asked["card"].clone();
+    let choices: Vec<&str> = card["image"]["options"].as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+    assert_eq!(choices, vec!["claude-svg"], "only Claude can draw with no keys saved and no Blender");
+    let id = card["id"].as_str().unwrap().to_string();
+
+    // Claude draws it in SVG; Catbot renders it, keeps it, and shows it.
+    let (status, _) = s.call("POST", &format!("/api/threads/{thread}/images/{id}"), Some(json!({ "choice": "claude-svg" }))).await;
+    assert_eq!(status, 202);
+    let picture = until(&mut events, "picture", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["attachments"].is_array()).await;
+    let attachment = &picture["message"]["attachments"][0];
+    assert_eq!(attachment["mime"], "image/png");
+    assert!(picture["message"]["text"].as_str().unwrap().contains("drawn by Claude, drawing in SVG"));
+    let file = attachment["file"].as_str().unwrap();
+    assert_eq!(&std::fs::read(folder.join(file)).unwrap()[1..4], b"PNG");
+    let done = until(&mut events, "done", |f| f["kind"] == "message.patch" && f["message"]["image"]["state"] == "done").await;
+    assert_eq!(done["message"]["image"]["attachment"]["id"], attachment["id"]);
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/images/{id}"), Some(json!({ "choice": "claude-svg" }))).await.0, 409);
+
+    // The bot asks for one itself; with a key saved, OpenAI's image model draws it.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let api = listen(fake_api(seen.clone())).await;
+    s.call("PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-test", "url": format!("http://{api}/v1") }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "draw me a fox in the snow", "threadId": thread }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Coming right up.", "the request is taken out of the reply");
+    let card = until(&mut events, "card", |f| f["kind"] == "message" && f["message"]["kind"] == "image").await;
+    assert_eq!(card["message"]["image"]["askedBy"], "Scout");
+    assert_eq!(card["message"]["image"]["prompt"], "a fox in the snow");
+    assert_eq!(card["message"]["image"]["options"][0]["label"], "OpenAI · gpt-image-2");
+    let id = card["message"]["id"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/images/{id}"), Some(json!({ "choice": "openai" }))).await;
+    until(&mut events, "drawn", |f| f["kind"] == "message.patch" && f["message"]["image"]["state"] == "done").await;
+    let asked = seen.lock().unwrap().iter().find(|r| r.get("images").is_some()).cloned().unwrap();
+    assert_eq!((asked["images"]["model"].as_str(), asked["images"]["prompt"].as_str()), (Some("gpt-image-2"), Some("a fox in the snow")));
+
+    // Blender: the script is shown first and runs only on the go-ahead.
+    let blender = s._dir.path().join("fake-blender");
+    std::fs::write(&blender, "#!/usr/bin/env python3\nimport sys, base64\nout = sys.argv[sys.argv.index('--') + 1]\nopen(out, 'wb').write(base64.b64decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=='))\n").unwrap();
+    #[cfg(unix)]
+    std::fs::set_permissions(&blender, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // SAFETY: only this test reads it.
+    unsafe { std::env::set_var("CATBOT_BLENDER", &blender) };
+    let (_, asked) = s.call("POST", &format!("/api/bots/{bot}/images"), Some(json!({ "prompt": "a teapot", "threadId": thread }))).await;
+    let id = asked["card"]["id"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/images/{id}"), Some(json!({ "choice": "claude-blender" }))).await;
+    let waiting = until(&mut events, "script", |f| f["kind"] == "message.patch" && f["message"]["image"]["state"] == "confirming").await;
+    assert!(waiting["message"]["image"]["script"].as_str().unwrap().contains("import bpy"));
+    s.call("POST", &format!("/api/threads/{thread}/images/{id}"), Some(json!({ "run": true }))).await;
+    until(&mut events, "rendered", |f| f["kind"] == "message.patch" && f["message"]["image"]["state"] == "done").await;
+    let pictures = std::fs::read_dir(&folder).unwrap().count();
+    assert_eq!(pictures, 3);
 }

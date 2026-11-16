@@ -205,6 +205,9 @@ async fn run(
     for step in &result.steps {
         save_step(app, thread, step);
     }
+    // Pictures the bot asked for come out of its reply, each with a card asking which AI draws it.
+    let (reply, pictures) = super::images::take_requests(&result.reply);
+    result.reply = reply;
     if !result.reply.is_empty() {
         let outcome = result.outcome.as_ref();
         let detail = json!({
@@ -215,6 +218,9 @@ async fn run(
             "duration_ms": outcome.and_then(|o| o.duration_ms),
         });
         save_and_send(app, thread, Role::Bot, &result.reply, Some(&detail));
+    }
+    for prompt in pictures {
+        super::images::card(app, thread, &prompt, &bot.name);
     }
     super::changes::after_turn(app, thread, points, before).await;
     // A backup answered: the bot's own AI starts afresh next time, shown everything said.

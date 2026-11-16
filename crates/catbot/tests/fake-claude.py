@@ -4,6 +4,8 @@ The prompt picks the behaviour:
   "crash"  -> writes to stderr and exits 1 with no result line
   "tool"   -> calls a tool that is refused, like an unapproved Bash command
   "approve" -> asks the permission prompt tool (as the real CLI does), and obeys the answer
+  "draw me <what>" -> asks Catbot for a picture of it in its reply
+  (asked as Catbot's drawer, for SVG or a Blender script) -> answers with one
   "limit"  -> turns the turn away at the plan's usage limit, as the real CLI does
   "write <file>: <words>" -> writes the words to that file in its folder (as a bot's edit would)
   "Name the conversation…" -> a chat's name, the way Catbot asks for one
@@ -52,6 +54,24 @@ if (arg_after("--resume") or "").startswith("gone"):
          "session_id": arg_after("--resume")})
     sys.exit(1)
 prompt = message["message"]["content"]
+
+system = arg_after("--append-system-prompt") or ""
+if "draw pictures as SVG" in system or "Blender Python" in system:
+    out({"type": "system", "subtype": "init", "session_id": session, "model": "claude-fake"})
+    if "SVG" in system and "Blender" not in system:
+        drawn = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 100"><rect width="200" height="100" fill="#3a7"/><circle cx="100" cy="50" r="30" fill="#fd3"/></svg>'
+    else:
+        drawn = "```python\nimport bpy, sys\nbpy.ops.render.render(write_still=True)\n```"
+    out({"type": "result", "is_error": False, "result": drawn, "session_id": session})
+    sys.exit(0)
+
+last_line = prompt.strip().splitlines()[-1] if prompt.strip() else ""
+if last_line.startswith("draw me "):
+    out({"type": "system", "subtype": "init", "session_id": session, "model": "claude-fake"})
+    said = f"Coming right up.\n<make-image>{last_line[len('draw me '):]}</make-image>"
+    out({"type": "assistant", "message": {"content": [{"type": "text", "text": said}]}})
+    out({"type": "result", "is_error": False, "result": said, "session_id": session})
+    sys.exit(0)
 
 if prompt.startswith("limit"):
     out({"type": "system", "subtype": "init", "session_id": session, "model": "claude-fake"})

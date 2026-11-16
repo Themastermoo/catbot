@@ -22,6 +22,7 @@ mod events;
 mod live;
 mod mascots;
 mod notify;
+mod pictures;
 mod markdown;
 mod memory;
 mod settings;
