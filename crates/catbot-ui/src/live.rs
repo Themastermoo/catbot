@@ -53,6 +53,7 @@ pub struct State {
     /// Bumped when the limits change (a `limits` frame).
     pub limits_changed: u64,
     pub handoffs_changed: u64,
+    pub chief_changed: u64,
     pub devices_changed: u64,
 }
 
@@ -114,6 +115,7 @@ impl State {
             Some("engines") => self.engines_changed += 1,
             Some("limits") => self.limits_changed += 1,
             Some("handoffs") => self.handoffs_changed += 1,
+            Some("chief") => self.chief_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();
                 self.bots.retain(|b| b.id != id);

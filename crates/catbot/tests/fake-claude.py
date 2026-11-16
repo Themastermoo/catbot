@@ -10,7 +10,7 @@ The prompt picks the behaviour:
   "write <file>: <words>" -> writes the words to that file in its folder (as a bot's edit would)
   "Name the conversation…" -> a chat's name, the way Catbot asks for one
   anything else -> streams "Hello, <prompt>" back (ending "@Name, over to you." for a bot
-                   whose instructions say "fake-pass @Name")
+                   whose instructions say "fake-pass @Name"; "what are your instructions?" -> its system prompt)
 """
 import json, subprocess, sys
 
@@ -112,6 +112,9 @@ import re
 passing = re.search(r"fake-pass (@\w+)", system)
 if passing:
     reply += f"\n\n{passing.group(1)}, over to you."
+# "what are your instructions?" (the last line) gets the system prompt it was given, to check what a bot is told.
+if last_line == "what are your instructions?":
+    reply = system
 # Catbot asking for a chat's name ("sleepy" in the message makes the namer slow).
 if prompt.startswith("Name the conversation"):
     if "sleepy" in prompt:

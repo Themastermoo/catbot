@@ -82,6 +82,10 @@ pub enum Place {
 
 /// What a bot in its own chat is told about the others it can bring in.
 pub fn roster_note(app: &App, bot: &Bot) -> String {
+    // The Chief is told about the whole team in its own note (`chief.rs`).
+    if app.with_store(|store| Ok(super::chief::is_chief_in(store, &bot.id))).unwrap_or(false) {
+        return String::new();
+    }
     let others: Vec<String> = app
         .with_store(|store| store.bots())
         .unwrap_or_default()

@@ -139,6 +139,8 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         // Catbot's own: which mascot it wears, and whether it may use the Codex vault.
         "mark": bot.mark.as_str(),
         "codex": bot.codex,
+        // Catbot's own: the Chief of Staff wears a star.
+        "chief": super::chief::is_chief_in(store, &bot.id),
         "mascotBody": "cursor",
         "unread": false,
         "modelSelection": model_selection(bot),

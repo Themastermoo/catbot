@@ -164,6 +164,12 @@ async fn run(
 ) -> Option<String> {
     let thread = conversation.id.as_str();
     let emit = |event: Value| app.hub.send(runtime(thread, turn_id, event));
+    // The Chief of Staff is told its role and the whole team, wherever it answers.
+    let mut dressed = bot.clone();
+    if let Some(chief) = super::chief::chief(app).filter(|c| c.id == bot.id) {
+        dressed.instructions.push_str(&super::chief::note(app, &chief));
+    }
+    let bot = &dressed;
     app.announce_bot(&bot.id);
     emit(json!({ "type": "turn.started" }));
 

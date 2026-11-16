@@ -185,13 +185,15 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
         save(*prefs.peek());
     };
     let current = prefs();
+    let mut page = use_signal(|| "general");
+    let tab = |on: bool| if on { "rounded-lg bg-raised px-3 py-1.5 text-[13px] font-semibold text-ink" } else { "rounded-lg px-3 py-1.5 text-[13px] text-ink-secondary hover:bg-raised/60 hover:text-ink" };
     rsx! {
         div { class: "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4", onclick: move |_| on_close.call(()),
             div {
                 role: "dialog",
                 "aria-label": "Settings",
                 "data-app-settings": true,
-                class: "flex w-full max-w-[460px] flex-col gap-4 rounded-2xl bg-panel p-5 shadow-2xl",
+                class: "flex max-h-[88vh] w-full max-w-[500px] flex-col gap-4 overflow-y-auto rounded-2xl bg-panel p-5 shadow-2xl",
                 onclick: move |e| e.stop_propagation(),
                 div { class: "flex items-center",
                     span { class: "min-w-0 flex-1 text-[17px] font-semibold text-ink", "Settings" }
@@ -203,7 +205,14 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
                         "×"
                     }
                 }
-                if AVAILABLE { section { class: "flex flex-col gap-3", "data-notification-settings": true,
+                div { role: "tablist", class: "flex gap-1", "data-settings-pages": true,
+                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"general\"}", class: tab(page() == "general"), onclick: move |_| page.set("general"), "General" }
+                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"chief\"}", "data-settings-chief": true, class: tab(page() == "chief"), onclick: move |_| page.set("chief"), "Chief of Staff" }
+                }
+                if page() == "chief" {
+                    crate::chief::ChiefOptions {}
+                }
+                if page() == "general" && AVAILABLE { section { class: "flex flex-col gap-3", "data-notification-settings": true,
                     h2 { class: "text-[13px] font-semibold uppercase tracking-wide text-ink-tertiary", "Notifications" }
                     p { class: "text-[13px] text-ink-secondary", "Shown by this computer while Catbot is open, except for the chat you're looking at." }
                     div { class: "flex items-center gap-3",
@@ -225,7 +234,9 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
                         }
                     }
                 } }
-                crate::handoffs::HandoffSettings {}
+                if page() == "general" {
+                    crate::handoffs::HandoffSettings {}
+                }
             }
         }
     }

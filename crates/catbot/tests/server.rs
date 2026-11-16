@@ -1288,3 +1288,39 @@ async fn a_bot_hands_work_on_within_the_limits_set() {
     let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=200"), None).await;
     assert!(replies(&page).len() <= count + 1, "stopped");
 }
+
+#[tokio::test]
+async fn a_chief_of_staff_is_made_or_chosen_and_told_the_team() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout", "soul": "Looks after the garden." }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    assert_eq!(made["bot"]["chief"], false);
+    let (_, none) = s.call("GET", "/api/chief", None).await;
+    assert_eq!(none["chief"]["botId"], Value::Null);
+
+    // The ready-made Chief: made, starred, and told about Scout.
+    let (status, ready) = s.call("POST", "/api/chief/ready-made", None).await;
+    assert_eq!(status, 201, "{ready}");
+    assert_eq!(ready["name"], "Chief");
+    let chief = ready["chief"]["botId"].as_str().unwrap().to_string();
+    let (_, bot) = s.call("GET", &format!("/api/bots/{chief}"), None).await;
+    assert_eq!((bot["bot"]["chief"].as_bool(), bot["bot"]["name"].as_str()), (Some(true), Some("Chief")));
+    assert!(bot["bot"]["soul"].as_str().unwrap().contains("Chief of Staff"));
+    s.call("POST", &format!("/api/bots/{chief}/messages"), Some(json!({ "text": "what are your instructions?" }))).await;
+    let told = until(&mut events, "told", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    let told = told["message"]["text"].as_str().unwrap();
+    assert!(told.contains("Your team:") && told.contains("- Scout (on claude, asks before acting): Looks after the garden."), "{told}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Scout made the Chief instead: the star moves.
+    let (status, _) = s.call("PUT", "/api/chief", Some(json!({ "botId": scout }))).await;
+    assert_eq!(status, 200);
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    let starred: Vec<&str> = list["bots"].as_array().unwrap().iter().filter(|b| b["chief"] == true).filter_map(|b| b["name"].as_str()).collect();
+    assert_eq!(starred, ["Scout"]);
+    assert_eq!(s.call("PUT", "/api/chief", Some(json!({ "botId": "nobody" }))).await.0, 400);
+    let (_, cleared) = s.call("PUT", "/api/chief", Some(json!({ "botId": null }))).await;
+    assert_eq!(cleared["chief"]["botId"], Value::Null);
+}

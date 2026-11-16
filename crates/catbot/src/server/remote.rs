@@ -71,6 +71,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "usage", rest @ ..] if method == Method::GET => super::usage_route(&app, rest, super::usage_query(&req)).await,
         ["api", "limits"] if method == Method::GET => respond(super::limits::route(&app, &method, None, false).await),
         ["api", "handoffs"] if method == Method::GET => respond(super::handoffs::route(&app, None)),
+        ["api", "chief"] if method == Method::GET => respond(super::chief::route(&app, &method, &[], None)),
         ["api", "engines", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

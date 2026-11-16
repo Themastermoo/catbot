@@ -68,6 +68,8 @@ pub struct Bot {
     pub approval_mode: String,
     /// Whether it may use the Codex vault.
     pub codex: bool,
+    /// Whether it's the Chief of Staff (starred in the sidebar).
+    pub chief: bool,
     pub activity: Activity,
     pub unread: bool,
     /// Its newest message worth a preview, if it has one.
@@ -167,6 +169,7 @@ impl Bot {
                 .unwrap_or_default(),
             approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
             codex: wire["codex"].as_bool().unwrap_or(true),
+            chief: wire["chief"].as_bool().unwrap_or(false),
             activity,
             unread: wire["unread"] == true,
             last: messages.iter().rev().find_map(|m| Some(Last { line: line(m)?, at: m["at"].as_f64().unwrap_or(0.0) })),

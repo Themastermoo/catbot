@@ -10,6 +10,7 @@ pub mod attachments;
 pub mod backups;
 pub mod changes;
 pub mod channels;
+pub mod chief;
 pub mod handoffs;
 pub mod limits;
 pub mod reactions;
@@ -323,6 +324,19 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(limits::route(&app, &method, body, true).await)
         }
         ["api", "handoffs"] if method == Method::GET => respond(handoffs::route(&app, None)),
+        ["api", "chief", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method != Method::PUT {
+                None
+            } else {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            };
+            respond(chief::route(&app, &method, &rest, body))
+        }
         ["api", "handoffs"] if method == Method::PUT => match json_body(req).await {
             Ok(body) => respond(handoffs::route(&app, Some(body))),
             Err(err) => respond(Err(err)),
