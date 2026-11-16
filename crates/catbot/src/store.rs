@@ -1010,6 +1010,23 @@ impl Store {
     }
 
     /// The last `limit` messages of a conversation, oldest first.
+    /// Steps (tools, errors) and notes saved after message `after`, in every chat, oldest first,
+    /// with the chat each is in: what the Chief of Staff's watch looks over.
+    pub fn steps_since(&self, after: i64, limit: usize) -> Result<Vec<(String, Message)>, BoxError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, role, body, detail, at, conversation_id FROM messages WHERE id > ?1 AND role IN ('step', 'note') ORDER BY id LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![after, limit as i64], |r| Ok((r.get::<_, String>(5)?, message_from_row(r)?)))?
+            .collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// The newest message's id, in any chat (0 with none).
+    pub fn last_message_id(&self) -> Result<i64, BoxError> {
+        Ok(self.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM messages", [], |r| r.get(0))?)
+    }
+
     pub fn messages(&self, conversation_id: &str, limit: usize) -> Result<Vec<Message>, BoxError> {
         let mut stmt = self.conn.prepare(
             "SELECT id, role, body, detail, at FROM

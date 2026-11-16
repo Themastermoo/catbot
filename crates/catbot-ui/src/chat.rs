@@ -53,6 +53,8 @@ pub enum Body {
     /// A picture being asked for and drawn (`pictures.rs`).
     Picture(Box<crate::pictures::Card>),
     TeamChange(Box<crate::team::Change>),
+    /// Something Catbot wrote for the Chief of Staff: a problem to look at, or a check-in.
+    FromCatbot { from: String, text: String },
     /// What a turn changed in the bot's folder, and whether it was undone.
     Changes { summary: String, files: Vec<crate::changes::FileChange>, undone: bool },
     /// An approval card: what the bot asked to do, and how the person answered.
@@ -83,7 +85,10 @@ impl Msg {
         let at = wire["at"].as_f64().unwrap_or(0.0);
         let text = || wire["text"].as_str().unwrap_or_default().to_string();
         let body = match (wire["kind"].as_str()?, wire["role"].as_str()) {
-            ("text", Some("user")) => Body::Person(text()),
+            ("text", Some("user")) => match wire["fromCatbot"].as_str() {
+                Some(from) => Body::FromCatbot { from: from.to_string(), text: text() },
+                None => Body::Person(text()),
+            },
             ("text", _) => Body::Reply(text()),
             ("activity", _) => {
                 let name = wire["tool"]["name"].as_str().unwrap_or_default();
@@ -882,6 +887,22 @@ fn Row(
                 crate::react::Reactions { thread: thread.clone(), message: message.id.clone(), reactions: message.reactions.clone(), end: true, bot_id: bot_id.clone(), working }
             }
         },
+        Body::FromCatbot { from, text } => {
+            let label = match from.as_str() {
+                "watch" => "Catbot's watch",
+                "check-in" => "Timed check-in",
+                "brief" => "Daily brief",
+                _ => "Catbot",
+            };
+            rsx! {
+                div { class: "flex w-full justify-start", "data-from-catbot": "{from}",
+                    div { class: "flex w-full max-w-[min(var(--chat-prose-max),var(--chat-card-pct))] flex-col gap-1 rounded-xl border border-dashed border-hairline/60 px-3 py-2.5 text-[13px]", title: "{full_time}",
+                        span { class: "text-[11px] font-semibold uppercase tracking-wide text-ink-tertiary", "{label} · for the Chief · {when}" }
+                        div { class: "whitespace-pre-wrap [overflow-wrap:anywhere] text-ink-secondary", "{text}" }
+                    }
+                }
+            }
+        }
         Body::Reply(text) => {
             let shape = if markdown::is_formatted(text) {
                 "w-full max-w-[min(var(--chat-prose-max),var(--chat-card-pct))] rounded-2xl px-1 text-[15px] leading-relaxed text-ink"

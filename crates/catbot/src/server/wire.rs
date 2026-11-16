@@ -191,6 +191,10 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
     let fields = match m.role {
         Role::Person => {
             let mut fields = json!({ "role": "user", "kind": "text", "text": m.body });
+            // Written by Catbot for the Chief of Staff (a problem to look at, a check-in), not by the person.
+            if let Some(from) = detail["fromCatbot"].as_str() {
+                fields["fromCatbot"] = json!(from);
+            }
             if let Some(send_id) = detail["sendId"].as_str() {
                 fields["sendId"] = json!(send_id);
             }

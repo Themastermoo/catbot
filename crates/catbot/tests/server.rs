@@ -1375,3 +1375,44 @@ async fn the_chief_changes_the_team_only_with_a_yes() {
     let heard = heard["message"]["text"].as_str().unwrap();
     assert!(heard.contains("couldn't be used: there's no bot called Nobody") && !heard.contains("Change Scout"), "{heard}");
 }
+
+#[tokio::test]
+async fn the_watch_wakes_the_chief_when_something_goes_wrong() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    // Scout on an AI with no key saved: its turn ends in an error.
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout", "modelSelection": { "instanceId": "cerebras" } }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let (_, ready) = s.call("POST", "/api/chief/ready-made", None).await;
+    let chief = ready["chief"]["botId"].as_str().unwrap().to_string();
+    let (_, options) = s.call("GET", "/api/chief", None).await;
+    assert_eq!((options["chief"]["watch"].as_bool(), options["chief"]["checkins"]["on"].as_bool()), (Some(true), Some(false)));
+    assert_eq!(options["chief"]["checkins"]["days"], json!([1, 2, 3, 4, 5]));
+    let (_, nothing) = s.call("POST", "/api/chief/look", None).await;
+    assert_eq!(nothing["woke"], false, "nothing wrong yet");
+
+    s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": "Plan the beds" }))).await;
+    until(&mut events, "scout done", |f| runtime(f, "turn.completed")).await;
+    let (_, woke) = s.call("POST", "/api/chief/look", None).await;
+    assert_eq!(woke["woke"], true);
+    let asked = until(&mut events, "report", |f| f["kind"] == "message" && f["message"]["fromCatbot"] == "watch").await;
+    let report = asked["message"]["text"].as_str().unwrap();
+    assert!(report.contains("In Scout's chat") && report.contains("needs an API key"), "{report}");
+    let answer = until(&mut events, "chief", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(answer["message"]["text"].as_str().unwrap().contains("Catbot's watch found"));
+    until(&mut events, "chief done", |f| runtime(f, "turn.completed")).await;
+    let (_, again) = s.call("POST", "/api/chief/look", None).await;
+    assert_eq!(again["woke"], false, "each problem is reported once");
+
+    // A timed check-in shows the Chief where the team stands; its options are kept.
+    let (status, set) = s.call("PUT", "/api/chief", Some(json!({ "checkins": { "on": true, "everyHours": 2 } }))).await;
+    assert_eq!(status, 200, "{set}");
+    assert_eq!((set["chief"]["checkins"]["everyHours"].as_u64(), set["chief"]["checkins"]["from"].as_str()), (Some(2), Some("09:00")));
+    assert_eq!(set["chief"]["botId"], chief.as_str(), "the Chief stays");
+    assert_eq!(s.call("PUT", "/api/chief", Some(json!({ "checkins": { "from": "9am" } }))).await.0, 400);
+    s.call("POST", "/api/chief/check-in", None).await;
+    let asked = until(&mut events, "check-in", |f| f["kind"] == "message" && f["message"]["fromCatbot"] == "check-in").await;
+    let status = asked["message"]["text"].as_str().unwrap();
+    assert!(status.contains("Timed check-in") && status.contains("Scout: idle"), "{status}");
+}

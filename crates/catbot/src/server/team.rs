@@ -29,7 +29,7 @@ only if they approve; you'll hear how it went with their next message. Say in yo
 - {\"action\":\"change_channel\",\"channel\":\"its name\", and any of \"name\", \"instructions\", \"members\", \"lead\"}\n\
 - {\"action\":\"delete_channel\",\"channel\":\"its name\"}\n\
 Approval levels: \"ask\" (asks before acting), \"edits\" (edits files without asking), \"auto\" (decides what's safe), \
-\"full\" (acts without asking). AIs are named by id, such as claude, codex, gemini, openai, grok.";
+\"full\" (acts without asking). AIs are named by id: claude, and also openai, xai, groq, mistral, deepseek-chat, ollama, gemini, grok-cli and others in Catbot's list.";
 
 /// Takes `<team-change>…</team-change>` out of a reply: the reply without them, and what was in them.
 pub fn take(reply: &str) -> (String, Vec<String>) {
