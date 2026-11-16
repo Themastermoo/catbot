@@ -219,6 +219,14 @@ Catbot's own tools: reading, listing and searching files, writing and editing th
 commands, in their own folder and the folders they're given (memory vault, Codex). Changes and
 commands ask first as a Claude bot's would; a path outside their folders is refused.
 
+Bots can also run on an agent program installed on this computer, speaking the Agent Client
+Protocol: Grok CLI, Gemini CLI, GitHub Copilot, Cursor, OpenCode, Qwen Code, Kimi Code, Droid,
+Cline, Kiro, Hermes, DeepSeek Harness, OMP or Command Code. Each uses its own sign-in and plan
+(install it and sign it in once in a terminal; the bot's settings show how) and its own tools;
+its permission requests become Catbot's approval cards, its file requests are served inside the
+bot's folders only, and its session carries on from message to message. `CATBOT_AGENT_<ID>`
+(e.g. `CATBOT_AGENT_GROK_CLI=/opt/grok/bin/grok`) points Catbot at a program it can't find.
+
 **Memory vault.** Each computer running Catbot keeps a folder of linked Markdown notes the bots
 write as they work: `~/CatbotMemory` (`$CATBOT_MEMORY` to move it, `off` to turn it off).
 `Bots/` holds a note per bot (Catbot seeds it when the bot is made and moves it when the bot is

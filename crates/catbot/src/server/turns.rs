@@ -218,6 +218,8 @@ async fn drive(
     let started = if bot.engine == engines::CLAUDE {
         let turn = chat::bot_turn(bot, text.to_string(), session.clone(), app.cli.clone(), app.helper.clone(), codex, app.memory.clone());
         claude::start(&turn).await.map_err(|err| err.to_string())
+    } else if engines::find(&bot.engine).is_some_and(|e| e.kind == engines::Kind::Agent) {
+        start_agent(app, bot, thread, session, codex)
     } else {
         start_api(app, bot, thread, codex)
     };
@@ -340,6 +342,38 @@ fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::P
     let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
     let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode };
     Ok(api::start(api::ApiTurn { engine, access, model, system, history, workspace }))
+}
+
+/// Starts a turn on an agent program: the program found on this computer, the session to carry
+/// on, and what a new session needs to know.
+fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex: Option<std::path::PathBuf>) -> Result<Running, String> {
+    let engine = engines::find(&bot.engine).ok_or("no such agent")?;
+    let program = engines::agent_program(engine).ok_or_else(|| {
+        format!("{} isn't installed on this computer. Install it with `{}`, then sign in with `{}`.", engine.name, engine.install, engine.sign_in)
+    })?;
+    let mut history: Vec<(bool, String)> = app
+        .with_store(|store| store.messages(thread, 60))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| match m.role {
+            Role::Person => Some((true, m.body)),
+            Role::Bot if !m.body.trim().is_empty() => Some((false, m.body)),
+            _ => None,
+        })
+        .collect();
+    let text = match history.last() {
+        Some((true, _)) => history.pop().map(|(_, text)| text).unwrap_or_default(),
+        _ => String::new(),
+    };
+    let instructions = chat::system_prompt(bot, codex.as_deref(), app.memory.as_deref());
+    let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
+    let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode };
+    let session = match session {
+        Session::Resume(id) => Some(id.clone()),
+        Session::New(_) => None,
+    };
+    let model = bot.model.clone().unwrap_or_default();
+    crate::acp::start(crate::acp::AcpTurn { engine, program, model, session, instructions, earlier: history, text, workspace }).map_err(|e| e.to_string())
 }
 
 /// Marks an approval card answered (`dismissed` when nobody answered it) and shows the change.

@@ -651,3 +651,62 @@ async fn a_bot_on_a_chat_api_uses_its_tools_with_approval() {
     let (_, forgot) = s.call("DELETE", "/api/engines/openai/key", None).await;
     assert_eq!(forgot["engine"]["ready"], false);
 }
+
+#[tokio::test]
+async fn a_bot_on_an_agent_program_streams_asks_and_resumes() {
+    // The stand-in agent, as Grok CLI.
+    let bin = tempfile::tempdir().unwrap();
+    let program = bin.path().join("grok");
+    let log = bin.path().join("acp.log");
+    std::fs::write(&program, format!("#!/bin/sh\nFAKE_ACP_LOG={} exec python3 {} \"$@\"\n", log.display(), concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-acp.py"))).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    // SAFETY: only this test reads this variable.
+    unsafe { std::env::set_var("CATBOT_AGENT_GROK_CLI", &program) };
+
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, list) = s.call("GET", "/api/engines", None).await;
+    let grok = list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "grok-cli").unwrap().clone();
+    assert_eq!((grok["kind"].as_str(), grok["ready"].as_bool(), grok["signIn"].as_str()), (Some("agent"), Some(true), Some("grok login")));
+
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Groky", "soul": "Be brief." }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "grok-cli", "model": "grok-4" }, "approvalMode": "edits" }))).await;
+
+    // A first message: a new session, given the bot's instructions.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
+    let thought = until(&mut events, "thinking", |f| runtime(f, "content.delta") && f["event"]["streamKind"] == "reasoning_text").await;
+    assert_eq!(thought["event"]["delta"], "hmm");
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Echo: hello (new)");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let start = std::fs::read_to_string(&log).unwrap();
+    let first: Value = serde_json::from_str(start.lines().next().unwrap()).unwrap();
+    assert_eq!(first["args"], json!(["--permission-mode", "acceptEdits", "agent", "-m", "grok-4", "stdio"]));
+    assert!(first["cwd"].as_str().unwrap().ends_with("bots/groky"));
+
+    // The next message carries on the agent's session.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "again", "threadId": thread }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Echo: again (resumed)");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Asking: on "Ask for approval" an edit waits for a yes, then the file is written through Catbot.
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "approvalMode": "ask" }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "please edit", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    assert_eq!(asked["event"]["tool"], "Edit");
+    let notes = s._dir.path().join("home/bots/groky/notes.md");
+    assert!(!notes.exists());
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Edited.");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello from the agent");
+}

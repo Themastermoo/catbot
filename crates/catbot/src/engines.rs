@@ -5,11 +5,17 @@
 //!   Groq, Mistral, Cerebras, DeepSeek, OpenRouter, MiniMax, and models on this computer through
 //!   Ollama or LM Studio. They need a key (saved in Settings, kept in Catbot's private store, or
 //!   given in the environment), except the local ones. Catbot gives them its own tools.
+//! - **Agent programs** that speak the Agent Client Protocol (`acp.rs`): Grok CLI, Gemini CLI,
+//!   GitHub Copilot, Cursor, OpenCode, Qwen Code, Kimi, Droid, Cline, Kiro, Hermes, DeepSeek
+//!   Harness, OMP and Command Code. Each must be installed and signed in on the computer, with its
+//!   own login and plan; it uses its own tools and asks through Catbot.
 //!
 //! The list follows OpenMausBot's built-in drivers (server/drivers/, Apache-2.0); later stages add
 //! its agent programs (Gemini CLI, Copilot, Cursor…) and Codex.
 
 use serde::Serialize;
+
+use crate::claude::PermissionMode;
 
 /// The engine every bot started on.
 pub const CLAUDE: &str = "claude";
@@ -21,6 +27,8 @@ pub enum Kind {
     Claude,
     /// A chat API over HTTP, OpenAI-style.
     Api,
+    /// An agent program on the computer, over the Agent Client Protocol.
+    Agent,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -39,7 +47,39 @@ pub struct Engine {
     /// Models offered before Catbot has asked the API for its own list.
     pub models: &'static [(&'static str, &'static str)],
     pub default_model: &'static str,
+    /// An agent's program, and its arguments for an approval level and model ("" for its own).
+    #[serde(skip)]
+    pub program: &'static str,
+    #[serde(skip)]
+    pub args: fn(PermissionMode, &str) -> Vec<String>,
+    /// How to install the agent, and sign it in.
+    pub install: &'static str,
+    pub sign_in: &'static str,
+    /// Sign-in methods to ask an agent for, in order, when it offers them.
+    #[serde(skip)]
+    pub auth: &'static [&'static str],
 }
+
+fn no_args(_: PermissionMode, _: &str) -> Vec<String> {
+    Vec::new()
+}
+
+const BLANK: Engine = Engine {
+    id: "",
+    name: "",
+    kind: Kind::Api,
+    url: "",
+    key_env: "",
+    needs_key: false,
+    key_page: "",
+    models: &[],
+    default_model: "",
+    program: "",
+    args: no_args,
+    install: "",
+    sign_in: "",
+    auth: &[],
+};
 
 const fn api(
     id: &'static str,
@@ -49,11 +89,100 @@ const fn api(
     key_page: &'static str,
     models: &'static [(&'static str, &'static str)],
 ) -> Engine {
-    Engine { id, name, kind: Kind::Api, url, key_env, needs_key: true, key_page, models, default_model: models[0].0 }
+    Engine { id, name, kind: Kind::Api, url, key_env, needs_key: true, key_page, models, default_model: models[0].0, ..BLANK }
+}
+
+#[allow(clippy::too_many_arguments)]
+const fn agent(
+    id: &'static str,
+    name: &'static str,
+    program: &'static str,
+    args: fn(PermissionMode, &str) -> Vec<String>,
+    install: &'static str,
+    sign_in: &'static str,
+    key_page: &'static str,
+    auth: &'static [&'static str],
+) -> Engine {
+    Engine { id, name, kind: Kind::Agent, program, args, install, sign_in, key_page, auth, ..BLANK }
+}
+
+/// "-m model" when a model is picked.
+fn model_flag(flag: &str, model: &str) -> Vec<String> {
+    if model.is_empty() { Vec::new() } else { vec![flag.to_string(), model.to_string()] }
+}
+
+fn plain(args: &[&str]) -> Vec<String> {
+    args.iter().map(|a| a.to_string()).collect()
+}
+
+fn grok_args(mode: PermissionMode, model: &str) -> Vec<String> {
+    let level = match mode {
+        PermissionMode::BypassPermissions => "bypassPermissions",
+        PermissionMode::Auto => "auto",
+        PermissionMode::AcceptEdits => "acceptEdits",
+        PermissionMode::Default | PermissionMode::Plan => "default",
+    };
+    [plain(&["--permission-mode", level, "agent"]), model_flag("-m", model), plain(&["stdio"])].concat()
+}
+
+fn gemini_args(mode: PermissionMode, model: &str) -> Vec<String> {
+    let approval = match mode {
+        PermissionMode::BypassPermissions => plain(&["--yolo"]),
+        PermissionMode::AcceptEdits => plain(&["--approval-mode", "auto_edit"]),
+        _ => Vec::new(),
+    };
+    [plain(&["--acp"]), approval, model_flag("-m", model)].concat()
+}
+
+fn copilot_args(_: PermissionMode, _: &str) -> Vec<String> {
+    plain(&["--acp", "--stdio"])
+}
+
+fn cursor_args(mode: PermissionMode, model: &str) -> Vec<String> {
+    let approval = match mode {
+        PermissionMode::BypassPermissions => plain(&["--force"]),
+        PermissionMode::Auto => plain(&["--auto-review"]),
+        _ => Vec::new(),
+    };
+    [approval, model_flag("--model", model), plain(&["acp"])].concat()
+}
+
+fn acp_word(_: PermissionMode, _: &str) -> Vec<String> {
+    plain(&["acp"])
+}
+
+fn qwen_args(mode: PermissionMode, _: &str) -> Vec<String> {
+    let approval = match mode {
+        PermissionMode::BypassPermissions => plain(&["--yolo"]),
+        PermissionMode::Auto => plain(&["--approval-mode", "auto"]),
+        PermissionMode::AcceptEdits => plain(&["--approval-mode", "auto-edit"]),
+        _ => Vec::new(),
+    };
+    [plain(&["--acp"]), approval].concat()
+}
+
+fn kimi_args(_: PermissionMode, model: &str) -> Vec<String> {
+    [model_flag("-m", model), plain(&["acp"])].concat()
+}
+
+fn droid_args(_: PermissionMode, _: &str) -> Vec<String> {
+    plain(&["exec", "-o", "acp"])
+}
+
+fn cline_args(_: PermissionMode, _: &str) -> Vec<String> {
+    plain(&["--acp", "--auto-approve", "false"])
+}
+
+fn kiro_args(_: PermissionMode, _: &str) -> Vec<String> {
+    plain(&["acp", "--agent-engine=v3", "--auth-method=cli"])
+}
+
+fn deepseek_args(_: PermissionMode, _: &str) -> Vec<String> {
+    plain(&["--profile", "acp"])
 }
 
 const fn local(id: &'static str, name: &'static str, url: &'static str, key_page: &'static str) -> Engine {
-    Engine { id, name, kind: Kind::Api, url, key_env: "", needs_key: false, key_page, models: &[], default_model: "" }
+    Engine { id, name, kind: Kind::Api, url, needs_key: false, key_page, ..BLANK }
 }
 
 /// Every engine, in the order the picker shows them.
@@ -67,7 +196,7 @@ pub const ALL: &[Engine] = &[
         needs_key: false,
         key_page: "https://claude.com/product/claude-code",
         models: &[("", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")],
-        default_model: "",
+        ..BLANK
     },
     api(
         "openai",
@@ -135,7 +264,56 @@ pub const ALL: &[Engine] = &[
     ),
     local("ollama", "Ollama (this computer)", "http://127.0.0.1:11434/v1", "https://ollama.com/download"),
     local("lmstudio", "LM Studio (this computer)", "http://127.0.0.1:1234/v1", "https://lmstudio.ai"),
+    // Agent programs (after OpenMausBot's server/drivers/acp/, Apache-2.0).
+    agent("grok-cli", "Grok CLI", "grok", grok_args, "curl -fsSL https://x.ai/cli/install.sh | bash", "grok login", "https://x.ai/cli", &["cached_token", "grok.com"]),
+    agent("gemini", "Gemini CLI", "gemini", gemini_args, "npm install -g @google/gemini-cli", "gemini (then follow its sign-in)", "https://github.com/google-gemini/gemini-cli", &["gemini-api-key", "oauth-personal", "vertex-ai"]),
+    agent("copilot", "GitHub Copilot", "copilot", copilot_args, "npm install -g @github/copilot", "copilot login", "https://docs.github.com/en/copilot/reference/acp-server", &[]),
+    agent("cursor", "Cursor", "cursor-agent", cursor_args, "curl https://cursor.com/install -fsS | bash", "cursor-agent login", "https://cursor.com/docs/cli/installation", &[]),
+    agent("opencode", "OpenCode", "opencode", acp_word, "npm install -g opencode-ai", "opencode auth login", "https://opencode.ai/docs/", &[]),
+    agent("qwen", "Qwen Code", "qwen", qwen_args, "npm install -g @qwen-code/qwen-code", "qwen (then follow its sign-in)", "https://qwenlm.github.io/qwen-code-docs/", &[]),
+    agent("kimi", "Kimi Code", "kimi", kimi_args, "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash", "kimi login", "https://moonshotai.github.io/kimi-code/", &[]),
+    agent("droid", "Droid (Factory)", "droid", droid_args, "curl -fsSL https://app.factory.ai/cli | sh", "droid", "https://docs.factory.ai/droid-cli/quickstart", &[]),
+    agent("cline", "Cline", "cline", cline_args, "npm install -g cline", "cline auth", "https://docs.cline.bot/usage/acp", &[]),
+    agent("kiro", "Kiro", "kiro-cli", kiro_args, "curl -fsSL https://cli.kiro.dev/install | bash", "kiro-cli login", "https://kiro.dev/docs/getting-started/installation/", &["aws-builder-id", "aws-iam-identity-center", "kiro-login"]),
+    agent("hermes", "Hermes", "hermes", acp_word, "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash", "hermes setup", "https://hermes-agent.nousresearch.com/docs/", &[]),
+    agent("deepseek-harness", "DeepSeek Harness", "dsh", deepseek_args, "npm install -g @deepseek-ai/dsh", "dsh", "https://github.com/deepseek-ai/deepseek-harness", &[]),
+    agent("omp", "OMP", "omp", acp_word, "npm install -g @oh-my-pi/pi-coding-agent", "omp login", "https://omp.sh", &["agent"]),
+    agent("command-code", "Command Code", "command-code", acp_word, "npm install -g command-code", "cmd login", "https://commandcode.ai/docs/acp", &[]),
 ];
+
+/// An agent's program: `CATBOT_AGENT_<ID>` if set (`CATBOT_AGENT_GROK_CLI=/opt/grok/bin/grok`),
+/// else found by name.
+pub fn agent_program(engine: &Engine) -> Option<std::path::PathBuf> {
+    let variable = format!("CATBOT_AGENT_{}", engine.id.to_uppercase().replace('-', "_"));
+    if let Some(path) = std::env::var_os(&variable).filter(|p| !p.is_empty()) {
+        let path = std::path::PathBuf::from(path);
+        return path.is_file().then_some(path);
+    }
+    find_program(engine.program)
+}
+
+/// Where an agent's program is: on the PATH, or in the folders installers usually use.
+pub fn find_program(program: &str) -> Option<std::path::PathBuf> {
+    if program.is_empty() {
+        return None;
+    }
+    let given = std::path::Path::new(program);
+    if given.is_absolute() {
+        return given.is_file().then(|| given.to_path_buf());
+    }
+    let home = crate::store::user_home();
+    let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+    dirs.extend([home.join(".local/bin"), home.join(".npm-global/bin"), home.join("bin"), home.join(".bun/bin"), home.join(".cargo/bin")]);
+    if let Some(appdata) = std::env::var_os("APPDATA") {
+        dirs.push(std::path::PathBuf::from(appdata).join("npm"));
+    }
+    let names: Vec<String> = if cfg!(windows) {
+        ["exe", "cmd", "bat"].iter().map(|ext| format!("{program}.{ext}")).collect()
+    } else {
+        vec![program.to_string()]
+    };
+    dirs.iter().flat_map(|dir| names.iter().map(move |name| dir.join(name))).find(|path| path.is_file())
+}
 
 pub fn find(id: &str) -> Option<&'static Engine> {
     ALL.iter().find(|engine| engine.id == id)
@@ -211,6 +389,17 @@ mod tests {
         assert_eq!(ids.len(), ALL.len());
         assert!(find("xai").is_some_and(|e| e.kind == Kind::Api && e.needs_key));
         assert!(find("ollama").is_some_and(|e| !e.needs_key));
+        assert!(find("grok-cli").is_some_and(|e| e.kind == Kind::Agent && e.program == "grok"));
+    }
+
+    #[test]
+    fn agents_get_their_flags() {
+        let grok = find("grok-cli").unwrap();
+        assert_eq!((grok.args)(PermissionMode::AcceptEdits, "grok-4"), ["--permission-mode", "acceptEdits", "agent", "-m", "grok-4", "stdio"]);
+        assert_eq!((grok.args)(PermissionMode::Default, ""), ["--permission-mode", "default", "agent", "stdio"]);
+        assert_eq!((find("gemini").unwrap().args)(PermissionMode::BypassPermissions, ""), ["--acp", "--yolo"]);
+        assert_eq!((find("cursor").unwrap().args)(PermissionMode::Default, "gpt-5"), ["--model", "gpt-5", "acp"]);
+        assert_eq!((find("copilot").unwrap().args)(PermissionMode::Default, ""), ["--acp", "--stdio"]);
     }
 
     #[test]

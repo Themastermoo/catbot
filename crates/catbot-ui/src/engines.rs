@@ -1,4 +1,5 @@
-//! Which AI a bot runs on, in its settings: the AI, its model, and the AI's key.
+//! Which AI a bot runs on, in its settings: the AI, its model, and the AI's key (or, for an
+//! agent program, whether it's installed and how to install and sign it in).
 //!
 //! The list comes from `GET /api/engines` (no key ever comes back, only its last four
 //! characters). Picking another AI is a change to the bot like any other; its models come from
@@ -67,7 +68,8 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
         _ => suggested.into_iter().filter(|(id, _)| !id.is_empty()).collect(),
     };
     let default_model = str_of(&engine, "defaultModel");
-    let default_label = if engine_id == "claude" {
+    let agent = engine["kind"] == "agent";
+    let default_label = if engine_id == "claude" || agent {
         "Default".to_string()
     } else if default_model.is_empty() {
         "Pick a model".to_string()
@@ -92,12 +94,34 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
                     {
                         let id = str_of(&e, "id");
                         let name = str_of(&e, "name");
-                        let shown = if e["ready"] == true { name } else { format!("{name} (needs a key)") };
+                        let shown = match (e["ready"] == true, e["kind"].as_str()) {
+                            (true, _) => name,
+                            (false, Some("agent")) => format!("{name} (not installed)"),
+                            (false, _) => format!("{name} (needs a key)"),
+                        };
                         rsx! { option { key: "{id}", value: "{id}", selected: id == picked, "{shown}" } }
                     }
                 }
             }
         }
+        if agent {
+            // An agent program takes the model by name, or uses its own.
+            label { class: "mt-3 {LABEL}", "Model"
+                input {
+                    key: "{engine_id}",
+                    class: FIELD,
+                    "data-model": true,
+                    initial_value: "{bot.model}",
+                    placeholder: "Its own default",
+                    autocomplete: "off",
+                    onchange: {
+                        let engine_id = engine_id.clone();
+                        move |e: FormEvent| change.call(json!({ "modelSelection": { "instanceId": engine_id, "model": e.value().trim() } }))
+                    },
+                }
+            }
+            AgentBox { engine: engine.clone() }
+        } else {
         label { class: "mt-3 {LABEL}", "Model"
             select {
                 class: FIELD,
@@ -114,6 +138,35 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
         }
         if engine["kind"] == "api" {
             KeyBox { engine: engine.clone() }
+        }
+        }
+    }
+}
+
+/// An agent program: installed or not, and how to install it and sign it in.
+#[component]
+fn AgentBox(engine: Value) -> Element {
+    let name = str_of(&engine, "name");
+    let install = str_of(&engine, "install");
+    let sign_in = str_of(&engine, "signIn");
+    let page = str_of(&engine, "keyPage");
+    let installed = engine["installed"] == true;
+    let id = str_of(&engine, "id");
+    rsx! {
+        div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-agent": "{id}",
+            if installed {
+                p { "{name} is installed. It uses its own sign-in and plan; if it isn't signed in yet, run this once in a terminal:" }
+                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+            } else {
+                p { "{name} isn't installed on this computer. Install it in a terminal:" }
+                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{install}" }
+                p { class: "mt-1", "then sign in:" }
+                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+            }
+            p { class: "mt-1.5 text-[12px] text-ink-tertiary",
+                "More: "
+                a { href: "{page}", target: "_blank", rel: "noreferrer", class: "text-accent underline", "{page}" }
+            }
         }
     }
 }

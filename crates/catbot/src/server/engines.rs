@@ -77,7 +77,12 @@ fn list(app: &App) -> Vec<Value> {
 fn describe(app: &App, engine: &Engine) -> Value {
     let saved = app.with_store(|store| store.engine_key(engine.id)).flatten();
     let access = engines::access(engine, saved.as_ref());
-    let ready = engine.kind == Kind::Claude || access.is_some();
+    let installed = (engine.kind == Kind::Agent).then(|| engines::agent_program(engine).is_some());
+    let ready = match engine.kind {
+        Kind::Claude => true,
+        Kind::Api => access.is_some(),
+        Kind::Agent => installed == Some(true),
+    };
     json!({
         "id": engine.id,
         "name": engine.name,
@@ -90,5 +95,8 @@ fn describe(app: &App, engine: &Engine) -> Value {
         "keyPage": engine.key_page,
         "models": engine.models.iter().map(|(id, label)| json!({ "id": id, "label": label })).collect::<Vec<_>>(),
         "defaultModel": engine.default_model,
+        "installed": installed,
+        "install": engine.install,
+        "signIn": engine.sign_in,
     })
 }
