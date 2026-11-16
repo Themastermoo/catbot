@@ -13,6 +13,13 @@ use crate::bots::Bot;
 use crate::live::State;
 use crate::mascots::{BotMark, COLORS, MARKS};
 
+/// The Windows app's two places, and a word about a switch it had to make (`link.rs`).
+#[derive(Clone, Copy, PartialEq)]
+pub struct Places {
+    pub place: Signal<crate::link::Place>,
+    pub notice: Signal<Option<String>>,
+}
+
 /// Which bot is open, and whether its settings panel is: shared by the sidebar, chat and panel.
 #[derive(Clone, Copy)]
 pub struct Ui {

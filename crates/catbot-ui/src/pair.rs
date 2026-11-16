@@ -122,10 +122,19 @@ async fn pair(url: &str, code: &str, name: &str) -> Result<Link, String> {
 }
 
 #[component]
-pub fn PairScreen(on_paired: EventHandler<()>, removed: bool) -> Element {
+pub fn PairScreen(
+    on_paired: EventHandler<()>,
+    removed: bool,
+    /// Pairing a computer (the Windows app reaching home) rather than the phone: typed, not
+    /// scanned, over the app, with a Cancel.
+    #[props(default)]
+    computer: bool,
+    on_cancel: Option<EventHandler<()>>,
+) -> Element {
+    let device = if computer { "Work PC" } else { "Phone" };
     let mut url = use_signal(String::new);
     let mut code = use_signal(String::new);
-    let mut name = use_signal(|| "Phone".to_string());
+    let mut name = use_signal(|| device.to_string());
     let mut busy = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
 
@@ -137,7 +146,8 @@ pub fn PairScreen(on_paired: EventHandler<()>, removed: bool) -> Element {
         problem.set(None);
         let device = name.peek().trim().to_string();
         spawn(async move {
-            match pair(&address, &typed, if device.is_empty() { "Phone" } else { &device }).await {
+            let device = if device.is_empty() { if computer { "Work PC".to_string() } else { "Phone".to_string() } } else { device };
+            match pair(&address, &typed, &device).await {
                 Ok(paired) => match link::save(paired) {
                     Ok(()) => on_paired.call(()),
                     Err(err) => problem.set(Some(err)),
@@ -183,18 +193,22 @@ pub fn PairScreen(on_paired: EventHandler<()>, removed: bool) -> Element {
     let submit = move |_| send(url.peek().clone(), code.peek().clone());
 
     rsx! {
-        div { "data-pair-screen": true, class: "flex min-h-screen flex-col items-center justify-center gap-5 bg-app px-6 py-10 text-ink",
+        div { "data-pair-screen": true, class: if computer { "fixed inset-0 z-50 flex flex-col items-center justify-center gap-5 overflow-y-auto bg-app px-6 py-10 text-ink" } else { "flex min-h-screen flex-col items-center justify-center gap-5 bg-app px-6 py-10 text-ink" },
             BotMark { color: "teal".to_string(), initial: "C".to_string(), size: 88, mark: "cat-visor".to_string() }
             div { class: "flex flex-col items-center gap-2 text-center",
-                h1 { class: "text-[22px] font-semibold", "Pair with Catbot" }
+                h1 { class: "text-[22px] font-semibold", if computer { "Pair with Catbot at home" } else { "Pair with Catbot" } }
                 p { class: "max-w-[340px] text-[14px] leading-[20px] text-ink-secondary",
-                    "On your computer, open Catbot, click the phone button at the top of the sidebar, then Pair a phone."
+                    if computer {
+                        "On your home computer, open Catbot, click the phone button at the top of the sidebar, then Pair a phone. Type the address and code it shows."
+                    } else {
+                        "On your computer, open Catbot, click the phone button at the top of the sidebar, then Pair a phone."
+                    }
                 }
                 if removed {
                     p { role: "alert", class: "max-w-[340px] text-[14px] font-medium text-warning", "This phone was removed at home. Pair it again to carry on." }
                 }
             }
-            button {
+            if !computer { button {
                 r#type: "button",
                 "data-scan": true,
                 disabled: busy(),
@@ -206,7 +220,7 @@ pub fn PairScreen(on_paired: EventHandler<()>, removed: bool) -> Element {
                 span { class: "h-px flex-1 bg-hairline" }
                 "or type it"
                 span { class: "h-px flex-1 bg-hairline" }
-            }
+            } }
             div { class: "flex w-full max-w-[340px] flex-col gap-3",
                 label { class: "flex flex-col gap-1 text-[13px] text-ink-secondary",
                     "Catbot's address"
@@ -217,8 +231,8 @@ pub fn PairScreen(on_paired: EventHandler<()>, removed: bool) -> Element {
                     input { id: "pair-code", placeholder: "ABCDE-FGHJK", autocomplete: "off", autocapitalize: "characters", class: "{FIELD} font-mono tracking-[0.1em]", oninput: move |e| code.set(e.value()) }
                 }
                 label { class: "flex flex-col gap-1 text-[13px] text-ink-secondary",
-                    "This phone's name"
-                    input { id: "pair-name", initial_value: "Phone", autocomplete: "off", class: FIELD, oninput: move |e| name.set(e.value()) }
+                    if computer { "This computer's name" } else { "This phone's name" }
+                    input { id: "pair-name", initial_value: "{device}", autocomplete: "off", class: FIELD, oninput: move |e| name.set(e.value()) }
                 }
                 button {
                     r#type: "button",
@@ -227,6 +241,15 @@ pub fn PairScreen(on_paired: EventHandler<()>, removed: bool) -> Element {
                     class: "mt-1 rounded-full bg-raised px-4 py-2.5 text-[15px] font-semibold text-ink hover:bg-control disabled:opacity-50",
                     onclick: submit,
                     if busy() { "Pairing…" } else { "Pair" }
+                }
+                if let Some(cancel) = on_cancel {
+                    button {
+                        r#type: "button",
+                        "data-pair-cancel": true,
+                        class: "rounded-full px-4 py-2 text-[14px] font-medium text-ink-secondary hover:bg-raised",
+                        onclick: move |_| cancel.call(()),
+                        "Cancel"
+                    }
                 }
             }
             if let Some(err) = problem() {

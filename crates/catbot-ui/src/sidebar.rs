@@ -35,8 +35,12 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     let empty = bots.read().is_empty();
     // On a phone the list gives way to the open chat.
     let phone = if (ui.showing_chat)() { "max-md:hidden" } else { "" };
-    // Pairing other devices is done at home; the phone app has no devices button.
-    let at_home = !crate::link::pairs();
+    // Pairing other devices is done at home: not on the phone, nor in the Windows app.
+    let at_home = !crate::link::pairs() && !crate::link::has_own();
+    // Taken every time (hooks keep their order), used only in the Windows app.
+    let all_places = use_context::<crate::settings::Places>();
+    let places = crate::link::has_own().then_some(all_places);
+    let mut pairing_home = use_signal(|| false);
     rsx! {
         aside {
             "aria-label": "Bots",
@@ -89,6 +93,20 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             }
             if remembering() {
                 crate::memory::MemoryDialog { on_close: move |_| remembering.set(false) }
+            }
+            if let Some(places) = places {
+                PlaceSwitch { places, on_pair: move |_| pairing_home.set(true) }
+                if pairing_home() {
+                    crate::pair::PairScreen {
+                        removed: false,
+                        computer: true,
+                        on_cancel: move |_| pairing_home.set(false),
+                        on_paired: move |_| {
+                            pairing_home.set(false);
+                            go_to(places, crate::link::Place::Home);
+                        },
+                    }
+                }
             }
             div { class: "px-3 pt-1 pb-3",
                 div { class: "flex h-8 items-center gap-2 rounded-full px-3 focus-within:ring-focus {ELEVATED_CONTROL}",
@@ -280,6 +298,56 @@ fn SearchIcon() -> Element {
             stroke_linejoin: "round",
             path { d: "m21 21-4.34-4.34" }
             circle { cx: "11", cy: "11", r: "8" }
+        }
+    }
+}
+
+/// Moves the app to a place and keeps the choice.
+fn go_to(mut places: crate::settings::Places, place: crate::link::Place) {
+    crate::link::set_place(place);
+    places.notice.set(None);
+    places.place.set(place);
+}
+
+/// The Windows app's switch between its own bots and home's.
+#[component]
+fn PlaceSwitch(places: crate::settings::Places, on_pair: EventHandler<()>) -> Element {
+    use crate::link::Place;
+    let here = (places.place)();
+    let tab = |on: bool| {
+        if on { "flex-1 rounded-full bg-panel px-3 py-1 font-medium text-ink shadow-sm" } else { "flex-1 rounded-full px-3 py-1 text-ink-secondary hover:text-ink" }
+    };
+    rsx! {
+        div { class: "px-3 pb-2",
+            div { role: "tablist", "aria-label": "Which Catbot", "data-place-switch": true, class: "flex rounded-full bg-raised p-0.5 text-[13px]",
+                button {
+                    r#type: "button",
+                    role: "tab",
+                    "aria-selected": here == Place::ThisPc,
+                    "data-place": "this-pc",
+                    class: tab(here == Place::ThisPc),
+                    onclick: move |_| go_to(places, Place::ThisPc),
+                    "This PC"
+                }
+                button {
+                    r#type: "button",
+                    role: "tab",
+                    "aria-selected": here == Place::Home,
+                    "data-place": "home",
+                    class: tab(here == Place::Home),
+                    onclick: move |_| {
+                        if crate::link::current().is_some() {
+                            go_to(places, Place::Home);
+                        } else {
+                            on_pair.call(());
+                        }
+                    },
+                    "Home"
+                }
+            }
+            if let Some(notice) = (places.notice)() {
+                p { role: "status", class: "mt-2 px-1 text-[12px] leading-[17px] text-warning", "{notice}" }
+            }
         }
     }
 }

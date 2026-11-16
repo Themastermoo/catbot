@@ -9,6 +9,8 @@ mod chat;
 mod chats;
 mod devices;
 mod link;
+#[cfg(not(target_arch = "wasm32"))]
+mod local;
 mod pair;
 mod events;
 mod live;
@@ -45,6 +47,8 @@ fn main() {
             Ok(icon) => config = config.with_icon(icon),
             Err(err) => eprintln!("catbot: couldn't load the window icon: {err}"),
         }
+        // The Windows app starts its own Catbot, which stops when the app closes.
+        local::start();
         dioxus::LaunchBuilder::desktop().with_cfg(config).launch(Root);
     }
     #[cfg(not(feature = "desktop"))]
@@ -85,6 +89,10 @@ fn Root() -> Element {
     let mut paired = use_signal(|| !link::pairs() || link::current().is_some());
     // Set once a paired phone has been told it isn't paired any more.
     let mut removed = use_signal(|| false);
+    // Where the Windows app is talking (always "this PC" elsewhere, or home for the phone).
+    let mut place = use_signal(link::place);
+    let mut notice = use_signal(|| None::<String>);
+    use_context_provider(|| settings::Places { place, notice });
     rsx! {
         document::Link { rel: "icon", r#type: "image/svg+xml", href: ICON }
         document::Link { rel: "icon", r#type: "image/png", sizes: "32x32", href: ICON_SMALL }
@@ -93,10 +101,19 @@ fn Root() -> Element {
         document::Stylesheet { href: STYLES }
         document::Stylesheet { href: MASCOT_STYLES }
         if paired() {
-            App { on_unpaired: move |_| {
-                removed.set(true);
-                paired.set(false);
-            } }
+            // Keyed by place, so switching starts the app afresh against the other Catbot.
+            for here in std::iter::once(place()) {
+                App { key: "{here:?}", place: here, on_unpaired: move |_| {
+                    if link::has_own() {
+                        link::set_place(link::Place::ThisPc);
+                        notice.set(Some("Home removed this computer. Pair it again to reach home.".into()));
+                        place.set(link::Place::ThisPc);
+                    } else {
+                        removed.set(true);
+                        paired.set(false);
+                    }
+                } }
+            }
         } else {
             pair::PairScreen { removed: removed(), on_paired: move |_| {
                 removed.set(false);
@@ -107,15 +124,15 @@ fn Root() -> Element {
 }
 
 #[component]
-fn App(on_unpaired: EventHandler<()>) -> Element {
+fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let mut state = use_context_provider(|| Signal::new(live::State::default()));
     let mut selected = use_signal(|| None::<String>);
     let settings_open = use_signal(|| false);
     // On a phone, the bot list and a chat take turns filling the screen.
     let showing_chat = use_signal(|| false);
     use_context_provider(|| settings::Ui { selected, settings_open, showing_chat });
-    // A paired phone that home has removed: back to pairing.
-    let unpaired = move || link::pairs() && link::current().is_none();
+    // Talking to home through the link, and home has removed this device.
+    let unpaired = move || place == link::Place::Home && link::current().is_none();
     let mut problem = use_signal(|| None::<String>);
 
     // Fetches the bot list, and has every open conversation fetched again: at start, and after

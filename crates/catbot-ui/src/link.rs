@@ -1,9 +1,15 @@
-//! The phone app's link to Catbot at home: the public address and this device's key, kept
-//! after pairing (`pair.rs`) and sent with every request. Without a link the app talks to
-//! Catbot on this computer, as the desktop app always does.
+//! The app's link to Catbot at home: the public address and this device's key, kept after
+//! pairing (`pair.rs`) and sent with every request.
 //!
-//! Kept in a small JSON file: in the Android app, in its own private storage; elsewhere only
-//! if `CATBOT_LINK_FILE` names one (for trying pairing out on a computer).
+//! - The phone app has only the link: it pairs before anything else.
+//! - The Windows app has two places (`has_own`): Catbot on this PC, which it starts itself
+//!   (`local.rs`), and Catbot at home through the link, paired when first wanted. A switch in
+//!   the sidebar picks one; the choice is kept.
+//! - The Linux desktop app is at home: no link.
+//!
+//! Kept in a small JSON file: in the Android app, in its own private storage; on Windows in
+//! `%LOCALAPPDATA%\Catbot\home-link.json`; elsewhere only if `CATBOT_LINK_FILE` names one (for
+//! trying pairing out on a computer; `CATBOT_PLACES=1` tries the two places).
 
 #![cfg_attr(target_arch = "wasm32", allow(dead_code))]
 
@@ -25,15 +31,64 @@ static CURRENT: RwLock<Option<Option<Link>>> = RwLock::new(None);
 
 /// Where the link is kept, if this kind of app keeps one.
 fn file() -> Option<std::path::PathBuf> {
+    if let Some(file) = std::env::var_os("CATBOT_LINK_FILE") {
+        return Some(file.into());
+    }
     #[cfg(target_os = "android")]
     return Some(std::path::PathBuf::from("/data/data/com.moo.catbot/files/catbot-link.json"));
-    #[cfg(not(target_os = "android"))]
-    return std::env::var_os("CATBOT_LINK_FILE").map(std::path::PathBuf::from);
+    #[cfg(windows)]
+    return std::env::var_os("LOCALAPPDATA").map(|dir| std::path::PathBuf::from(dir).join("Catbot").join("home-link.json"));
+    #[cfg(not(any(target_os = "android", windows)))]
+    return None;
 }
 
-/// Whether this app is one that pairs (the phone app), rather than talking to this computer.
+/// Whether this app runs its own Catbot beside the link to home (the Windows app).
+pub fn has_own() -> bool {
+    cfg!(all(windows, not(target_arch = "wasm32"))) || std::env::var_os("CATBOT_PLACES").is_some_and(|v| v == "1")
+}
+
+/// Whether this app must pair before it can do anything (the phone app).
 pub fn pairs() -> bool {
-    file().is_some()
+    file().is_some() && !has_own()
+}
+
+/// Where the Windows app is talking: Catbot on this PC, or Catbot at home.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Place {
+    ThisPc,
+    Home,
+}
+
+fn place_file() -> Option<std::path::PathBuf> {
+    file().map(|f| f.with_file_name("place"))
+}
+
+/// The place chosen last; at home only while paired.
+pub fn place() -> Place {
+    if !has_own() {
+        return if current().is_some() { Place::Home } else { Place::ThisPc };
+    }
+    let home = place_file().and_then(|f| std::fs::read_to_string(f).ok()).is_some_and(|s| s.trim() == "home");
+    if home && current().is_some() { Place::Home } else { Place::ThisPc }
+}
+
+/// Keeps the choice of place.
+pub fn set_place(place: Place) {
+    if let Some(file) = place_file() {
+        if let Some(dir) = file.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(file, if place == Place::Home { "home" } else { "this-pc" });
+    }
+}
+
+/// The link requests go through now: the phone's always; the Windows app's only while it's at
+/// home.
+pub fn active() -> Option<Link> {
+    if has_own() && place() != Place::Home {
+        return None;
+    }
+    current()
 }
 
 /// The link, if paired.

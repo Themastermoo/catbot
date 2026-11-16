@@ -114,6 +114,10 @@ enum Command {
         /// or "off".
         #[arg(long, default_value = "127.0.0.1:8789")]
         remote: String,
+        /// Stop when this program's input closes (the Windows app starts Catbot this way, so
+        /// Catbot stops with the app).
+        #[arg(long)]
+        stop_with_input: bool,
     },
     /// Pass every request through to the reference server and record it.
     Record {
@@ -259,7 +263,15 @@ async fn run() -> Result<(), BoxError> {
             }
             Ok(())
         }
-        Command::Serve { listen, upstream, cli, record, ui, remote } => {
+        Command::Serve { listen, upstream, cli, record, ui, remote, stop_with_input } => {
+            if stop_with_input {
+                tokio::spawn(async {
+                    let mut input = tokio::io::stdin();
+                    let _ = tokio::io::copy(&mut input, &mut tokio::io::sink()).await;
+                    eprintln!("catbot: the app closed, so Catbot stops");
+                    std::process::exit(0);
+                });
+            }
             let remote = match remote.trim() {
                 "off" | "" => None,
                 addr => Some(addr.parse::<SocketAddr>().map_err(|err| format!("--remote {addr}: {err}"))?),

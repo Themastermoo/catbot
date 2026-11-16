@@ -34,7 +34,7 @@ pub async fn call(method: &str, path: &str, body: Option<&Value>) -> Result<Valu
 /// Where `catbot serve` is: the paired public address (the phone app), else this computer.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn server() -> String {
-    if let Some(link) = crate::link::current() {
+    if let Some(link) = crate::link::active() {
         return link.url;
     }
     std::env::var("CATBOT_URL").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "http://127.0.0.1:8788".into()).trim_end_matches('/').to_string()
@@ -44,7 +44,7 @@ pub fn server() -> String {
 #[cfg(not(target_arch = "wasm32"))]
 pub fn request(method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
     let request = client().request(method, format!("{}{path}", server()));
-    match crate::link::current() {
+    match crate::link::active() {
         Some(link) => request.bearer_auth(link.key),
         None => request,
     }
@@ -53,7 +53,7 @@ pub fn request(method: reqwest::Method, path: &str) -> reqwest::RequestBuilder {
 /// After an answer: a paired device that's told it isn't paired forgets its link.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn check_paired(status: u16) {
-    if status == 401 && crate::link::current().is_some() {
+    if status == 401 && crate::link::active().is_some() {
         crate::link::forget();
     }
 }
