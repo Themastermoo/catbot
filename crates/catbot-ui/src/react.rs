@@ -1,5 +1,5 @@
 //! Reactions on messages: the emoji under a message, the quick row that appears on hover, and
-//! the full picker behind its +.
+//! the full picker behind its +. The hover row also holds "Branch from here" (`chats::branch`).
 //!
 //! Choosing an emoji posts it (`POST /api/threads/:thread/messages/:id/reactions`); the
 //! server's `message.patch` brings the message back with it, everywhere it's open. Clicking an
@@ -23,7 +23,16 @@ pub fn send(thread: String, message: String, emoji: String, on: bool) {
 
 /// A message's reactions, and the hover row for adding one. `end` lines them up on the right.
 #[component]
-pub fn Reactions(thread: String, message: String, reactions: Vec<String>, end: bool) -> Element {
+pub fn Reactions(
+    thread: String,
+    message: String,
+    reactions: Vec<String>,
+    end: bool,
+    #[props(default)] bot_id: String,
+    #[props(default)] working: bool,
+) -> Element {
+    let state = use_context::<Signal<crate::live::State>>();
+    let ui = use_context::<crate::settings::Ui>();
     // Messages still on their way, or still being written, can't be reacted to yet.
     if thread.is_empty() || message.starts_with("optimistic-") || message == "live" {
         return rsx! {};
@@ -89,6 +98,30 @@ pub fn Reactions(thread: String, message: String, reactions: Vec<String>, end: b
                         line { x1: "15", x2: "15.01", y1: "9", y2: "9" }
                         path { d: "M16 5h6" }
                         path { d: "M19 2v6" }
+                    }
+                }
+                if !bot_id.is_empty() {
+                    {
+                        let (bot_id, thread, message) = (bot_id.clone(), thread.clone(), message.clone());
+                        let label = if working { "Branch once the bot has finished" } else { "Branch from here: a new chat with everything up to this message" };
+                        rsx! {
+                            button {
+                                r#type: "button",
+                                "data-branch": true,
+                                "aria-label": "Branch from here",
+                                title: "{label}",
+                                disabled: working,
+                                class: "flex size-7 items-center justify-center rounded-full text-ink-tertiary hover:bg-raised hover:text-ink disabled:opacity-40",
+                                onclick: move |_| crate::chats::branch(state, ui, bot_id.clone(), thread.clone(), message.clone()),
+                                // Lucide `GitBranch` (ISC).
+                                svg { "aria-hidden": "true", width: "15", height: "15", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                                    line { x1: "6", x2: "6", y1: "3", y2: "15" }
+                                    circle { cx: "18", cy: "6", r: "3" }
+                                    circle { cx: "6", cy: "18", r: "3" }
+                                    path { d: "M18 9a9 9 0 0 1-9 9" }
+                                }
+                            }
+                        }
                     }
                 }
             }

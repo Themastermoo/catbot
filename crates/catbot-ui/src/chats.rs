@@ -31,6 +31,23 @@ pub fn open(mut state: Signal<State>, mut ui: Ui, bot_id: &str, thread: &str) {
     });
 }
 
+/// Branches a chat from one of its messages (`POST …/tasks/:thread/branch`) and shows the branch.
+pub fn branch(mut state: Signal<State>, mut ui: Ui, bot_id: String, thread: String, message: String) {
+    spawn(async move {
+        let path = format!("/api/bots/{bot_id}/tasks/{thread}/branch");
+        let Ok(answer) = api::post(&path, &json!({ "messageId": message })).await else { return };
+        let Some(branch) = answer["task"]["threadId"].as_str().map(str::to_string) else { return };
+        if let Some(bot) = state.write().bots.iter_mut().find(|b| b.id == bot_id) {
+            if let Some(newer) = Bot::from_wire(&answer["bot"]) {
+                bot.update_from(newer);
+            }
+            bot.thread_id = branch;
+        }
+        ui.selected.set(Some(bot_id));
+        ui.showing_chat.set(true);
+    });
+}
+
 /// Starts a new chat with the bot and shows it.
 pub fn start(mut state: Signal<State>, mut ui: Ui, bot_id: String) {
     spawn(async move {

@@ -155,7 +155,12 @@ async fn run(
     }
 
     let item_id = format!("item-{turn_id}");
-    let mut result = drive(app, bot, &session, text, codex.clone(), thread, &item_id, &cancel, &emit).await;
+    // A fresh session (a branched chat, or one Claude lost) is shown what was said before.
+    let with_earlier = |session: &Session| match session {
+        Session::New(_) if bot.engine == engines::CLAUDE => format!("{}{text}", so_far(app, thread, request_id)),
+        _ => text.to_string(),
+    };
+    let mut result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit).await;
     let lost = result.outcome.as_ref().is_some_and(|o| !o.ok && o.result.as_deref().is_some_and(chat::says_lost))
         || result.errors.iter().any(|e| chat::says_lost(e));
     if matches!(session, Session::Resume(_)) && lost && !result.stopped {
@@ -165,7 +170,7 @@ async fn run(
         let note = "Claude no longer had this conversation, so it continued in a fresh one.";
         save_and_send(app, thread, Role::Note, note, None);
         session = Session::New(id);
-        result = drive(app, bot, &session, text, codex, thread, &item_id, &cancel, &emit).await;
+        result = drive(app, bot, &session, &with_earlier(&session), codex, thread, &item_id, &cancel, &emit).await;
     }
 
     // Close the cards of questions nobody answered before the turn ended.
@@ -409,6 +414,32 @@ fn save_step(app: &Arc<App>, thread: &str, step: &Step) {
     };
     let detail = serde_json::to_value(step).ok();
     save_and_send(app, thread, Role::Step, &body, detail.as_ref());
+}
+
+/// The chat before message `before`, for a session that starts without it: the last 30 of the
+/// person's messages and the bot's replies, or nothing for a new chat.
+fn so_far(app: &App, thread: &str, before: i64) -> String {
+    let earlier: Vec<(bool, String)> = app
+        .with_store(|store| store.page(thread, Some(before), 30).map(|(page, _)| page))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| match m.role {
+            Role::Person => Some((true, super::attachments::person_text(&m))),
+            Role::Bot if !m.body.trim().is_empty() => Some((false, m.body)),
+            _ => None,
+        })
+        .collect();
+    if earlier.is_empty() {
+        return String::new();
+    }
+    let mut said = String::from("<conversation_so_far>\n");
+    for (person, text) in earlier {
+        let who = if person { "Person" } else { "You" };
+        let short: String = text.chars().take(4000).collect();
+        said.push_str(&format!("{who}: {short}\n\n"));
+    }
+    said.push_str("</conversation_so_far>\n\n");
+    said
 }
 
 /// Saves a message and sends it to every open interface.

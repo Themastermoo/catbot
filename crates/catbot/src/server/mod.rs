@@ -463,6 +463,7 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             open_chat(app, bot, thread, limit)
         }
         (Method::PATCH, ["tasks", thread]) => change_chat(app, bot, thread, json_body(req).await?),
+        (Method::POST, ["tasks", thread, "branch"]) => branch_chat(app, bot, thread, json_body(req).await?),
         (Method::DELETE, ["tasks", thread]) => delete_chat(app, bot, thread),
         (Method::POST, ["read"]) => Ok((StatusCode::OK, json!({ "ok": true }))),
         (Method::POST, ["interrupt"]) => {
@@ -621,6 +622,28 @@ fn new_chat(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     let wire = app.try_store(|store| app.wire_bot(store, &bot, None)).map_err(fail)?;
     app.announce_bot(&bot.id);
     Ok((StatusCode::CREATED, json!({ "bot": wire, "task": wire::task(&bot, &conversation, "idle") })))
+}
+
+/// `POST /api/bots/:id/tasks/:thread/branch` with `{ "messageId": … }`: a new chat holding this
+/// one up to that message, opened. The bot starts it fresh and is shown the messages so far.
+fn branch_chat(app: &Arc<App>, bot: Bot, thread: &str, body: Value) -> Answer {
+    let conversation = chat_of(app, &bot, thread)?;
+    if app.turns.busy(&conversation.id) {
+        return Err((StatusCode::CONFLICT, "wait for this bot to finish before branching the chat".into()));
+    }
+    let upto = body["messageId"].as_str().and_then(wire::parse_message_id).ok_or_else(|| bad("branch from which message?"))?;
+    app.try_store(|store| store.message_in(&conversation.id, upto))
+        .map_err(fail)?
+        .ok_or((StatusCode::NOT_FOUND, "no such message in this chat".to_string()))?;
+    let name = conversation.title.clone().unwrap_or_else(|| "Chat".into());
+    let short: String = name.chars().take(100).collect();
+    let branch = app
+        .try_store(|store| store.branch_conversation(&conversation, upto, &format!("{short} (branch)")))
+        .map_err(fail)?;
+    let branch = chat_of(app, &bot, &branch.id)?;
+    let wire = app.try_store(|store| app.wire_bot(store, &bot, None)).map_err(fail)?;
+    app.announce_bot(&bot.id);
+    Ok((StatusCode::CREATED, json!({ "bot": wire, "task": wire::task(&bot, &branch, "idle") })))
 }
 
 /// `POST /api/bots/:id/tasks/:thread`: the bot opens to this chat from now on. Answers with

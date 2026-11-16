@@ -331,7 +331,7 @@ pub fn Chat(bot: Bot) -> Element {
                             }
                             {
                                 match item {
-                                    Item::One(m) => rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone() } },
+                                    Item::One(m) => rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone(), bot_id: bot.id.clone(), working } },
                                     Item::Run(steps) => rsx! { Run { steps, bot_name: bot.name.clone(), asking } },
                                 }
                             }
@@ -772,7 +772,14 @@ fn EmptyChat(bot: Bot) -> Element {
 
 /// One message: the person's bubble on the right, the bot's reply on the left, a step, or a card.
 #[component]
-fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] asking: bool, #[props(default)] thread: String) -> Element {
+fn Row(
+    message: Msg,
+    #[props(default)] bot_name: String,
+    #[props(default)] asking: bool,
+    #[props(default)] thread: String,
+    #[props(default)] bot_id: String,
+    #[props(default)] working: bool,
+) -> Element {
     let when = clock(message.at);
     let full_time = full_date(message.at);
     match &message.body {
@@ -789,7 +796,7 @@ fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] askin
                     }
                 }
                 }
-                crate::react::Reactions { thread: thread.clone(), message: message.id.clone(), reactions: message.reactions.clone(), end: true }
+                crate::react::Reactions { thread: thread.clone(), message: message.id.clone(), reactions: message.reactions.clone(), end: true, bot_id: bot_id.clone(), working }
             }
         },
         Body::Reply(text) => {
@@ -807,7 +814,7 @@ fn Row(message: Msg, #[props(default)] bot_name: String, #[props(default)] askin
                         }
                         span { class: "ml-2 self-end pb-1 text-[11px] tabular-nums text-ink-tertiary opacity-0 transition-opacity group-hover:opacity-100", "{when}" }
                     }
-                    crate::react::Reactions { thread: thread.clone(), message: message.id.clone(), reactions: message.reactions.clone(), end: false }
+                    crate::react::Reactions { thread: thread.clone(), message: message.id.clone(), reactions: message.reactions.clone(), end: false, bot_id: bot_id.clone(), working }
                 }
             }
         }

@@ -613,6 +613,19 @@ impl Store {
         Ok(conversation)
     }
 
+    /// A new chat for the same bot holding a copy of this chat's messages up to and including
+    /// `upto`, which the bot then opens to. The copy starts without a Claude session.
+    pub fn branch_conversation(&self, from: &Conversation, upto: i64, title: &str) -> Result<Conversation, BoxError> {
+        let branch = self.new_conversation(&from.bot_id)?;
+        self.conn.execute(
+            "INSERT INTO messages (conversation_id, role, body, detail, at)
+             SELECT ?1, role, body, detail, at FROM messages WHERE conversation_id = ?2 AND id <= ?3 ORDER BY id",
+            params![branch.id, from.id, upto],
+        )?;
+        self.set_title(&branch.id, title, true)?;
+        Ok(branch)
+    }
+
     /// Names a chat. `by_person` marks a name the person chose.
     pub fn set_title(&self, id: &str, title: &str, by_person: bool) -> Result<(), BoxError> {
         self.conn.execute(

@@ -833,3 +833,45 @@ async fn reactions_show_on_messages_and_reach_the_bot_once() {
     assert!(!again["message"]["text"].as_str().unwrap().contains("reacted"));
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
 }
+
+#[tokio::test]
+async fn a_chat_branches_from_a_message_and_the_bot_is_shown_it() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let mut replies = Vec::new();
+    for words in ["Tomatoes or peppers?", "Go with peppers"] {
+        s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": words, "threadId": thread }))).await;
+        let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        replies.push(reply["message"]["id"].as_str().unwrap().to_string());
+        until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    }
+
+    // From the first reply: a new chat, opened, with the first exchange only.
+    let (status, branched) = s.call("POST", &format!("/api/bots/{bot}/tasks/{thread}/branch"), Some(json!({ "messageId": replies[0] }))).await;
+    assert_eq!(status, 201, "{branched}");
+    let branch = branched["task"]["threadId"].as_str().unwrap().to_string();
+    assert_ne!(branch, thread);
+    assert_eq!(branched["bot"]["threadId"], branch.as_str());
+    assert!(branched["task"]["title"].as_str().unwrap().ends_with("(branch)"), "{branched}");
+    let (_, page) = s.call("GET", &format!("/api/threads/{branch}/messages?limit=10"), None).await;
+    let texts: Vec<&str> = page["messages"].as_array().unwrap().iter().filter_map(|m| m["text"].as_str()).collect();
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert_eq!(texts[0], "Tomatoes or peppers?");
+    let (_, original) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=10"), None).await;
+    assert_eq!(original["messages"].as_array().unwrap().iter().filter(|m| m["text"].is_string()).count(), 4, "the original is untouched");
+
+    // The bot starts the branch fresh, shown the messages before the branch point only.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Actually, tomatoes", "threadId": branch }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["threadId"] == branch.as_str() && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    let said = reply["message"]["text"].as_str().unwrap();
+    assert!(said.contains("<conversation_so_far>") && said.contains("Person: Tomatoes or peppers?"), "{said}");
+    assert!(!said.contains("Go with peppers"), "{said}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Unknown messages are refused.
+    assert_eq!(s.call("POST", &format!("/api/bots/{bot}/tasks/{thread}/branch"), Some(json!({ "messageId": "cb-99999" }))).await.0, 404);
+}
