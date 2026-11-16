@@ -150,6 +150,7 @@ pub fn note(app: &App, chief: &Bot) -> String {
         note.push_str("\n\nChannels (group chats):\n");
         note.push_str(&rooms.join("\n"));
     }
+    note.push_str(super::team::CHIEF_NOTE);
     note
 }
 

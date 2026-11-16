@@ -10,6 +10,7 @@ pub mod attachments;
 pub mod backups;
 pub mod changes;
 pub mod channels;
+pub mod team;
 pub mod chief;
 pub mod handoffs;
 pub mod limits;
@@ -511,6 +512,13 @@ async fn fetch_upstream(app: &App, headers: &axum::http::HeaderMap, path: &str) 
 /// `POST /api/bots`: new bots made in the interface are Catbot bots.
 async fn create_bot(app: &Arc<App>, req: Request) -> Answer {
     let body = json_body(req).await?;
+    let bot = make_bot(app, &body)?;
+    let wire = app.try_store(|store| app.wire_bot(store, &bot, Some(50))).map_err(fail)?;
+    Ok((StatusCode::CREATED, json!({ "bot": wire })))
+}
+
+/// A new bot from a POST body (`name`, `soul`, and any other bot field), announced everywhere.
+pub(super) fn make_bot(app: &Arc<App>, body: &Value) -> Result<Bot, (StatusCode, String)> {
     let wanted = body["name"].as_str().filter(|n| !n.trim().is_empty()).unwrap_or("New bot");
     let bot = app.try_store(|store| {
         let name = store.free_name(wanted)?;
@@ -527,10 +535,20 @@ async fn create_bot(app: &Arc<App>, req: Request) -> Answer {
     apply_changes(&mut bot, &changes)?;
     app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
     app.seed_memory(&bot);
-    let wire = app.try_store(|store| app.wire_bot(store, &bot, Some(50))).map_err(fail)?;
     app.announce_bot(&bot.id);
     eprintln!("catbot: made {} ({})", bot.name, bot.folder.display());
-    Ok((StatusCode::CREATED, json!({ "bot": wire })))
+    Ok(bot)
+}
+
+/// Deletes a bot: its chats go for good, its folder stays.
+pub(super) fn remove_bot(app: &Arc<App>, bot: &Bot) -> Answer {
+    for thread in app.try_store(|store| store.conversations(&bot.id)).map_err(fail)? {
+        app.turns.interrupt(&thread.id);
+    }
+    let bot = app.try_store(|store| store.delete_bot(&bot.name)).map_err(fail)?;
+    app.hub.send(json!({ "kind": "bot.deleted", "botId": bot.id }));
+    eprintln!("catbot: deleted {} (its folder stays at {})", bot.name, bot.folder.display());
+    Ok((StatusCode::OK, json!({ "ok": true })))
 }
 
 async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> Answer {
@@ -545,15 +563,7 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             Ok((StatusCode::OK, json!({ "bot": wire })))
         }
         (Method::PATCH, []) => patch_bot(app, bot, json_body(req).await?),
-        (Method::DELETE, []) => {
-            for thread in app.try_store(|store| store.conversations(&bot.id)).map_err(fail)? {
-                app.turns.interrupt(&thread.id);
-            }
-            let bot = app.try_store(|store| store.delete_bot(&bot.name)).map_err(fail)?;
-            app.hub.send(json!({ "kind": "bot.deleted", "botId": bot.id }));
-            eprintln!("catbot: deleted {} (its folder stays at {})", bot.name, bot.folder.display());
-            Ok((StatusCode::OK, json!({ "ok": true })))
-        }
+        (Method::DELETE, []) => remove_bot(app, &bot),
         (Method::POST, ["messages"]) => send_message(app, bot, json_body(req).await?),
         (Method::POST, ["attachments"]) => attachments::upload(app, &bot, req).await,
         (Method::POST, ["images"]) => images::ask(app, &bot, &json_body(req).await?),
@@ -584,7 +594,7 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
     }
 }
 
-fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
+pub(super) fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
     let before = bot.clone();
     apply_changes(&mut bot, &body)?;
     app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
@@ -686,7 +696,7 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     let request_id = message["id"].as_str().and_then(wire::parse_message_id).unwrap_or_default();
     let thread = conversation.id.clone();
     // What bots brought into this chat said, which the bot's own session didn't see.
-    let told = handoffs::untold_note(app, &conversation.id, &bot.id);
+    let told = format!("{}{}", handoffs::untold_note(app, &conversation.id, &bot.id), team::untold_note(app, &conversation.id));
     let said = format!("{text}{}{reacted}{told}", attachments::note(&described));
     let mut bot = bot;
     bot.instructions.push_str(&handoffs::roster_note(app, &bot));
@@ -830,6 +840,10 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
         (Method::POST, ["images", message]) => {
             let body = json_body(req).await?;
             images::answer(app, thread, &urlencoding_decode(message), &body).await
+        }
+        (Method::POST, ["team", message]) => {
+            let body = json_body(req).await?;
+            team::answer(app, thread, &urlencoding_decode(message), &body)
         }
         (Method::GET, ["changes", message]) => changes::route(app, thread, &urlencoding_decode(message), None).await,
         (Method::POST, ["changes", message, action]) => changes::route(app, thread, &urlencoding_decode(message), Some(action)).await,

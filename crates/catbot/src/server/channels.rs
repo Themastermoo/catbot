@@ -113,14 +113,7 @@ pub async fn route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             Ok((StatusCode::OK, json!({ "bot": wire })))
         }
         (Method::PATCH, []) => change(app, channel, json_body(req).await?),
-        (Method::DELETE, []) => {
-            if let Some(conversation) = app.with_store(|store| store.channel_conversation(&channel.id)).flatten() {
-                app.turns.interrupt(&conversation.id);
-            }
-            app.try_store(|store| store.delete_channel(&channel.id)).map_err(fail)?;
-            app.hub.send(json!({ "kind": "bot.deleted", "botId": channel.id }));
-            Ok((StatusCode::OK, json!({ "ok": true })))
-        }
+        (Method::DELETE, []) => remove(app, &channel),
         (Method::POST, ["messages"]) => send(app, channel, json_body(req).await?),
         (Method::POST, ["attachments"]) => {
             let lead = lead_bot(app, &channel).map_err(fail)?;
@@ -151,7 +144,18 @@ fn lead_bot(app: &App, channel: &Channel) -> Result<Bot, BoxError> {
 }
 
 /// `PATCH`: `name`, `soul` (the instructions), `color`, `members`, `lead`.
-fn change(app: &Arc<App>, mut channel: Channel, body: Value) -> Answer {
+/// Deletes a channel: its conversation goes; its members and folder stay.
+pub fn remove(app: &Arc<App>, channel: &Channel) -> Answer {
+    if let Some(conversation) = app.with_store(|store| store.channel_conversation(&channel.id)).flatten() {
+        app.turns.interrupt(&conversation.id);
+    }
+    app.stop_channel(&channel.id);
+    app.try_store(|store| store.delete_channel(&channel.id)).map_err(fail)?;
+    app.hub.send(json!({ "kind": "bot.deleted", "botId": channel.id }));
+    Ok((StatusCode::OK, json!({ "ok": true })))
+}
+
+pub fn change(app: &Arc<App>, mut channel: Channel, body: Value) -> Answer {
     if let Some(name) = body["name"].as_str() {
         if name.trim().is_empty() {
             return Err(bad("a channel needs a name"));

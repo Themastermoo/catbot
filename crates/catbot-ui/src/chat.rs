@@ -52,6 +52,7 @@ pub enum Body {
     Step { name: String, ok: Option<bool> },
     /// A picture being asked for and drawn (`pictures.rs`).
     Picture(Box<crate::pictures::Card>),
+    TeamChange(Box<crate::team::Change>),
     /// What a turn changed in the bot's folder, and whether it was undone.
     Changes { summary: String, files: Vec<crate::changes::FileChange>, undone: bool },
     /// An approval card: what the bot asked to do, and how the person answered.
@@ -89,6 +90,7 @@ impl Msg {
                 Body::Step { name: name.strip_prefix("notice: ").unwrap_or(name).to_string(), ok: wire["tool"]["ok"].as_bool() }
             }
             ("image", _) => Body::Picture(Box::new(crate::pictures::Card::from_wire(&wire["image"]))),
+            ("team-change", _) => Body::TeamChange(Box::new(crate::team::Change::from_wire(&wire["teamChange"]))),
             ("changes", _) => {
                 let changes = &wire["changes"];
                 Body::Changes {
@@ -922,6 +924,9 @@ fn Row(
         Body::Step { name, ok } => rsx! { Step { name: name.clone(), ok: *ok } },
         Body::Picture(card) => rsx! {
             crate::pictures::PictureCard { thread: thread.clone(), message: message.id.clone(), card: (**card).clone() }
+        },
+        Body::TeamChange(change) => rsx! {
+            crate::team::TeamChangeCard { thread: thread.clone(), message: message.id.clone(), change: (**change).clone() }
         },
         Body::Changes { summary, files, undone } => rsx! {
             crate::changes::ChangesRow { thread: thread.clone(), message: message.id.clone(), summary: summary.clone(), files: files.clone(), undone: *undone, working }

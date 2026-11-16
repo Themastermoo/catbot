@@ -230,6 +230,18 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                 "attachment": detail["attachment"],
             },
         }),
+        Role::Step if detail["kind"] == "team-change" => json!({
+            "role": "bot",
+            "kind": "team-change",
+            "teamChange": {
+                "title": detail["title"],
+                "lines": detail["lines"],
+                "warning": detail["warning"],
+                "askedBy": detail["askedBy"],
+                "state": detail["state"],
+                "error": detail["error"],
+            },
+        }),
         Role::Step if detail["kind"] == "changes" => json!({
             "role": "bot",
             "kind": "changes",

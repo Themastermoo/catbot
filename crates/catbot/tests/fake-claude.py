@@ -10,7 +10,8 @@ The prompt picks the behaviour:
   "write <file>: <words>" -> writes the words to that file in its folder (as a bot's edit would)
   "Name the conversation…" -> a chat's name, the way Catbot asks for one
   anything else -> streams "Hello, <prompt>" back (ending "@Name, over to you." for a bot
-                   whose instructions say "fake-pass @Name"; "what are your instructions?" -> its system prompt)
+                   whose instructions say "fake-pass @Name"; "what are your instructions?" -> its system prompt;
+                   "team: {…}" -> proposes that team change)
 """
 import json, subprocess, sys
 
@@ -112,6 +113,10 @@ import re
 passing = re.search(r"fake-pass (@\w+)", system)
 if passing:
     reply += f"\n\n{passing.group(1)}, over to you."
+# "team: {…}" (the first line) proposes that team change, as a Chief of Staff would.
+first_line = prompt.strip().splitlines()[0] if prompt.strip() else ""
+if first_line.startswith("team: "):
+    reply = f"Proposing it.\n<team-change>{first_line[len('team: '):]}</team-change>"
 # "what are your instructions?" (the last line) gets the system prompt it was given, to check what a bot is told.
 if last_line == "what are your instructions?":
     reply = system

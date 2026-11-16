@@ -241,6 +241,14 @@ async fn run(
     // Pictures the bot asked for come out of its reply, each with a card asking which AI draws it.
     let (reply, pictures) = super::images::take_requests(&result.reply);
     result.reply = reply;
+    // The Chief of Staff's proposed team changes come out too, each a card asking the person.
+    let chief = super::chief::chief(app).filter(|c| c.id == bot.id);
+    let mut proposed = Vec::new();
+    if chief.is_some() {
+        let (reply, found) = super::team::take(&result.reply);
+        result.reply = reply;
+        proposed = found;
+    }
     if !result.reply.is_empty() {
         let outcome = result.outcome.as_ref();
         let detail = json!({
@@ -255,6 +263,9 @@ async fn run(
     }
     for prompt in pictures {
         super::images::card(app, thread, &prompt, &bot.name);
+    }
+    if let Some(chief) = &chief {
+        super::team::propose(app, thread, chief, proposed);
     }
     super::changes::after_turn(app, thread, &bot.id, points, before).await;
     // A backup answered: the bot's own AI starts afresh next time, shown everything said.

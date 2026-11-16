@@ -1324,3 +1324,54 @@ async fn a_chief_of_staff_is_made_or_chosen_and_told_the_team() {
     let (_, cleared) = s.call("PUT", "/api/chief", Some(json!({ "botId": null }))).await;
     assert_eq!(cleared["chief"]["botId"], Value::Null);
 }
+
+#[tokio::test]
+async fn the_chief_changes_the_team_only_with_a_yes() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let (_, ready) = s.call("POST", "/api/chief/ready-made", None).await;
+    let chief = ready["chief"]["botId"].as_str().unwrap().to_string();
+    let card = |f: &Value| f["kind"] == "message" && f["message"]["kind"] == "team-change";
+    let ask = |text: &str| json!({ "text": text });
+
+    // Scout to act without asking: a card with a warning; approved, it's done.
+    let (_, sent) = s.call("POST", &format!("/api/bots/{chief}/messages"), Some(ask(r#"team: {"action":"change_bot","bot":"scout","approval":"full"}"#))).await;
+    let thread = sent["threadId"].as_str().unwrap().to_string();
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Proposing it.", "the tag comes out of the reply");
+    let shown = until(&mut events, "card", card).await;
+    let change = &shown["message"]["teamChange"];
+    assert_eq!((change["title"].as_str(), change["state"].as_str()), (Some("Change Scout"), Some("asking")));
+    assert_eq!(change["lines"][0], "Approval level: acts without asking");
+    assert!(change["warning"].as_str().unwrap().contains("without asking"));
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let id = shown["message"]["id"].as_str().unwrap();
+    let (status, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{id}"), Some(json!({ "approve": true }))).await;
+    assert_eq!((status, answered["state"].as_str()), (200, Some("done")), "{answered}");
+    let (_, bot) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    assert_eq!(bot["bot"]["approvalMode"], "full");
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/team/{id}"), Some(json!({ "approve": true }))).await.0, 409);
+
+    // A new bot, declined: nothing is made.
+    s.call("POST", &format!("/api/bots/{chief}/messages"), Some(ask(r#"team: {"action":"create_bot","name":"Moss","instructions":"Researches."}"#))).await;
+    let shown = until(&mut events, "card", card).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let id = shown["message"]["id"].as_str().unwrap();
+    s.call("POST", &format!("/api/threads/{thread}/team/{id}"), Some(json!({ "approve": false }))).await;
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    assert!(!list["bots"].as_array().unwrap().iter().any(|b| b["name"] == "Moss"));
+
+    // One Catbot can't use is a note, not a card.
+    s.call("POST", &format!("/api/bots/{chief}/messages"), Some(ask(r#"team: {"action":"delete_bot","bot":"Nobody"}"#))).await;
+    until(&mut events, "note", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|n| n.contains("no bot called Nobody"))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // The Chief hears how each went with the next message, once.
+    s.call("POST", &format!("/api/bots/{chief}/messages"), Some(ask("How did that go?"))).await;
+    let heard = until(&mut events, "heard", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    let heard = heard["message"]["text"].as_str().unwrap();
+    assert!(heard.contains("couldn't be used: there's no bot called Nobody") && !heard.contains("Change Scout"), "{heard}");
+}
