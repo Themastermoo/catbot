@@ -11,7 +11,7 @@ The prompt picks the behaviour:
   "Name the conversation…" -> a chat's name, the way Catbot asks for one
   anything else -> streams "Hello, <prompt>" back (ending "@Name, over to you." for a bot
                    whose instructions say "fake-pass @Name"; "what are your instructions?" -> its system prompt;
-                   "team: {…}" -> proposes that team change)
+                   "team: {…}" -> proposes that team change; "offer a skill" -> offers one)
 """
 import json, subprocess, sys
 
@@ -117,6 +117,9 @@ if passing:
 first_line = prompt.strip().splitlines()[0] if prompt.strip() else ""
 if first_line.startswith("team: "):
     reply = f"Proposing it.\n<team-change>{first_line[len('team: '):]}</team-change>"
+# "offer a skill" (the first line) offers one, as a bot that worked out a way would.
+if first_line == "offer a skill":
+    reply = "This will come up again.\n<save-skill>---\nname: weed-check\ndescription: Check the beds for weeds.\n---\n\nWalk each bed.\n</save-skill>"
 # "what are your instructions?" (the last line) gets the system prompt it was given, to check what a bot is told.
 if last_line == "what are your instructions?":
     reply = system

@@ -169,6 +169,9 @@ async fn run(
     if let Some(chief) = super::chief::chief(app).filter(|c| c.id == bot.id) {
         dressed.instructions.push_str(&super::chief::note(app, &chief));
     }
+    // The bot's skills, in its folder for this turn (and told where, for AIs that don't look).
+    let told = super::skills::place(app, &dressed, &dressed.folder);
+    dressed.instructions.push_str(&told);
     let bot = &dressed;
     app.announce_bot(&bot.id);
     emit(json!({ "type": "turn.started" }));
@@ -249,6 +252,9 @@ async fn run(
         result.reply = reply;
         proposed = found;
     }
+    // Skills any bot offers come out the same way.
+    let (reply, offered) = super::skills::take(&result.reply);
+    result.reply = reply;
     if !result.reply.is_empty() {
         let outcome = result.outcome.as_ref();
         let detail = json!({
@@ -267,6 +273,7 @@ async fn run(
     if let Some(chief) = &chief {
         super::team::propose(app, thread, chief, proposed);
     }
+    super::skills::propose(app, thread, bot, offered);
     super::changes::after_turn(app, thread, &bot.id, points, before).await;
     // A backup answered: the bot's own AI starts afresh next time, shown everything said.
     let own_engine = app.with_store(|store| store.bot_by_id(&bot.id)).flatten().map(|b| b.engine);

@@ -10,6 +10,7 @@ mod react;
 mod bots;
 mod changes;
 mod channels;
+mod skills;
 mod team;
 mod teams;
 mod chief;

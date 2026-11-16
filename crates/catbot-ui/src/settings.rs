@@ -198,6 +198,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                     div { class: CARD, hidden: channel,
                         crate::engines::EnginePicker { bot: bot.clone(), saving: saving(), change }
                         crate::engines::Backups { bot: bot.clone(), saving: saving(), change }
+                        crate::skills::BotSkills { bot: bot.clone(), saving: saving(), change }
                         div { class: "mt-4 {LABEL}", "Approval level" }
                         div { role: "radiogroup", "aria-label": "Approval level", class: "mt-1 flex flex-col gap-1",
                             for (level, label, desc) in LEVELS {

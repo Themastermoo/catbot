@@ -141,6 +141,8 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         "codex": bot.codex,
         // Catbot's own: the Chief of Staff wears a star.
         "chief": super::chief::is_chief_in(store, &bot.id),
+        // Catbot's own: the skills it uses, from the library.
+        "skills": super::skills::of(store, &bot.id),
         "mascotBody": "cursor",
         "unread": false,
         "modelSelection": model_selection(bot),
@@ -242,6 +244,7 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                 "lines": detail["lines"],
                 "warning": detail["warning"],
                 "askedBy": detail["askedBy"],
+                "heading": detail["heading"],
                 "state": detail["state"],
                 "error": detail["error"],
             },

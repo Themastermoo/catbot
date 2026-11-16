@@ -56,6 +56,7 @@ pub fn system_prompt(bot: &Bot, codex: Option<&Path>, memory: Option<&Path>) -> 
         prompt.push_str(&crate::memory::prompt(memory, bot, codex.is_some() && crate::memory::has_codex(memory)));
     }
     prompt.push_str(crate::server::images::BOT_NOTE);
+    prompt.push_str(crate::server::skills::BOT_NOTE);
     prompt
 }
 

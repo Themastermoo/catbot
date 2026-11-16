@@ -10,6 +10,7 @@ pub mod attachments;
 pub mod backups;
 pub mod changes;
 pub mod channels;
+pub mod skills;
 pub mod team;
 pub mod teams;
 pub mod chief;
@@ -327,6 +328,19 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(limits::route(&app, &method, body, true).await)
         }
         ["api", "handoffs"] if method == Method::GET => respond(handoffs::route(&app, None)),
+        ["api", "skills", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::POST || method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(skills::route(&app, &method, &rest, body).await)
+        }
         ["api", "teams", which] if method == Method::POST => {
             let body = match json_body(req).await {
                 Ok(body) => body,
@@ -615,6 +629,9 @@ pub(super) fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
     if let Some(list) = body.get("backups") {
         app.try_store(|store| backups::set(store, &bot, list)).map_err(bad)?;
     }
+    if let Some(list) = body.get("skills") {
+        app.try_store(|store| skills::set(store, &bot.id, list).map_err(Into::into)).map_err(bad)?;
+    }
     if let Some(memory) = &app.memory
         && let Err(err) = crate::memory::rename_bot(memory, &before, &bot)
     {
@@ -711,7 +728,9 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     let thread = conversation.id.clone();
     // What bots brought into this chat said, which the bot's own session didn't see.
     let told = format!("{}{}", handoffs::untold_note(app, &conversation.id, &bot.id), team::untold_note(app, &conversation.id));
-    let said = format!("{text}{}{reacted}{told}", attachments::note(&described));
+    // `/skill-name …` runs one of the bot's skills: the bot reads which, and where its instructions are.
+    let asked = skills::command(app, &bot, &text).unwrap_or_else(|| text.clone());
+    let said = format!("{asked}{}{reacted}{told}", attachments::note(&described));
     let mut bot = bot;
     bot.instructions.push_str(&handoffs::roster_note(app, &bot));
     let bot = match switched {

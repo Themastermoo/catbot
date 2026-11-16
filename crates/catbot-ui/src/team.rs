@@ -12,6 +12,8 @@ pub struct Change {
     pub lines: Vec<String>,
     pub warning: Option<String>,
     pub asked_by: String,
+    /// What the card is about, when it isn't a team change (a skill a bot offers).
+    pub heading: Option<String>,
     pub state: String,
     pub error: Option<String>,
 }
@@ -23,6 +25,7 @@ impl Change {
             lines: wire["lines"].as_array().map(|l| l.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
             warning: wire["warning"].as_str().map(str::to_string),
             asked_by: wire["askedBy"].as_str().unwrap_or("The Chief").to_string(),
+            heading: wire["heading"].as_str().map(str::to_string),
             state: wire["state"].as_str().unwrap_or("asking").to_string(),
             error: wire["error"].as_str().map(str::to_string),
         }
@@ -55,7 +58,12 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                         path { d: "M22 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" }
                     }
                     div { class: "min-w-0 flex-1",
-                        p { class: "text-ink-secondary", "{change.asked_by} wants to change the team" }
+                        p { class: "text-ink-secondary",
+                            match &change.heading {
+                                Some(heading) => heading.clone(),
+                                None => format!("{} wants to change the team", change.asked_by),
+                            }
+                        }
                         p { class: "font-semibold text-ink", "{change.title}" }
                     }
                 }

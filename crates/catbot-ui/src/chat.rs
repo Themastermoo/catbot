@@ -586,6 +586,17 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         }
         None => Vec::new(),
     };
+    // Typing / at the start offers the bot's skills (and /image).
+    let commands: Vec<String> = {
+        let typed = text.read().clone();
+        match typed.strip_prefix('/').filter(|rest| !rest.contains(char::is_whitespace)) {
+            Some(start) if bot.channel.is_none() => std::iter::once("image".to_string())
+                .chain(bot.skills.iter().cloned())
+                .filter(|name| name.starts_with(start) && name != start)
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
     let has_text = !text.read().trim().is_empty() || tray.read().iter().any(|t| matches!(t.state, TrayState::Ready(_)));
     let pick = move |e: FormEvent| {
         add_files(e.files());
@@ -647,6 +658,25 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                        if !commands.is_empty() {
+                            div { class: "flex flex-wrap gap-1.5 px-1 pb-1.5 pt-1", "data-commands": true,
+                                for name in commands {
+                                    button {
+                                        key: "{name}",
+                                        r#type: "button",
+                                        "data-command": "{name}",
+                                        class: "rounded-full bg-raised px-2.5 py-0.5 font-mono text-[12px] text-ink hover:bg-control",
+                                        onclick: move |_| {
+                                            let next = format!("/{name} ");
+                                            text.set(next.clone());
+                                            set_box(&next);
+                                            document::eval(r#"document.getElementById("composer-box")?.focus();"#);
+                                        },
+                                        "/{name}"
                                     }
                                 }
                             }

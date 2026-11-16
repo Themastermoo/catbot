@@ -318,6 +318,7 @@ fn apply(app: &Arc<App>, detail: &Value) -> Result<(), String> {
         "create_channel" => channels::create(app, &body).map(|_| ()).map_err(refused),
         "change_channel" => channels::change(app, channel()?, body).map(|_| ()).map_err(refused),
         "delete_channel" => channels::remove(app, &channel()?).map(|_| ()).map_err(refused),
+        "save_skill" => super::skills::save_approved(app, target, body["text"].as_str().unwrap_or_default()),
         other => Err(format!("{other} isn't a change Catbot knows")),
     }
 }

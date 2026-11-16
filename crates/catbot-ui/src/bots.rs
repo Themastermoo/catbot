@@ -70,6 +70,8 @@ pub struct Bot {
     pub codex: bool,
     /// Whether it's the Chief of Staff (starred in the sidebar).
     pub chief: bool,
+    /// The skills it uses, from the library.
+    pub skills: Vec<String>,
     pub activity: Activity,
     pub unread: bool,
     /// Its newest message worth a preview, if it has one.
@@ -170,6 +172,7 @@ impl Bot {
             approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
             codex: wire["codex"].as_bool().unwrap_or(true),
             chief: wire["chief"].as_bool().unwrap_or(false),
+            skills: wire["skills"].as_array().map(|s| s.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
             activity,
             unread: wire["unread"] == true,
             last: messages.iter().rev().find_map(|m| Some(Last { line: line(m)?, at: m["at"].as_f64().unwrap_or(0.0) })),

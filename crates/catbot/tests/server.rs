@@ -1486,3 +1486,53 @@ async fn a_team_comes_in_from_a_file_after_a_look_and_goes_out_as_one() {
     assert_eq!(again["plan"]["bots"].as_array().unwrap().len(), 2);
     assert_eq!(again["plan"]["channels"][0]["lead"], "Lin");
 }
+
+#[tokio::test]
+async fn skills_come_from_the_library_and_a_bot_can_offer_one() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let skill = "---\nname: bed-plan\ndescription: Lay out garden beds from a sketch.\n---\n\n# Bed plan\n\nMeasure first.\n";
+    let (status, added) = s.call("POST", "/api/skills", Some(json!({ "text": skill }))).await;
+    assert_eq!((status, added["name"].as_str()), (201, Some("bed-plan")), "{added}");
+    assert_eq!(s.call("POST", "/api/skills", Some(json!({ "text": skill }))).await.0, 400, "no two with one name");
+    assert_eq!(s.call("POST", "/api/skills", Some(json!({ "text": "---\nname: Bad Name\ndescription: x\n---\n" }))).await.0, 400);
+
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    assert_eq!(made["bot"]["skills"], json!([]));
+    let (status, changed) = s.call("PATCH", &format!("/api/bots/{scout}"), Some(json!({ "skills": ["bed-plan"] }))).await;
+    assert_eq!((status, &changed["bot"]["skills"]), (200, &json!(["bed-plan"])));
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{scout}"), Some(json!({ "skills": ["nope"] }))).await.0, 400);
+    let (_, list) = s.call("GET", "/api/skills", None).await;
+    assert_eq!(list["skills"][0]["bots"], json!(["Scout"]));
+
+    // `/bed-plan …` runs it; the skill is in Scout's folder for the turn.
+    s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": "/bed-plan the north beds" }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(reply["message"]["text"].as_str().unwrap().contains("Use your skill “bed-plan” for this: read .claude/skills/bed-plan/SKILL.md"), "{reply}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let placed = s._dir.path().join("home/bots/scout/.claude/skills/bed-plan");
+    assert!(placed.join("SKILL.md").is_file() && placed.join(".catbot-skill").is_file());
+
+    // Scout offers one; approved, it's in the library and Scout uses it; the old one is taken off.
+    s.call("PATCH", &format!("/api/bots/{scout}"), Some(json!({ "skills": [] }))).await;
+    let (_, sent) = s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": "offer a skill" }))).await;
+    let thread = sent["threadId"].as_str().unwrap().to_string();
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "This will come up again.");
+    let card = until(&mut events, "card", |f| f["kind"] == "message" && f["message"]["kind"] == "team-change").await;
+    assert_eq!(card["message"]["teamChange"]["title"], "Save the skill “weed-check”");
+    assert_eq!(card["message"]["teamChange"]["heading"], "Scout wants to save a skill");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    assert!(!placed.exists(), "a skill Scout no longer uses is taken out of its folder");
+    let id = card["message"]["id"].as_str().unwrap();
+    let (_, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{id}"), Some(json!({ "approve": true }))).await;
+    assert_eq!(answered["state"], "done", "{answered}");
+    let (_, bot) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    assert_eq!(bot["bot"]["skills"], json!(["weed-check"]));
+
+    assert_eq!(s.call("DELETE", "/api/skills/bed-plan", None).await.0, 200);
+    let (_, list) = s.call("GET", "/api/skills", None).await;
+    assert_eq!(list["skills"].as_array().unwrap().len(), 1);
+}

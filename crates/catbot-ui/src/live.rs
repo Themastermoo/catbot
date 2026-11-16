@@ -54,6 +54,7 @@ pub struct State {
     pub limits_changed: u64,
     pub handoffs_changed: u64,
     pub chief_changed: u64,
+    pub skills_changed: u64,
     pub devices_changed: u64,
 }
 
@@ -116,6 +117,7 @@ impl State {
             Some("limits") => self.limits_changed += 1,
             Some("handoffs") => self.handoffs_changed += 1,
             Some("chief") => self.chief_changed += 1,
+            Some("skills") => self.skills_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();
                 self.bots.retain(|b| b.id != id);
