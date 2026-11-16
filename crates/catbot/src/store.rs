@@ -13,17 +13,30 @@ use crate::claude::PermissionMode;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// The user's home folder (`HOME`, or `USERPROFILE` on Windows).
+pub fn user_home() -> PathBuf {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Where Catbot keeps its data: `$CATBOT_HOME`, else `$XDG_DATA_HOME/catbot`, else
-/// `~/.local/share/catbot`.
+/// `~/.local/share/catbot` (on Windows, `%LOCALAPPDATA%\Catbot`).
 pub fn default_home() -> PathBuf {
     if let Some(home) = std::env::var_os("CATBOT_HOME") {
         return PathBuf::from(home);
     }
+    if cfg!(windows)
+        && let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty())
+    {
+        return PathBuf::from(local).join("Catbot");
+    }
     if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()) {
         return PathBuf::from(data).join("catbot");
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join(".local").join("share").join("catbot")
+    user_home().join(".local").join("share").join("catbot")
 }
 
 /// The Codex vault: `$CATBOT_CODEX`, else `~/VaultCodex`.
@@ -31,8 +44,7 @@ pub fn default_codex() -> PathBuf {
     if let Some(codex) = std::env::var_os("CATBOT_CODEX") {
         return PathBuf::from(codex);
     }
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join("VaultCodex")
+    user_home().join("VaultCodex")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -221,16 +233,22 @@ fn now() -> String {
 impl Store {
     /// Opens (or creates) the store in `home`, a folder only this user can open.
     pub fn open(home: &Path) -> Result<Self, BoxError> {
-        use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-        if !home.exists() {
-            std::fs::DirBuilder::new().recursive(true).mode(0o700).create(home)?;
-        } else {
-            let mut perms = std::fs::metadata(home)?.permissions();
-            if perms.mode() & 0o077 != 0 {
-                perms.set_mode(0o700);
-                std::fs::set_permissions(home, perms)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            if !home.exists() {
+                std::fs::DirBuilder::new().recursive(true).mode(0o700).create(home)?;
+            } else {
+                let mut perms = std::fs::metadata(home)?.permissions();
+                if perms.mode() & 0o077 != 0 {
+                    perms.set_mode(0o700);
+                    std::fs::set_permissions(home, perms)?;
+                }
             }
         }
+        // On Windows, a folder under the user's own AppData is already closed to other users.
+        #[cfg(not(unix))]
+        std::fs::create_dir_all(home)?;
         let conn = Connection::open(home.join("catbot.db"))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
@@ -966,6 +984,7 @@ mod tests {
         assert_eq!(store.current_conversation(&bot.id).unwrap().unwrap().id, second.id);
     }
 
+    #[cfg(unix)]
     #[test]
     fn the_store_survives_reopening_and_is_private() {
         use std::os::unix::fs::PermissionsExt;

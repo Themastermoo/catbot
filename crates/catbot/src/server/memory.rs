@@ -225,9 +225,24 @@ mod tests {
         (dir, vault)
     }
 
+    /// Wine can't make the Codex link (Windows makes a junction); the Codex checks need it.
+    fn linked(vault: &Path) -> bool {
+        let linked = crate::memory::has_codex(vault);
+        if !linked {
+            #[cfg(unix)]
+            panic!("the Codex link is always made on Linux");
+            #[cfg(not(unix))]
+            eprintln!("skipped: no Codex link here");
+        }
+        linked
+    }
+
     #[test]
     fn the_list_leaves_out_the_codex() {
         let (_dir, vault) = vault();
+        if !linked(&vault) {
+            return;
+        }
         let list = overview(&vault);
         let paths: Vec<&str> = list["notes"].as_array().unwrap().iter().map(|n| n["path"].as_str().unwrap()).collect();
         assert_eq!(paths, ["AGENTS.md", "Bots/Scout.md", "Home.md"]);
@@ -237,6 +252,9 @@ mod tests {
     #[test]
     fn only_notes_inside_can_be_read() {
         let (_dir, vault) = vault();
+        if !linked(&vault) {
+            return;
+        }
         assert!(readable(&vault, "Bots/Scout.md").is_some());
         assert!(readable(&vault, "Codex/20 Projects/Catbot.md").is_some(), "the Codex, through the link");
         for path in ["../secret.md", "/etc/passwd.md", "Bots/../../secret.md", "Bots", "Home", "Bots\\Scout.md"] {
@@ -247,6 +265,9 @@ mod tests {
     #[test]
     fn links_resolve_like_obsidian() {
         let (_dir, vault) = vault();
+        if !linked(&vault) {
+            return;
+        }
         assert_eq!(resolve(&vault, "Scout", "Home.md").unwrap().0, "Bots/Scout.md");
         assert_eq!(resolve(&vault, "Scout", "Codex/20 Projects/Catbot.md").unwrap().0, "Codex/Scout.md", "nearest first");
         assert_eq!(resolve(&vault, "Codex/20 Projects/Catbot|Catbot", "Bots/Scout.md").unwrap().0, "Codex/20 Projects/Catbot.md");

@@ -297,6 +297,27 @@ impl Running {
     }
 }
 
+/// The command that runs Claude Code, given the `--cli` program. On Windows, `claude` is found
+/// the way its installers put it: `claude.exe` on the PATH or in `~\.local\bin` (the native
+/// installer), else npm's `cli.js` run by `node` (a `claude.cmd` can't safely carry Catbot's
+/// arguments). Elsewhere, and for any other program, it's used as given.
+pub fn locate(program: &str) -> Vec<String> {
+    if cfg!(windows) && program == "claude" {
+        let path: Vec<PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
+        let home = crate::store::user_home();
+        let native = path.iter().map(|d| d.join("claude.exe")).chain([home.join(".local").join("bin").join("claude.exe")]).find(|p| p.is_file());
+        if let Some(exe) = native {
+            return vec![exe.to_string_lossy().into_owned()];
+        }
+        let npm = std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("npm").join("node_modules").join("@anthropic-ai").join("claude-code").join("cli.js"));
+        let node = path.iter().map(|d| d.join("node.exe")).find(|p| p.is_file());
+        if let (Some(cli), Some(node)) = (npm.filter(|c| c.is_file()), node) {
+            return vec![node.to_string_lossy().into_owned(), cli.to_string_lossy().into_owned()];
+        }
+    }
+    vec![program.to_string()]
+}
+
 /// Starts a turn. Events arrive on [`Running::events`]; the last one is always [`Event::Finished`].
 pub async fn start(turn: &Turn) -> std::io::Result<Running> {
     let (program, leading) = turn
@@ -312,7 +333,11 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
     if let Some(broker) = &broker {
         command_args.extend(broker.args());
     }
-    let mut child = Command::new(program)
+    let mut command = Command::new(program);
+    // No console window flashing up for each turn on Windows.
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let mut child = command
         .args(leading)
         .args(command_args)
         .current_dir(&turn.cwd)

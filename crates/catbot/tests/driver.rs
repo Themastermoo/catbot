@@ -130,6 +130,7 @@ async fn without_a_helper_nothing_is_asked() {
     assert_eq!(outcome(&events).permission_denials.len(), 1);
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn the_approval_folder_is_private_and_removed_after_the_turn() {
     use std::os::unix::fs::PermissionsExt;

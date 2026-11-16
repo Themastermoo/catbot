@@ -29,8 +29,7 @@ pub fn default_dir() -> Option<PathBuf> {
         Some(dir) if dir == "off" => None,
         Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
         _ => {
-            let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from)?;
-            Some(home.join("CatbotMemory"))
+            Some(crate::store::user_home().join("CatbotMemory"))
         }
     }
 }
@@ -64,8 +63,12 @@ fn link_codex(dir: &Path, codex: &Path) -> bool {
     }
     #[cfg(unix)]
     let made = std::os::unix::fs::symlink(codex, &link);
+    // Windows only makes symbolic links in Developer Mode; a junction needs no permission.
     #[cfg(windows)]
-    let made = std::os::windows::fs::symlink_dir(codex, &link);
+    let made = std::os::windows::fs::symlink_dir(codex, &link).or_else(|_| {
+        let status = std::process::Command::new("cmd").arg("/C").arg("mklink").arg("/J").arg(&link).arg(codex).output()?.status;
+        if status.success() { Ok(()) } else { Err(std::io::Error::other("mklink /J failed")) }
+    });
     match made {
         Ok(()) => true,
         Err(err) => {
@@ -226,6 +229,10 @@ mod tests {
         std::fs::write(codex.join("00 Home.md"), "# Home").unwrap();
         let vault = dir.path().join("memory");
         prepare(&vault, Some(&codex)).unwrap();
+        if cfg!(windows) && !has_codex(&vault) {
+            eprintln!("skipped: this Windows can't make links (Wine can't; Windows makes junctions)");
+            return;
+        }
         for sub in ["Bots", "Projects", "Journal"] {
             assert!(vault.join(sub).is_dir());
         }

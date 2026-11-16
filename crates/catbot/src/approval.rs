@@ -4,7 +4,7 @@
 //! bot wants to do something that needs a yes (run a command, edit a file), Claude Code calls
 //! that tool and waits. The tool is served by a small helper, `catbot approval-mcp <socket>`,
 //! which Claude Code starts as an MCP server. The helper relays each question over a private
-//! Unix socket to the [`Broker`] in the turn that owns the bot, which raises an
+//! channel (a Unix socket; on Windows, a local TCP port behind a one-time token) to the [`Broker`] in the turn that owns the bot, which raises an
 //! [`Event::ApprovalRequested`](crate::claude::Event) and waits for [`Decision`].
 //!
 //! ```text
@@ -24,8 +24,7 @@ use std::{
 
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     sync::mpsc,
     task::JoinHandle,
 };
@@ -67,8 +66,7 @@ impl Broker {
     /// arguments) that runs `catbot`; questions arrive as events on `events`.
     pub fn start(helper: &[String], events: mpsc::WeakSender<Event>) -> std::io::Result<Self> {
         let dir = private_dir()?;
-        let socket = dir.join("approve.sock");
-        let listener = UnixListener::bind(&socket)?;
+        let (socket, listener) = door::open(&dir)?;
 
         let (program, leading) = helper
             .split_first()
@@ -80,7 +78,7 @@ impl Broker {
         write_private(&config_path, config.to_string().as_bytes())?;
 
         let pending: Pending = Arc::default();
-        let task = tokio::spawn(accept(listener, pending.clone(), events));
+        let task = tokio::spawn(door::accept(listener, pending.clone(), events));
         Ok(Self { dir, config_path, pending, task })
     }
 
@@ -145,30 +143,111 @@ fn answer_line(id: &str, decision: &Decision) -> String {
     format!("{answer}\n")
 }
 
-/// A folder only this user can open, for the socket and the config.
+/// A folder only this user can open, for the socket and the config. (On Windows, the user's
+/// own temp folder is already closed to other users.)
 fn private_dir() -> std::io::Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
-    let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let dir = base.join(format!("catbot-{}", uuid::Uuid::new_v4()));
-    std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
-    Ok(dir)
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    use std::{io::Write, os::unix::fs::OpenOptionsExt};
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
-    file.write_all(bytes)
-}
-
-/// Accepts the helper's connections (normally one per turn, again after a drop).
-async fn accept(listener: UnixListener, pending: Pending, events: mpsc::WeakSender<Event>) {
-    while let Ok((stream, _)) = listener.accept().await {
-        tokio::spawn(connection(stream, pending.clone(), events.clone()));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let base = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let dir = base.join(format!("catbot-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new().mode(0o700).create(&dir)?;
+        Ok(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        let dir = std::env::temp_dir().join(format!("catbot-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir)?;
+        Ok(dir)
     }
 }
 
-async fn connection(stream: UnixStream, pending: Pending, events: mpsc::WeakSender<Event>) {
-    let (read, mut write) = stream.into_split();
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
+}
+
+/// The channel between the broker and the helper. `open` gives the helper a path to find it by.
+#[cfg(unix)]
+mod door {
+    use super::*;
+    use tokio::net::{UnixListener, UnixStream};
+
+    pub fn open(dir: &Path) -> std::io::Result<(PathBuf, UnixListener)> {
+        let socket = dir.join("approve.sock");
+        let listener = UnixListener::bind(&socket)?;
+        Ok((socket, listener))
+    }
+
+    /// Accepts the helper's connections (normally one per turn, again after a drop).
+    pub async fn accept(listener: UnixListener, pending: Pending, events: mpsc::WeakSender<Event>) {
+        while let Ok((stream, _)) = listener.accept().await {
+            tokio::spawn(connection(stream, pending.clone(), events.clone()));
+        }
+    }
+
+    pub async fn connect(socket: &Path) -> Option<UnixStream> {
+        UnixStream::connect(socket).await.ok()
+    }
+}
+
+/// On Windows: a TCP port on 127.0.0.1, written with a one-time token into a private file; a
+/// connection that doesn't start with the token is dropped.
+#[cfg(not(unix))]
+mod door {
+    use super::*;
+    use tokio::{
+        io::AsyncReadExt,
+        net::{TcpListener, TcpStream},
+    };
+
+    pub struct Listener {
+        listener: TcpListener,
+        token: String,
+    }
+
+    pub fn open(dir: &Path) -> std::io::Result<(PathBuf, Listener)> {
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        std_listener.set_nonblocking(true)?;
+        let addr = std_listener.local_addr()?;
+        let token = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+        let file = dir.join("approve.door");
+        write_private(&file, format!("{addr}\n{token}\n").as_bytes())?;
+        Ok((file, Listener { listener: TcpListener::from_std(std_listener)?, token }))
+    }
+
+    pub async fn accept(door: Listener, pending: Pending, events: mpsc::WeakSender<Event>) {
+        while let Ok((mut stream, _)) = door.listener.accept().await {
+            let (token, pending, events) = (door.token.clone(), pending.clone(), events.clone());
+            tokio::spawn(async move {
+                let mut said = vec![0u8; token.len() + 1];
+                let knows = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_exact(&mut said)).await;
+                if matches!(knows, Ok(Ok(_))) && said[..token.len()] == *token.as_bytes() && said[token.len()] == b'\n' {
+                    connection(stream, pending, events).await;
+                }
+            });
+        }
+    }
+
+    pub async fn connect(file: &Path) -> Option<TcpStream> {
+        let text = std::fs::read_to_string(file).ok()?;
+        let mut lines = text.lines();
+        let (addr, token) = (lines.next()?, lines.next()?);
+        let mut stream = TcpStream::connect(addr).await.ok()?;
+        stream.write_all(format!("{token}\n").as_bytes()).await.ok()?;
+        Some(stream)
+    }
+}
+
+async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, pending: Pending, events: mpsc::WeakSender<Event>) {
+    let (read, mut write) = tokio::io::split(stream);
     let (out, mut outgoing) = mpsc::unbounded_channel::<String>();
     let writer = tokio::spawn(async move {
         while let Some(line) = outgoing.recv().await {
@@ -278,8 +357,8 @@ pub async fn serve_mcp(socket: &Path) -> std::io::Result<()> {
 
 /// The helper's connection to the broker.
 struct BrokerLink {
-    write: tokio::net::unix::OwnedWriteHalf,
-    lines: tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+    write: Box<dyn AsyncWrite + Unpin + Send>,
+    lines: tokio::io::Lines<BufReader<Box<dyn AsyncRead + Unpin + Send>>>,
     alive: bool,
 }
 
@@ -288,9 +367,10 @@ impl BrokerLink {
         // A few quick tries ride out a broker that is still starting.
         for pause in [0, 200, 800] {
             tokio::time::sleep(std::time::Duration::from_millis(pause)).await;
-            if let Ok(stream) = UnixStream::connect(socket).await {
-                let (read, write) = stream.into_split();
-                return Some(Self { write, lines: BufReader::new(read).lines(), alive: true });
+            if let Some(stream) = door::connect(socket).await {
+                let (read, write) = tokio::io::split(stream);
+                let read: Box<dyn AsyncRead + Unpin + Send> = Box::new(read);
+                return Some(Self { write: Box::new(write), lines: BufReader::new(read).lines(), alive: true });
             }
         }
         None
@@ -318,5 +398,49 @@ impl BrokerLink {
         }
         self.alive = false;
         Decision::Deny(UNREACHABLE.into())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The helper's side and the broker's side meet through the door, on any platform.
+    #[tokio::test]
+    async fn a_question_crosses_the_door_and_its_answer_comes_back() {
+        let dir = private_dir().unwrap();
+        let (path, listener) = door::open(&dir).unwrap();
+        let (events_tx, mut events) = mpsc::channel(8);
+        let pending: Pending = Arc::default();
+        let task = tokio::spawn(door::accept(listener, pending.clone(), events_tx.downgrade()));
+
+        let mut link = BrokerLink::connect(&path).await.expect("the helper reaches the broker");
+        let asking = tokio::spawn(async move { link.ask("Bash", &json!({ "command": "ls" })).await });
+        let Some(Event::ApprovalRequested { id, tool, .. }) = events.recv().await else { panic!("no question arrived") };
+        assert_eq!(tool, "Bash");
+        assert!(Answerer { pending: pending.clone() }.answer(&id, Decision::Allow));
+        assert_eq!(asking.await.unwrap(), Decision::Allow);
+
+        task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(not(unix))]
+    #[tokio::test]
+    async fn a_stranger_without_the_token_is_dropped() {
+        use tokio::io::AsyncReadExt;
+        let dir = private_dir().unwrap();
+        let (path, listener) = door::open(&dir).unwrap();
+        let (events_tx, _events) = mpsc::channel(8);
+        let task = tokio::spawn(door::accept(listener, Arc::default(), events_tx.downgrade()));
+        let addr = std::fs::read_to_string(&path).unwrap().lines().next().unwrap().to_string();
+        let mut stranger = tokio::net::TcpStream::connect(&addr).await.unwrap();
+        stranger.write_all(format!("{}\n{}\n", "x".repeat(64), json!({ "t": "ask", "id": "1", "tool": "Bash", "input": {} })).as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let read = tokio::time::timeout(std::time::Duration::from_secs(3), stranger.read_to_end(&mut buf)).await;
+        // Closed (or reset) without an answer, well before the timeout.
+        assert!(matches!(read, Ok(Ok(0)) | Ok(Err(_))), "the connection is closed without an answer: {read:?}");
+        task.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

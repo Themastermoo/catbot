@@ -192,8 +192,7 @@ enum BotAction {
 
 /// Recordings live next to the repo, never inside it: ~/Projects/catbot-traffic.
 fn default_traffic_dir() -> PathBuf {
-    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    home.join("Projects").join("catbot-traffic")
+    store::user_home().join("Projects").join("catbot-traffic")
 }
 
 fn read_instructions(text: Option<String>, file: Option<PathBuf>) -> Result<Option<String>, BoxError> {
@@ -239,7 +238,7 @@ async fn run() -> Result<(), BoxError> {
                 new,
                 json,
                 no_approvals,
-                cli: vec![cli],
+                cli: catbot::claude::locate(&cli),
                 codex: store::default_codex(),
                 memory: catbot::memory::default_dir(),
             };
@@ -271,7 +270,7 @@ async fn run() -> Result<(), BoxError> {
                 home: store::default_home(),
                 codex: store::default_codex(),
                 memory: catbot::memory::default_dir(),
-                cli: vec![cli],
+                cli: catbot::claude::locate(&cli),
                 record: record.then(default_traffic_dir),
                 ui: Some(ui),
                 remote,
