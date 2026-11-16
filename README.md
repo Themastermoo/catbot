@@ -96,6 +96,27 @@ aarch64-linux-android`. The signing key is made on the first build in
 must be signed with the same key. To install: copy `dist/catbot.apk` to the phone, open it, and
 allow installing apps from that source when Android asks.
 
+## On Windows (the work PC)
+
+The Windows app has two places, switched at the top of the sidebar: **This PC**, its own Catbot
+with its own bots, chats and memory vault (`%USERPROFILE%\CatbotMemory`, no Codex link), and
+**Home**, Catbot on the Linux computer through its public address. Opening the app starts this
+PC's Catbot; closing it stops it. Home is paired once, the first time you pick it: on the Linux
+computer open Devices away from home → Pair a phone, and type the address and code it shows.
+
+It's built on Linux and copied over:
+
+```sh
+bash scripts/build-windows.sh   # → dist/catbot-windows.zip
+```
+
+That needs `rustup target add x86_64-pc-windows-gnu`, MinGW (`sudo apt install
+gcc-mingw-w64-x86-64`) and `dx`. On the PC: unzip it, double-click `Install.cmd` (no
+administrator needed; it puts Catbot in the Start menu and on the desktop; `install.ps1 -Remove`
+takes it away and keeps your data). This PC's own bots need Claude Code installed there and
+signed in (`irm https://claude.ai/install.ps1 | iex` in PowerShell, then `claude` once). Data
+lives in `%LOCALAPPDATA%\Catbot` (with `server.log`, what this PC's Catbot says).
+
 ## The desktop app
 
 Catbot's interface also runs as its own window (WebKitGTK), with Catbot's icon in the KDE menu:

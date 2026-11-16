@@ -25,6 +25,10 @@ OpenMausBot contributors, licensed under the Apache License, Version 2.0
   OpenMausBot's server/thread-title.ts and thread-title-generate.ts: the
   first-line name, the naming prompt and how the reply is cleaned.
 
+The Windows package (scripts/build-windows.sh) ships Microsoft's
+WebView2Loader.dll beside the app, as provided by the webview2-com-sys crate;
+it is Microsoft's, under the terms of Microsoft's WebView2 SDK.
+
 OpenMausBot's names and mascot are trademarks of Supamaus Software Private
 Limited; Catbot uses neither.
 
