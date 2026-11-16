@@ -819,6 +819,12 @@ impl Store {
         Ok(conversation)
     }
 
+    /// Forgets a conversation's AI session: its next turn starts a new one, shown the chat so far.
+    pub fn clear_session(&self, conversation_id: &str) -> Result<(), BoxError> {
+        self.conn.execute("UPDATE conversations SET session_id = NULL WHERE id = ?1", [conversation_id])?;
+        Ok(())
+    }
+
     pub fn set_session(&self, conversation_id: &str, session_id: &str) -> Result<(), BoxError> {
         self.conn.execute("UPDATE conversations SET session_id = ?2 WHERE id = ?1", params![conversation_id, session_id])?;
         Ok(())

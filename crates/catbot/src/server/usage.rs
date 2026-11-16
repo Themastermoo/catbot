@@ -62,7 +62,13 @@ pub fn billing(engine: &str) -> &'static str {
 pub async fn route(app: &Arc<App>, rest: &[&str], query: impl Fn(&str) -> Option<String>) -> Answer {
     match rest {
         [] => breakdown(app, query("period").as_deref().unwrap_or("this-month"), query("by").as_deref().unwrap_or("bot")),
-        ["plans"] => Ok((StatusCode::OK, plans(app).await)),
+        ["plans"] => {
+            // The Refresh button asks for a fresh reading.
+            if query("fresh").is_some() {
+                forget(app);
+            }
+            Ok((StatusCode::OK, plans(app).await))
+        }
         _ => Err((StatusCode::NOT_FOUND, "no such usage".into())),
     }
 }
@@ -185,8 +191,24 @@ impl Sum {
     }
 }
 
+/// Reads the plans again in the background if the last reading is more than five minutes old.
+pub fn refresh_soon(app: &Arc<App>) {
+    let stale = app.plan_usage.lock().expect("plan usage lock").as_ref().is_none_or(|(at, _)| at.elapsed() > Duration::from_secs(300));
+    if stale {
+        let app = app.clone();
+        tokio::spawn(async move {
+            plans(&app).await;
+        });
+    }
+}
+
+/// Forgets the last reading, so the next one is fresh.
+pub fn forget(app: &App) {
+    *app.plan_usage.lock().expect("plan usage lock") = None;
+}
+
 /// The plan windows, as `{ plans: [...] }`: fetched at most once a minute.
-async fn plans(app: &App) -> Value {
+pub async fn plans(app: &App) -> Value {
     {
         let cached = app.plan_usage.lock().expect("plan usage lock");
         if let Some((at, value)) = cached.as_ref()

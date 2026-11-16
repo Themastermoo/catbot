@@ -7,6 +7,7 @@
 //! more, until the reference server has nothing left to do.
 
 pub mod attachments;
+pub mod backups;
 pub mod changes;
 pub mod limits;
 pub mod reactions;
@@ -84,6 +85,8 @@ pub struct App {
     pub pairing: std::sync::Mutex<Option<devices::Pairing>>,
     /// The plans' usage windows as last fetched (`usage.rs`), and when.
     pub plan_usage: std::sync::Mutex<Option<(std::time::Instant, Value)>>,
+    /// AIs that turned a turn away for their usage limit, and until when (`backups.rs`).
+    pub limited_until: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
 }
 
 impl App {
@@ -110,6 +113,7 @@ impl App {
             remote: std::sync::OnceLock::new(),
             pairing: std::sync::Mutex::new(None),
             plan_usage: std::sync::Mutex::new(None),
+            limited_until: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -340,7 +344,7 @@ type Answer = Result<(StatusCode, Value), (StatusCode, String)>;
 
 /// The usage route's query, read before waiting (a request can't be held across a wait).
 fn usage_query(req: &Request) -> std::collections::HashMap<&'static str, String> {
-    ["period", "by"].into_iter().filter_map(|name| Some((name, urlencoding_decode(query_param(req, name)?)))).collect()
+    ["period", "by", "fresh"].into_iter().filter_map(|name| Some((name, urlencoding_decode(query_param(req, name)?)))).collect()
 }
 
 /// `GET /api/usage…`, at either door.
@@ -515,6 +519,9 @@ fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
     let before = bot.clone();
     apply_changes(&mut bot, &body)?;
     app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
+    if let Some(list) = body.get("backups") {
+        app.try_store(|store| backups::set(store, &bot, list)).map_err(bad)?;
+    }
     if let Some(memory) = &app.memory
         && let Err(err) = crate::memory::rename_bot(memory, &before, &bot)
     {
@@ -578,10 +585,12 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     if app.turns.busy(&conversation.id) {
         return Err((StatusCode::CONFLICT, "this bot is still working on the last message".into()));
     }
-    if let Some((why, until)) = limits::blocked(app, &bot, &bot.engine) {
-        let until = until.map(|t| format!(" until {}", t.with_timezone(&chrono::Local).format("%a %-I:%M %p"))).unwrap_or_default();
-        return Err((StatusCode::TOO_MANY_REQUESTS, format!("{why}{until}. Change the limits in Usage, or pick another AI for {}.", bot.name)));
+    // A Claude plan's windows, read again in the background when they're getting old.
+    if bot.engine == crate::engines::CLAUDE && usage::billing(&bot.engine) == "plan" {
+        usage::refresh_soon(app);
     }
+    // At a limit: a backup AI takes the turn, or none can.
+    let switched = backups::choose(app, &bot).map_err(|why| (StatusCode::TOO_MANY_REQUESTS, why))?;
     let mut detail = json!({});
     if let Some(id) = body["sendId"].as_str() {
         detail["sendId"] = json!(id);
@@ -608,6 +617,16 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     let request_id = message["id"].as_str().and_then(wire::parse_message_id).unwrap_or_default();
     let thread = conversation.id.clone();
     let said = format!("{text}{}{reacted}", attachments::note(&described));
+    let bot = match switched {
+        Some((stand_in, why)) => {
+            turns::save_and_send(app, &conversation.id, Role::Note, &why, None);
+            // The backup starts its own session, shown the chat so far.
+            app.with_store(|store| store.clear_session(&conversation.id));
+            stand_in
+        }
+        None => bot,
+    };
+    let conversation = app.try_store(|store| store.conversation(&conversation.id)).map_err(fail)?.unwrap_or(conversation);
     turns::start(app.clone(), bot, conversation, request_id, said.trim().to_string()).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
     Ok((StatusCode::ACCEPTED, json!({ "ok": true, "threadId": thread, "message": message })))
 }

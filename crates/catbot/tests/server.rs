@@ -981,7 +981,7 @@ async fn usage_is_recorded_broken_down_and_the_plan_read() {
         std::env::set_var("CATBOT_CLAUDE_USAGE_URL", format!("http://{plan_api}/usage"));
     }
     s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "claude", "model": "" } }))).await;
-    let (_, plans) = s.call("GET", "/api/usage/plans", None).await;
+    let (_, plans) = s.call("GET", "/api/usage/plans?fresh=1", None).await;
     let claude = &plans["plans"][0];
     assert_eq!(claude["ok"], true, "{plans}");
     assert_eq!(claude["windows"][0]["usedPercent"], 78.0);
@@ -1037,4 +1037,57 @@ async fn limits_stop_an_ai_and_say_until_when() {
     // No limit, no stop.
     s.call("PUT", "/api/limits", Some(json!({ "engines": { "openai": { "session": null, "week": null } } }))).await;
     assert_eq!(s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Again", "threadId": thread }))).await.0, 202);
+}
+
+#[tokio::test]
+async fn a_backup_ai_answers_when_the_bots_own_is_at_a_limit() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let api = listen(fake_api(seen.clone())).await;
+    for engine in ["openai", "xai"] {
+        s.call("PUT", &format!("/api/engines/{engine}/key"), Some(json!({ "key": "sk-test", "url": format!("http://{api}/v1") }))).await;
+    }
+
+    // Claude turns the turn away at its limit: OpenAI, the first backup, answers instead.
+    let (status, changed) = s
+        .call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "backups": [{ "engine": "openai", "model": "gpt-test" }, { "engine": "xai", "model": "gpt-test" }, { "engine": "nope" }] })))
+        .await;
+    assert_eq!(status, 400, "an unknown AI is refused: {changed}");
+    let (_, changed) = s
+        .call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "backups": [{ "engine": "openai", "model": "gpt-test" }, { "engine": "xai", "model": "gpt-test" }] })))
+        .await;
+    assert_eq!(changed["bot"]["backups"][1]["engine"], "xai");
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "limit me", "threadId": thread }))).await;
+    let note = until(&mut events, "note", |f| f["kind"] == "message" && f["message"]["kind"] == "activity" && f["message"]["tool"]["name"].as_str().is_some_and(|n| n.contains("backup"))).await;
+    let said = note["message"]["tool"]["name"].as_str().unwrap();
+    assert!(said.contains("Claude turned the last turn away at its usage limit") && said.contains("OpenAI · gpt-test (a backup) is answering"), "{said}");
+    let ask = until(&mut events, "ask", |f| runtime(f, "request.opened")).await;
+    let request = ask["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // The next message goes straight to the backup; with OpenAI at Catbot's limit, to the next one.
+    s.call("PUT", "/api/limits", Some(json!({ "engines": { "openai": { "session": 100 } } }))).await;
+    let (status, _) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Again", "threadId": thread }))).await;
+    assert_eq!(status, 202);
+    let note = until(&mut events, "note", |f| f["kind"] == "message" && f["message"]["kind"] == "activity" && f["message"]["tool"]["name"].as_str().is_some_and(|n| n.contains("Grok"))).await;
+    assert!(note["message"]["tool"]["name"].as_str().unwrap().contains("Grok (xAI) · gpt-test (a backup)"));
+    let ask = until(&mut events, "ask", |f| runtime(f, "request.opened")).await;
+    let request = ask["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let (_, by_engine) = s.call("GET", "/api/usage?period=30d&by=engine", None).await;
+    let labels: Vec<&str> = by_engine["rows"].as_array().unwrap().iter().filter_map(|r| r["label"].as_str()).collect();
+    assert!(labels.contains(&"Grok (xAI)") && labels.contains(&"OpenAI"), "{labels:?}");
+
+    // None can go: the message is refused, saying why.
+    s.call("PUT", "/api/limits", Some(json!({ "engines": { "openai": { "session": 100 }, "xai": { "session": 100 } } }))).await;
+    let (status, refused) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Once more", "threadId": thread }))).await;
+    assert_eq!(status, 429);
+    assert!(refused["error"].as_str().unwrap().contains("its backups can't go either"), "{refused}");
 }

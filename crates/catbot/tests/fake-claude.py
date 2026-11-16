@@ -4,6 +4,7 @@ The prompt picks the behaviour:
   "crash"  -> writes to stderr and exits 1 with no result line
   "tool"   -> calls a tool that is refused, like an unapproved Bash command
   "approve" -> asks the permission prompt tool (as the real CLI does), and obeys the answer
+  "limit"  -> turns the turn away at the plan's usage limit, as the real CLI does
   "write <file>: <words>" -> writes the words to that file in its folder (as a bot's edit would)
   "Name the conversation…" -> a chat's name, the way Catbot asks for one
   anything else -> streams "Hello, <prompt>" back
@@ -51,6 +52,11 @@ if (arg_after("--resume") or "").startswith("gone"):
          "session_id": arg_after("--resume")})
     sys.exit(1)
 prompt = message["message"]["content"]
+
+if prompt.startswith("limit"):
+    out({"type": "system", "subtype": "init", "session_id": session, "model": "claude-fake"})
+    out({"type": "result", "is_error": True, "result": "Claude AI usage limit reached|4102444800", "session_id": session})
+    sys.exit(1)
 
 if prompt == "crash":
     print("Error: something broke inside the CLI", file=sys.stderr)

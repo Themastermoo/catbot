@@ -19,8 +19,8 @@ pub fn UsageDialog(on_close: EventHandler<()>) -> Element {
     let state = use_context::<Signal<crate::live::State>>();
 
     use_effect(move || {
-        let _ = refreshed();
-        spawn(async move { plans.set(Some(api::get("/api/usage/plans").await)) });
+        let fresh = if refreshed() > 0 { "?fresh=1" } else { "" };
+        spawn(async move { plans.set(Some(api::get(&format!("/api/usage/plans{fresh}")).await)) });
     });
     use_effect(move || {
         let _ = refreshed();

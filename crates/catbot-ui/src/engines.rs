@@ -299,3 +299,98 @@ fn KeyBox(engine: Value) -> Element {
 fn str_of(value: &Value, key: &str) -> String {
     value[key].as_str().unwrap_or_default().to_string()
 }
+
+/// A bot's backup AIs: who takes over, in order, when its own AI is at a limit (Usage → limits).
+#[component]
+pub fn Backups(bot: Bot, saving: bool, change: Callback<Value>) -> Element {
+    let state = use_context::<Signal<State>>();
+    let mut engines = use_signal(Vec::<Value>::new);
+    let mut adding = use_signal(|| None::<(String, String)>);
+    use_effect(move || {
+        let _ = state.read().engines_changed;
+        spawn(async move {
+            if let Ok(answer) = api::get("/api/engines").await {
+                engines.set(answer["engines"].as_array().cloned().unwrap_or_default());
+            }
+        });
+    });
+    let name_of = move |id: &str| engines.read().iter().find(|e| e["id"] == id).and_then(|e| e["name"].as_str().map(str::to_string)).unwrap_or_else(|| id.to_string());
+    let ready_of = move |id: &str| engines.read().iter().find(|e| e["id"] == id).is_some_and(|e| e["ready"] == true);
+    let list = bot.backups.clone();
+    let save = move |list: Vec<(String, String)>| {
+        let wire: Vec<Value> = list.iter().map(|(engine, model)| serde_json::json!({ "engine": engine, "model": model })).collect();
+        change.call(serde_json::json!({ "backups": wire }));
+    };
+    let count = list.len();
+    rsx! {
+        div { class: "mt-4 {LABEL}", "Backup AIs" }
+        p { class: "mt-0.5 text-[12px] text-ink-tertiary", "When {bot.name}'s AI is at a limit, the first of these that can go answers instead, and the chat says so." }
+        div { class: "mt-1.5 flex flex-col gap-1", "data-backups": true,
+            for (i, (engine, model)) in list.iter().cloned().enumerate() {
+                {
+                    let (up, down, gone) = (list.clone(), list.clone(), list.clone());
+                    let save_up = save;
+                    let save_down = save;
+                    let save_gone = save;
+                    let label = if model.is_empty() { name_of(&engine) } else { format!("{} · {model}", name_of(&engine)) };
+                    let unready = !ready_of(&engine);
+                    rsx! {
+                        div { key: "{engine}-{model}", class: "flex items-center gap-1 rounded-lg bg-raised px-2 py-1 text-[13px]", "data-backup": "{engine}",
+                            span { class: "w-5 shrink-0 text-ink-tertiary", "{i + 1}." }
+                            span { class: "min-w-0 flex-1 truncate text-ink", "{label}" }
+                            if unready { span { class: "shrink-0 text-[11px] text-warning", "not set up" } }
+                            button { r#type: "button", "aria-label": "Move up", disabled: saving || i == 0, class: SMALL,
+                                onclick: move |_| { let mut l = up.clone(); l.swap(i, i - 1); save_up(l); }, "↑" }
+                            button { r#type: "button", "aria-label": "Move down", disabled: saving || i + 1 == count, class: SMALL,
+                                onclick: move |_| { let mut l = down.clone(); l.swap(i, i + 1); save_down(l); }, "↓" }
+                            button { r#type: "button", "aria-label": "Remove {label}", disabled: saving, class: SMALL,
+                                onclick: move |_| { let mut l = gone.clone(); l.remove(i); save_gone(l); }, "×" }
+                        }
+                    }
+                }
+            }
+            match adding() {
+                None => rsx! {
+                    button { r#type: "button", "data-add-backup": true, disabled: saving, class: "self-start rounded-lg px-2 py-1 text-[13px] text-accent hover:bg-raised",
+                        onclick: move |_| adding.set(Some((String::new(), String::new()))), "+ Add a backup AI" }
+                },
+                Some((engine, model)) => {
+                    let options: Vec<(String, String, bool)> = engines.read().iter()
+                        .map(|e| (e["id"].as_str().unwrap_or_default().to_string(), e["name"].as_str().unwrap_or_default().to_string(), e["ready"] == true))
+                        .collect();
+                    let presets: Vec<String> = engines.read().iter().find(|e| e["id"] == engine.as_str())
+                        .and_then(|e| e["models"].as_array().cloned()).unwrap_or_default().iter()
+                        .filter_map(|m| m["id"].as_str().filter(|id| !id.is_empty()).map(str::to_string)).collect();
+                    let current = list.clone();
+                    let save_new = save;
+                    let (chosen_engine, chosen_model) = (engine.clone(), model.clone());
+                    rsx! {
+                        div { class: "flex flex-wrap items-center gap-1.5", "data-backup-form": true,
+                            select { class: SMALL_FIELD, "aria-label": "Backup AI", value: "{engine}",
+                                onchange: move |e| adding.set(Some((e.value(), String::new()))),
+                                option { value: "", "Pick an AI…" }
+                                for (id, name, ready) in options {
+                                    option { key: "{id}", value: "{id}", if ready { "{name}" } else { "{name} (not set up)" } }
+                                }
+                            }
+                            input { class: "{SMALL_FIELD} w-[150px]", "aria-label": "Backup model", list: "backup-models", placeholder: "its default model", value: "{model}",
+                                oninput: move |e| { let engine = adding.peek().as_ref().map(|a| a.0.clone()).unwrap_or_default(); adding.set(Some((engine, e.value()))); } }
+                            datalist { id: "backup-models", for m in presets { option { key: "{m}", value: "{m}" } } }
+                            button { r#type: "button", "data-save-backup": true, disabled: saving || chosen_engine.is_empty(), class: "rounded-lg bg-accent px-2.5 py-1 text-[13px] font-semibold text-white disabled:opacity-40",
+                                onclick: move |_| {
+                                    let mut l = current.clone();
+                                    l.push((chosen_engine.clone(), chosen_model.trim().to_string()));
+                                    adding.set(None);
+                                    save_new(l);
+                                }, "Add" }
+                            button { r#type: "button", class: "rounded-lg px-2 py-1 text-[13px] text-ink-secondary hover:bg-raised", onclick: move |_| adding.set(None), "Cancel" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+const SMALL: &str = "flex size-6 shrink-0 items-center justify-center rounded text-ink-secondary hover:bg-control disabled:opacity-30";
+const SMALL_FIELD: &str = "h-8 rounded-lg bg-raised px-2 text-[13px] text-ink outline-none";

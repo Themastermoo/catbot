@@ -25,6 +25,8 @@ pub struct Bot {
     pub engine: String,
     /// The model it asks for; empty for its engine's default.
     pub model: String,
+    /// The AIs that take over when its own is at a limit, in order: (engine, model).
+    pub backups: Vec<(String, String)>,
     /// What it may do without asking: "ask", "edits", "auto" or "full".
     pub approval_mode: String,
     /// Whether it may use the Codex vault.
@@ -117,6 +119,14 @@ impl Bot {
             soul: wire["soul"].as_str().unwrap_or_default().to_string(),
             engine: wire["modelSelection"]["instanceId"].as_str().filter(|e| !e.is_empty()).unwrap_or("claude").to_string(),
             model: wire["modelSelection"]["model"].as_str().unwrap_or_default().to_string(),
+            backups: wire["backups"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|b| Some((b["engine"].as_str()?.to_string(), b["model"].as_str().unwrap_or_default().to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
             approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
             codex: wire["codex"].as_bool().unwrap_or(true),
             activity,

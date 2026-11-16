@@ -176,8 +176,25 @@ async fn run(
         let note = "Claude no longer had this conversation, so it continued in a fresh one.";
         save_and_send(app, thread, Role::Note, note, None);
         session = Session::New(id);
-        result = drive(app, bot, &session, &with_earlier(&session), codex, thread, &item_id, &cancel, &emit).await;
+        result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit).await;
     }
+
+    // Claude turned the turn away at its usage limit before doing anything: a backup takes it.
+    let mut ran_on = bot.clone();
+    let said: String = result.errors.iter().cloned().chain(result.outcome.as_ref().and_then(|o| o.result.clone())).collect::<Vec<_>>().join(" ");
+    if bot.engine == engines::CLAUDE && !result.stopped && result.reply.trim().is_empty() && result.steps.is_empty() && super::backups::says_limit(&said) {
+        let until = super::backups::lifts_at(&said).unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(1));
+        app.limited_until.lock().expect("limited lock").insert(bot.engine.clone(), until);
+        super::usage::forget(app);
+        if let Ok(Some((stand_in, why))) = super::backups::choose(app, bot) {
+            save_and_send(app, thread, Role::Note, &why, None);
+            app.with_store(|store| store.clear_session(thread));
+            let fresh = Session::New(uuid::Uuid::new_v4().to_string());
+            result = drive(app, &stand_in, &fresh, text, codex, thread, &item_id, &cancel, &emit).await;
+            ran_on = stand_in;
+        }
+    }
+    let bot = &ran_on;
 
     // Close the cards of questions nobody answered before the turn ended.
     for request in app.turns.open_cards(thread) {
@@ -200,6 +217,11 @@ async fn run(
         save_and_send(app, thread, Role::Bot, &result.reply, Some(&detail));
     }
     super::changes::after_turn(app, thread, points, before).await;
+    // A backup answered: the bot's own AI starts afresh next time, shown everything said.
+    let own_engine = app.with_store(|store| store.bot_by_id(&bot.id)).flatten().map(|b| b.engine);
+    if own_engine.is_some_and(|own| own != bot.engine) {
+        app.with_store(|store| store.clear_session(thread));
+    }
     if let Some(outcome) = &result.outcome {
         let model = result.model.clone().or_else(|| bot.model.clone()).unwrap_or_default();
         super::usage::record(app, bot, thread, &bot.engine, &model, outcome.tokens, outcome.cost_usd);

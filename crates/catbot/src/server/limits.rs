@@ -199,6 +199,11 @@ pub fn blocked(app: &App, bot: &Bot, engine: &str) -> Option<(String, Option<Dat
             return Some((format!("{name} is at Catbot's weekly limit"), w.resets));
         }
     }
+    if let Some(until) = app.limited_until.lock().expect("limited lock").get(engine).copied()
+        && until > now
+    {
+        return Some((format!("{name} turned the last turn away at its usage limit"), Some(until)));
+    }
     if engine == engines::CLAUDE
         && let Some(plan) = app.plan_usage.lock().expect("plan usage lock").as_ref().map(|(_, v)| v.clone())
     {
