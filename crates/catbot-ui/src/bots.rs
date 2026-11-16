@@ -6,6 +6,41 @@
 
 use serde_json::Value;
 
+/// What a channel adds to the bot it's shown as.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelInfo {
+    /// Its bots in order: (id, name, mark, colour).
+    pub members: Vec<(String, String, String, String)>,
+    /// The bot that answers when no one is @named.
+    pub lead: String,
+    pub folder: String,
+}
+
+impl ChannelInfo {
+    fn from_wire(wire: &Value) -> Option<ChannelInfo> {
+        let members = wire["members"].as_array()?;
+        Some(ChannelInfo {
+            members: members
+                .iter()
+                .filter_map(|m| {
+                    Some((
+                        m["id"].as_str()?.to_string(),
+                        m["name"].as_str().unwrap_or_default().to_string(),
+                        m["mark"].as_str().unwrap_or("cat-head").to_string(),
+                        m["color"].as_str().unwrap_or("blue").to_string(),
+                    ))
+                })
+                .collect(),
+            lead: wire["lead"].as_str().unwrap_or_default().to_string(),
+            folder: wire["folder"].as_str().unwrap_or_default().to_string(),
+        })
+    }
+
+    pub fn lead_name(&self) -> String {
+        self.members.iter().find(|m| m.0 == self.lead).map(|m| m.1.clone()).unwrap_or_default()
+    }
+}
+
 /// One of Catbot's bots, as the sidebar needs it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bot {
@@ -27,6 +62,8 @@ pub struct Bot {
     pub model: String,
     /// The AIs that take over when its own is at a limit, in order: (engine, model).
     pub backups: Vec<(String, String)>,
+    /// Set when this "bot" is a channel: a group chat of several bots.
+    pub channel: Option<ChannelInfo>,
     /// What it may do without asking: "ask", "edits", "auto" or "full".
     pub approval_mode: String,
     /// Whether it may use the Codex vault.
@@ -119,6 +156,7 @@ impl Bot {
             soul: wire["soul"].as_str().unwrap_or_default().to_string(),
             engine: wire["modelSelection"]["instanceId"].as_str().filter(|e| !e.is_empty()).unwrap_or("claude").to_string(),
             model: wire["modelSelection"]["model"].as_str().unwrap_or_default().to_string(),
+            channel: ChannelInfo::from_wire(&wire["channel"]),
             backups: wire["backups"]
                 .as_array()
                 .map(|list| {

@@ -94,6 +94,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
 
     let close = move |_| ui.settings_open.set(false);
     let full = bot.approval_mode == "full";
+    let channel = bot.channel.is_some();
     rsx! {
         aside {
             "aria-label": "Bot settings",
@@ -102,7 +103,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                 button { r#type: "button", "aria-label": "Collapse bot settings", class: ICON_BUTTON, onclick: close,
                     Glyph { d: "m15 18-6-6 6-6", size: 18 }
                 }
-                span { class: "text-[15px] font-semibold text-ink", "Bot settings" }
+                span { class: "text-[15px] font-semibold text-ink", if channel { "Channel settings" } else { "Bot settings" } }
                 button { r#type: "button", "aria-label": "Close bot settings", class: ICON_BUTTON, onclick: close,
                     Glyph { d: "M18 6 6 18M6 6l12 12", size: 18 }
                 }
@@ -115,10 +116,10 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                             BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
                             div { class: "min-w-0",
                                 div { class: "text-[15px] font-semibold text-ink truncate", "{bot.name}" }
-                                div { class: "text-[12px] text-ink-secondary", "Pick a picture and a colour" }
+                                div { class: "text-[12px] text-ink-secondary", if channel { "Pick a colour" } else { "Pick a picture and a colour" } }
                             }
                         }
-                        div { role: "radiogroup", "aria-label": "Picture", class: "grid grid-cols-4 gap-2",
+                        div { role: "radiogroup", "aria-label": "Picture", class: "grid grid-cols-4 gap-2", hidden: channel,
                             for (mark, label) in MARKS {
                                 button {
                                     key: "{mark}",
@@ -176,7 +177,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                                 key: "{bot.id}-soul",
                                 rows: 6,
                                 class: "{FIELD} resize-y text-[13px] leading-relaxed",
-                                placeholder: "What this bot is for, and how it should work",
+                                placeholder: if channel { "What this channel is for; every bot in it reads this" } else { "What this bot is for, and how it should work" },
                                 initial_value: "{bot.soul}",
                                 onchange: {
                                     let current = bot.soul.clone();
@@ -190,8 +191,11 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                         }
                         p { class: "mt-1.5 text-[12px] text-ink-tertiary", "Saved when you click away. Used from its next message." }
                     }
+                    if channel {
+                        crate::channels::ChannelSettings { key: "{bot.id}-members", bot: bot.clone(), saving: saving(), change }
+                    }
                     // Which AI, its model, and approval level.
-                    div { class: CARD,
+                    div { class: CARD, hidden: channel,
                         crate::engines::EnginePicker { bot: bot.clone(), saving: saving(), change }
                         crate::engines::Backups { bot: bot.clone(), saving: saving(), change }
                         div { class: "mt-4 {LABEL}", "Approval level" }
@@ -218,7 +222,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                         }
                     }
                     // Codex.
-                    div { class: "flex items-center justify-between gap-4 {CARD}",
+                    div { class: "flex items-center justify-between gap-4 {CARD}", hidden: channel,
                         div { class: "min-w-0",
                             div { class: "text-[15px] font-medium text-ink", "Codex vault" }
                             div { class: "mt-0.5 text-[12px] leading-relaxed text-ink-secondary",
@@ -231,7 +235,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                     div { class: CARD,
                         if confirm_delete() {
                             p { class: "text-[13px] leading-relaxed text-ink",
-                                "Delete {bot.name}? Its conversation is deleted for good. Its folder of files stays where it is."
+                                if channel { "Delete {bot.name}? Its conversation is deleted for good. The bots in it, and its folder of files, stay." } else { "Delete {bot.name}? Its conversation is deleted for good. Its folder of files stays where it is." }
                             }
                             div { class: "mt-3 flex justify-end gap-2",
                                 button { r#type: "button", class: "rounded-lg px-3 py-2 text-[13px] text-ink-secondary hover:bg-control", onclick: move |_| confirm_delete.set(false), "Keep it" }
@@ -240,7 +244,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                         } else {
                             button { r#type: "button", class: "flex items-center gap-2 text-[13px] text-danger hover:underline", onclick: move |_| confirm_delete.set(true),
                                 Glyph { d: "M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6", size: 14 }
-                                "Delete this bot…"
+                                if channel { "Delete this channel…" } else { "Delete this bot…" }
                             }
                         }
                     }

@@ -29,6 +29,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     let mut remembering = use_signal(|| false);
     let mut configuring = use_signal(|| false);
     let mut measuring = use_signal(|| false);
+    let mut grouping = use_signal(|| false);
     // Bots whose chats are showing.
     let mut unfolded = use_signal(HashSet::<String>::new);
     let state = use_context::<Signal<State>>();
@@ -104,6 +105,18 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                 } }
                 button {
                     r#type: "button",
+                    "aria-label": "New channel",
+                    title: "New channel: a group chat of several bots",
+                    "data-open-new-channel": true,
+                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                    onclick: move |_| grouping.set(true),
+                    // Lucide `Hash` (ISC).
+                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        path { d: "M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" }
+                    }
+                }
+                button {
+                    r#type: "button",
                     "aria-label": "New Bot",
                     title: "New Bot",
                     class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
@@ -118,6 +131,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             }
             if pairing() {
                 crate::devices::DevicesDialog { on_close: move |_| pairing.set(false) }
+            }
+            if grouping() {
+                crate::channels::NewChannelDialog { on_close: move |_| grouping.set(false) }
             }
             if measuring() {
                 crate::usage::UsageDialog { on_close: move |_| measuring.set(false) }

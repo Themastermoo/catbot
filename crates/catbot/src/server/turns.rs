@@ -97,18 +97,7 @@ impl Turns {
 
 /// Starts a turn on a conversation. Fails if one is already running there.
 pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i64, text: String) -> Result<String, &'static str> {
-    let turn_id = uuid::Uuid::new_v4().to_string();
-    let cancel = Arc::new(Notify::new());
-    {
-        let mut running = app.turns.running.lock().expect("turns lock");
-        if running.contains_key(&conversation.id) {
-            return Err("this bot is still working on the last message");
-        }
-        running.insert(
-            conversation.id.clone(),
-            Handle { turn_id: turn_id.clone(), answerer: None, cancel: cancel.clone(), open_cards: HashMap::new() },
-        );
-    }
+    let (turn_id, cancel) = register(&app, &conversation.id)?;
     let id = turn_id.clone();
     tokio::spawn(async move {
         let thread_id = conversation.id.clone();
@@ -117,6 +106,27 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
         app.announce_bot(&bot.id);
     });
     Ok(turn_id)
+}
+
+/// Runs a turn to its end (for a channel's bots, who answer one after another).
+pub async fn run_through(app: &Arc<App>, bot: &Bot, conversation: Conversation, request_id: i64, text: &str) -> Result<(), &'static str> {
+    let (turn_id, cancel) = register(app, &conversation.id)?;
+    let thread_id = conversation.id.clone();
+    run(app, bot, conversation, request_id, text, &turn_id, cancel).await;
+    app.turns.finish(&thread_id);
+    Ok(())
+}
+
+/// Marks a conversation busy with a new turn: its id and its stop signal.
+fn register(app: &App, thread: &str) -> Result<(String, Arc<Notify>), &'static str> {
+    let turn_id = uuid::Uuid::new_v4().to_string();
+    let cancel = Arc::new(Notify::new());
+    let mut running = app.turns.running.lock().expect("turns lock");
+    if running.contains_key(thread) {
+        return Err("this bot is still working on the last message");
+    }
+    running.insert(thread.to_string(), Handle { turn_id: turn_id.clone(), answerer: None, cancel: cancel.clone(), open_cards: HashMap::new() });
+    Ok((turn_id, cancel))
 }
 
 /// What one run of the CLI produced.
@@ -148,9 +158,12 @@ async fn run(
 
     let codex = chat::codex_dir(bot, &app.codex);
     app.seed_memory(bot);
+    // In a channel several bots share the transcript, so each turn starts a fresh session shown
+    // everything said there (a bot's own session wouldn't hold what the others said).
+    let channel = conversation.channel_id.is_some();
     let mut session = match &conversation.session_id {
-        Some(id) => Session::Resume(id.clone()),
-        None => Session::New(uuid::Uuid::new_v4().to_string()),
+        Some(id) if !channel => Session::Resume(id.clone()),
+        _ => Session::New(uuid::Uuid::new_v4().to_string()),
     };
     if let Session::New(id) = &session {
         app.with_store(|store| store.set_session(thread, id));
@@ -163,7 +176,7 @@ async fn run(
     let item_id = format!("item-{turn_id}");
     // A fresh session (a branched chat, or one Claude lost) is shown what was said before.
     let with_earlier = |session: &Session| match session {
-        Session::New(_) if bot.engine == engines::CLAUDE => format!("{}{text}", so_far(app, thread, request_id)),
+        Session::New(_) if bot.engine == engines::CLAUDE => format!("{}{text}", so_far(app, thread, if channel { i64::MAX } else { request_id }, bot)),
         _ => text.to_string(),
     };
     let mut result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit).await;
@@ -214,6 +227,7 @@ async fn run(
             "item_id": item_id,
             "turn_id": turn_id,
             "request_message_id": wire::message_id(request_id),
+            "botId": bot.id,
             "cost_usd": outcome.and_then(|o| o.cost_usd),
             "duration_ms": outcome.and_then(|o| o.duration_ms),
         });
@@ -382,14 +396,7 @@ fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::P
         .find(|m| m.role == Role::Person)
         .map(|m| super::attachments::pictures(m, &bot.folder))
         .unwrap_or_default();
-    let history = messages
-        .into_iter()
-        .filter_map(|m| match m.role {
-            Role::Person => Some((true, super::attachments::person_text(&m))),
-            Role::Bot if !m.body.trim().is_empty() => Some((false, m.body)),
-            _ => None,
-        })
-        .collect();
+    let history = with_cue(lines(app, messages, bot), app, thread, bot);
     let mut system = chat::system_prompt(bot, codex.as_deref(), app.memory.as_deref());
     system.push_str(&api::tool_guide(&bot.folder));
     let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
@@ -404,16 +411,8 @@ fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
     let program = engines::agent_program(engine).ok_or_else(|| {
         format!("{} isn't installed on this computer. Install it with `{}`, then sign in with `{}`.", engine.name, engine.install, engine.sign_in)
     })?;
-    let mut history: Vec<(bool, String)> = app
-        .with_store(|store| store.messages(thread, 60))
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|m| match m.role {
-            Role::Person => Some((true, super::attachments::person_text(&m))),
-            Role::Bot if !m.body.trim().is_empty() => Some((false, m.body)),
-            _ => None,
-        })
-        .collect();
+    let messages = app.with_store(|store| store.messages(thread, 60)).unwrap_or_default();
+    let mut history = with_cue(lines(app, messages, bot), app, thread, bot);
     let text = match history.last() {
         Some((true, _)) => history.pop().map(|(_, text)| text).unwrap_or_default(),
         _ => String::new(),
@@ -458,25 +457,68 @@ fn save_step(app: &Arc<App>, thread: &str, step: &Step) {
     save_and_send(app, thread, Role::Step, &body, detail.as_ref());
 }
 
+/// Bots' names by id.
+fn names(app: &App) -> std::collections::HashMap<String, String> {
+    app.with_store(|store| store.bots()).unwrap_or_default().into_iter().map(|b| (b.id, b.name)).collect()
+}
+
+/// A conversation as an AI's history: the person's words (and other bots', named, in a
+/// channel) on one side, this bot's own replies on the other.
+fn lines(app: &App, messages: Vec<crate::store::Message>, bot: &Bot) -> Vec<(bool, String)> {
+    let names = names(app);
+    messages
+        .into_iter()
+        .filter_map(|m| {
+            let speaker = m.detail.as_ref().and_then(|d| d["botId"].as_str()).map(str::to_string);
+            match m.role {
+                Role::Person => Some((true, super::attachments::person_text(&m))),
+                Role::Bot if m.body.trim().is_empty() => None,
+                Role::Bot => match speaker {
+                    Some(id) if id != bot.id => Some((true, format!("[{}]: {}", names.get(&id).map(String::as_str).unwrap_or("Another bot"), m.body))),
+                    _ => Some((false, m.body)),
+                },
+                _ => None,
+            }
+        })
+        .collect()
+}
+
+/// In a channel, where the last word may be another bot's: a cue that it's this bot's turn.
+fn with_cue(mut history: Vec<(bool, String)>, app: &App, thread: &str, bot: &Bot) -> Vec<(bool, String)> {
+    let channel = app.with_store(|store| store.conversation(thread)).flatten().and_then(|c| c.channel_id).is_some();
+    if channel && history.last().is_none_or(|(person, text)| !person || text.starts_with('[')) {
+        history.push((true, format!("(It's your turn to answer in the channel, as {}.)", bot.name)));
+    }
+    history
+}
+
 /// The chat before message `before`, for a session that starts without it: the last 30 of the
 /// person's messages and the bot's replies, or nothing for a new chat.
-fn so_far(app: &App, thread: &str, before: i64) -> String {
-    let earlier: Vec<(bool, String)> = app
-        .with_store(|store| store.page(thread, Some(before), 30).map(|(page, _)| page))
-        .unwrap_or_default()
+fn so_far(app: &App, thread: &str, before: i64, bot: &Bot) -> String {
+    let page = app.with_store(|store| store.page(thread, Some(before), 30).map(|(page, _)| page)).unwrap_or_default();
+    let names = names(app);
+    let earlier: Vec<(String, String)> = page
         .into_iter()
-        .filter_map(|m| match m.role {
-            Role::Person => Some((true, super::attachments::person_text(&m))),
-            Role::Bot if !m.body.trim().is_empty() => Some((false, m.body)),
-            _ => None,
+        .filter_map(|m| {
+            let speaker = m.detail.as_ref().and_then(|d| d["botId"].as_str()).map(str::to_string);
+            match m.role {
+                Role::Person => Some(("Person".to_string(), super::attachments::person_text(&m))),
+                Role::Bot if !m.body.trim().is_empty() => {
+                    let who = match speaker {
+                        Some(id) if id != bot.id => names.get(&id).cloned().unwrap_or_else(|| "Another bot".into()),
+                        _ => "You".to_string(),
+                    };
+                    Some((who, m.body))
+                }
+                _ => None,
+            }
         })
         .collect();
     if earlier.is_empty() {
         return String::new();
     }
     let mut said = String::from("<conversation_so_far>\n");
-    for (person, text) in earlier {
-        let who = if person { "Person" } else { "You" };
+    for (who, text) in earlier {
         let short: String = text.chars().take(4000).collect();
         said.push_str(&format!("{who}: {short}\n\n"));
     }

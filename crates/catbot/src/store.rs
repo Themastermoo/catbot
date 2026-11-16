@@ -47,6 +47,24 @@ pub fn default_codex() -> PathBuf {
     user_home().join("VaultCodex")
 }
 
+/// A channel: a group chat of several bots, with its own instructions and folder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Channel {
+    /// `ch-…`, so it can't be mistaken for a bot's id.
+    pub id: String,
+    pub name: String,
+    /// What every member is told about this channel.
+    pub instructions: String,
+    /// The channel's own working folder, shared by its members while they work here.
+    pub folder: PathBuf,
+    /// The bot that answers when no one is @named.
+    pub lead: Option<String>,
+    pub color: String,
+    pub created_at: String,
+    /// Its bots, in order.
+    pub members: Vec<String>,
+}
+
 /// What one turn used.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UsageRow {
@@ -171,6 +189,8 @@ pub struct Conversation {
     pub title_by_person: bool,
     /// When it was put away in the bot's archived chats; none while it's in the list.
     pub archived_at: Option<String>,
+    /// The channel whose transcript this is; none for a bot's own chat.
+    pub channel_id: Option<String>,
 }
 
 /// A device paired to reach Catbot from away (`server::remote`).
@@ -184,7 +204,7 @@ pub struct Device {
 }
 
 /// A conversation's columns, in the order `conversation_from_row` reads them.
-const CONVERSATION: &str = "id, bot_id, session_id, created_at, updated_at, title, title_by_person, archived_at";
+const CONVERSATION: &str = "id, bot_id, session_id, created_at, updated_at, title, title_by_person, archived_at, channel_id";
 
 /// Who a stored message is from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -393,6 +413,31 @@ impl Store {
                      value TEXT NOT NULL
                  );
                  PRAGMA user_version = 7;
+                 COMMIT;",
+            )?;
+        }
+        if version < 8 {
+            // Version 8: channels, group chats of several bots. A channel's transcript is a
+            // conversation marked with its channel (held by one of its members, for the key).
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE channels (
+                     id           TEXT PRIMARY KEY,
+                     name         TEXT NOT NULL,
+                     instructions TEXT NOT NULL DEFAULT '',
+                     folder       TEXT NOT NULL,
+                     lead_bot_id  TEXT,
+                     color        TEXT NOT NULL DEFAULT 'blue',
+                     created_at   TEXT NOT NULL
+                 );
+                 CREATE TABLE channel_members (
+                     channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
+                     bot_id     TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                     position   INTEGER NOT NULL,
+                     PRIMARY KEY (channel_id, bot_id)
+                 );
+                 ALTER TABLE conversations ADD COLUMN channel_id TEXT;
+                 PRAGMA user_version = 8;
                  COMMIT;",
             )?;
         }
@@ -661,8 +706,124 @@ impl Store {
     /// Removes a bot and its conversations. Its folder is left on disk.
     pub fn delete_bot(&self, name: &str) -> Result<Bot, BoxError> {
         let bot = self.bot(name)?.ok_or_else(|| format!("no bot named {name}"))?;
+        // A channel transcript held by this bot passes to another member (or the channel goes,
+        // if it has no one else), so deleting the bot doesn't delete the channel's talk.
+        for channel in self.channels()? {
+            let members: Vec<String> = channel.members.iter().filter(|m| **m != bot.id).cloned().collect();
+            if channel.members.contains(&bot.id) && members.is_empty() {
+                self.delete_channel(&channel.id)?;
+                continue;
+            }
+            if let Some(next) = members.first() {
+                self.conn.execute("UPDATE conversations SET bot_id = ?1 WHERE channel_id = ?2 AND bot_id = ?3", params![next, channel.id, bot.id])?;
+                if channel.lead.as_deref() == Some(bot.id.as_str()) {
+                    self.conn.execute("UPDATE channels SET lead_bot_id = ?1 WHERE id = ?2", params![next, channel.id])?;
+                }
+            }
+        }
         self.conn.execute("DELETE FROM bots WHERE id = ?1", [&bot.id])?;
         Ok(bot)
+    }
+
+    /// Makes a channel: its folder, its members (in order) and its transcript.
+    pub fn create_channel(&self, name: &str, members: &[String], lead: Option<&str>) -> Result<Channel, BoxError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("a channel needs a name".into());
+        }
+        if members.is_empty() {
+            return Err("a channel needs at least one bot".into());
+        }
+        let id = format!("ch-{}", uuid::Uuid::new_v4().simple());
+        let base = self.home.join("channels").join(slug(name));
+        let folder = (1..).map(|n| if n == 1 { base.clone() } else { base.with_file_name(format!("{}-{n}", slug(name))) }).find(|p| !p.exists()).unwrap_or(base);
+        std::fs::create_dir_all(&folder)?;
+        let lead = lead.filter(|l| members.iter().any(|m| m == l)).map(str::to_string).unwrap_or_else(|| members[0].clone());
+        self.conn.execute(
+            "INSERT INTO channels (id, name, folder, lead_bot_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, name, folder.to_string_lossy(), lead, now()],
+        )?;
+        self.set_channel_members(&id, members)?;
+        let at = now();
+        self.conn.execute(
+            "INSERT INTO conversations (id, bot_id, created_at, updated_at, title, channel_id) VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
+            params![uuid::Uuid::new_v4().to_string(), lead, at, name, id],
+        )?;
+        self.channel(&id)?.ok_or_else(|| "the channel vanished".into())
+    }
+
+    fn set_channel_members(&self, channel_id: &str, members: &[String]) -> Result<(), BoxError> {
+        self.conn.execute("DELETE FROM channel_members WHERE channel_id = ?1", [channel_id])?;
+        for (i, bot) in members.iter().enumerate() {
+            self.conn.execute(
+                "INSERT OR IGNORE INTO channel_members (channel_id, bot_id, position) VALUES (?1, ?2, ?3)",
+                params![channel_id, bot, i as i64],
+            )?;
+        }
+        Ok(())
+    }
+
+    pub fn channels(&self) -> Result<Vec<Channel>, BoxError> {
+        let ids: Vec<String> = {
+            let mut stmt = self.conn.prepare("SELECT id FROM channels ORDER BY created_at")?;
+            stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?
+        };
+        Ok(ids.iter().filter_map(|id| self.channel(id).ok().flatten()).collect())
+    }
+
+    pub fn channel(&self, id: &str) -> Result<Option<Channel>, BoxError> {
+        let found = self
+            .conn
+            .query_row("SELECT id, name, instructions, folder, lead_bot_id, color, created_at FROM channels WHERE id = ?1", [id], |r| {
+                Ok(Channel {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    instructions: r.get(2)?,
+                    folder: PathBuf::from(r.get::<_, String>(3)?),
+                    lead: r.get(4)?,
+                    color: r.get(5)?,
+                    created_at: r.get(6)?,
+                    members: Vec::new(),
+                })
+            })
+            .optional()?;
+        let Some(mut channel) = found else { return Ok(None) };
+        let mut stmt = self.conn.prepare("SELECT bot_id FROM channel_members WHERE channel_id = ?1 ORDER BY position")?;
+        channel.members = stmt.query_map([id], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        Ok(Some(channel))
+    }
+
+    /// Saves a channel's name, instructions, colour, members and lead.
+    pub fn update_channel(&self, channel: &Channel) -> Result<(), BoxError> {
+        if channel.members.is_empty() {
+            return Err("a channel needs at least one bot".into());
+        }
+        let lead = channel.lead.clone().filter(|l| channel.members.contains(l)).unwrap_or_else(|| channel.members[0].clone());
+        self.conn.execute(
+            "UPDATE channels SET name = ?1, instructions = ?2, color = ?3, lead_bot_id = ?4 WHERE id = ?5",
+            params![channel.name.trim(), channel.instructions, channel.color, lead, channel.id],
+        )?;
+        self.set_channel_members(&channel.id, &channel.members)?;
+        // The transcript is held by a member.
+        self.conn.execute(
+            "UPDATE conversations SET bot_id = ?1, title = ?2 WHERE channel_id = ?3",
+            params![lead, channel.name.trim(), channel.id],
+        )?;
+        Ok(())
+    }
+
+    pub fn delete_channel(&self, id: &str) -> Result<(), BoxError> {
+        self.conn.execute("DELETE FROM conversations WHERE channel_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM channels WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// A channel's transcript.
+    pub fn channel_conversation(&self, channel_id: &str) -> Result<Option<Conversation>, BoxError> {
+        Ok(self
+            .conn
+            .query_row(&format!("SELECT {CONVERSATION} FROM conversations WHERE channel_id = ?1 LIMIT 1"), [channel_id], conversation_from_row)
+            .optional()?)
     }
 
     /// The chat the bot opens to: the one last opened, else its latest chat in the list,
@@ -676,6 +837,7 @@ impl Store {
         if let Some(open) = open
             && let Some(conversation) = self.conversation(&open)?
             && conversation.bot_id == bot_id
+            && conversation.channel_id.is_none()
         {
             return Ok(Some(conversation));
         }
@@ -683,7 +845,7 @@ impl Store {
             .conn
             .query_row(
                 &format!(
-                    "SELECT {CONVERSATION} FROM conversations WHERE bot_id = ?1
+                    "SELECT {CONVERSATION} FROM conversations WHERE bot_id = ?1 AND channel_id IS NULL
                      ORDER BY archived_at IS NOT NULL, updated_at DESC, rowid DESC LIMIT 1"
                 ),
                 [bot_id],
@@ -703,7 +865,7 @@ impl Store {
     pub fn conversations(&self, bot_id: &str) -> Result<Vec<Conversation>, BoxError> {
         let mut stmt = self
             .conn
-            .prepare(&format!("SELECT {CONVERSATION} FROM conversations WHERE bot_id = ?1 ORDER BY updated_at DESC, rowid DESC"))?;
+            .prepare(&format!("SELECT {CONVERSATION} FROM conversations WHERE bot_id = ?1 AND channel_id IS NULL ORDER BY updated_at DESC, rowid DESC"))?;
         let list = stmt.query_map([bot_id], conversation_from_row)?.collect::<Result<Vec<_>, _>>()?;
         Ok(list)
     }
@@ -811,6 +973,7 @@ impl Store {
             title: None,
             title_by_person: false,
             archived_at: None,
+            channel_id: None,
         };
         self.conn.execute(
             "INSERT INTO conversations (id, bot_id, session_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -911,7 +1074,7 @@ impl Store {
 
     /// How many conversations a bot has had.
     pub fn conversation_count(&self, bot_id: &str) -> Result<usize, BoxError> {
-        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM conversations WHERE bot_id = ?1", [bot_id], |r| r.get(0))?;
+        let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM conversations WHERE bot_id = ?1 AND channel_id IS NULL", [bot_id], |r| r.get(0))?;
         Ok(n as usize)
     }
 }
@@ -958,6 +1121,7 @@ fn conversation_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
         title: r.get(5)?,
         title_by_person: r.get(6)?,
         archived_at: r.get(7)?,
+        channel_id: r.get(8)?,
     })
 }
 
@@ -1151,7 +1315,7 @@ mod tests {
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
         assert_eq!(bot.engine, "claude", "bots from before run on Claude");
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 7);
+        assert_eq!(version, 8);
         // And keys for the chat APIs.
         assert_eq!(store.engine_key("xai").unwrap(), None);
         store.set_engine_key("xai", "xai-1", None).unwrap();

@@ -9,6 +9,7 @@
 pub mod attachments;
 pub mod backups;
 pub mod changes;
+pub mod channels;
 pub mod limits;
 pub mod reactions;
 pub mod usage;
@@ -86,6 +87,8 @@ pub struct App {
     pub pairing: std::sync::Mutex<Option<devices::Pairing>>,
     /// The plans' usage windows as last fetched (`usage.rs`), and when.
     pub plan_usage: std::sync::Mutex<Option<(std::time::Instant, Value)>>,
+    /// Channels whose bots are answering a message, one after another (`channels.rs`).
+    pub channels_busy: std::sync::Mutex<std::collections::HashSet<String>>,
     /// AIs that turned a turn away for their usage limit, and until when (`backups.rs`).
     pub limited_until: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
 }
@@ -115,6 +118,7 @@ impl App {
             pairing: std::sync::Mutex::new(None),
             plan_usage: std::sync::Mutex::new(None),
             limited_until: std::sync::Mutex::new(std::collections::HashMap::new()),
+            channels_busy: std::sync::Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -154,8 +158,30 @@ impl App {
         }
     }
 
+    pub fn channel_busy(&self, channel_id: &str) -> bool {
+        self.channels_busy.lock().expect("channels lock").contains(channel_id)
+    }
+
+    pub fn set_channel_busy(&self, channel_id: &str, busy: bool) {
+        let mut set = self.channels_busy.lock().expect("channels lock");
+        if busy {
+            set.insert(channel_id.to_string());
+        } else {
+            set.remove(channel_id);
+        }
+    }
+
+    /// Stops a channel's remaining responders (the one answering is interrupted separately).
+    pub fn stop_channel(&self, channel_id: &str) {
+        self.set_channel_busy(channel_id, false);
+    }
+
     /// Sends a bot's current state (no messages) to every open interface.
     pub fn announce_bot(&self, bot_id: &str) {
+        if channels::is_channel(bot_id) {
+            channels::announce(self, bot_id);
+            return;
+        }
         let wire = self.with_store(|store| {
             let Some(bot) = store.bot_by_id(bot_id)? else { return Ok(None) };
             Ok(Some(self.wire_bot(store, &bot, None)?))
@@ -299,6 +325,10 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         }
         ["api", "bots"] if method == Method::GET => list_bots(&app, req).await,
         ["api", "bots"] if method == Method::POST => respond(create_bot(&app, req).await),
+        ["api", "channels"] if method == Method::POST => respond(match json_body(req).await {
+            Ok(body) => channels::create(&app, &body),
+            Err(err) => Err(err),
+        }),
         ["api", "bots", id, rest @ ..] if owns_bot(&app, id) => {
             let id = id.to_string();
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
@@ -333,7 +363,7 @@ async fn serve_ui(app: &App, req: Request) -> Response {
 }
 
 fn owns_bot(app: &App, id: &str) -> bool {
-    app.with_store(|store| Ok(store.bot_by_id(id)?.is_some())).unwrap_or(false)
+    app.with_store(|store| Ok(store.bot_by_id(id)?.is_some() || (channels::is_channel(id) && store.channel(id)?.is_some()))).unwrap_or(false)
 }
 
 fn owns_thread(app: &App, id: &str) -> bool {
@@ -398,6 +428,9 @@ async fn list_bots(app: &Arc<App>, req: Request) -> Response {
         let mut wires = Vec::new();
         for bot in store.bots()? {
             wires.push(app.wire_bot(store, &bot, Some(limit))?);
+        }
+        for channel in store.channels()? {
+            wires.push(channels::channel_wire(app, store, &channel, Some(limit))?);
         }
         Ok(wires)
     });
@@ -473,6 +506,9 @@ async fn create_bot(app: &Arc<App>, req: Request) -> Answer {
 }
 
 async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> Answer {
+    if channels::is_channel(id) {
+        return channels::route(app, id, rest, req).await;
+    }
     let method = req.method().clone();
     let bot = app.try_store(|store| store.bot_by_id(id)).map_err(fail)?.ok_or((StatusCode::NOT_FOUND, "no such bot".into()))?;
     match (method, rest.iter().map(String::as_str).collect::<Vec<_>>().as_slice()) {

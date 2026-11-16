@@ -1170,3 +1170,60 @@ async fn pictures_are_asked_for_drawn_and_kept() {
     let pictures = std::fs::read_dir(&folder).unwrap().count();
     assert_eq!(pictures, 3);
 }
+
+#[tokio::test]
+async fn a_channel_is_answered_by_its_lead_or_whoever_is_named() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let mut ids = Vec::new();
+    for name in ["Scout", "Kiwi"] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name }))).await;
+        ids.push(made["bot"]["id"].as_str().unwrap().to_string());
+    }
+    let (status, made) = s.call("POST", "/api/channels", Some(json!({ "name": "Garden", "members": ids, "lead": ids[1] }))).await;
+    assert_eq!(status, 201, "{made}");
+    let channel = made["bot"]["id"].as_str().unwrap().to_string();
+    assert!(channel.starts_with("ch-"));
+    assert_eq!(made["bot"]["channel"]["lead"], ids[1].as_str());
+    assert_eq!(made["bot"]["channel"]["members"][0]["name"], "Scout");
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    assert!(s._dir.path().join("home/channels/garden").is_dir());
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    assert!(list["bots"].as_array().unwrap().iter().any(|b| b["id"] == channel.as_str()));
+    // A bot's own chats don't include the channel's transcript.
+    let (_, scout) = s.call("GET", &format!("/api/bots/{}", ids[0]), None).await;
+    assert_eq!(scout["bot"]["tasks"].as_array().unwrap().len(), 1);
+    assert_ne!(scout["bot"]["threadId"], thread.as_str());
+
+    // No @name: the lead answers.
+    let (status, sent) = s.call("POST", &format!("/api/bots/{channel}/messages"), Some(json!({ "text": "What should we plant?" }))).await;
+    assert_eq!(status, 202, "{sent}");
+    let reply = until(&mut events, "lead", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    let said = reply["message"]["text"].as_str().unwrap();
+    assert!(said.contains("Person: What should we plant?") && said.contains("as Kiwi"), "{said}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Two named: each answers in turn, the second seeing the first.
+    s.call("POST", &format!("/api/bots/{channel}/messages"), Some(json!({ "text": "@Scout then @Kiwi: tomatoes or beans?" }))).await;
+    let first = until(&mut events, "scout", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(first["message"]["text"].as_str().unwrap().contains("as Scout"));
+    let second = until(&mut events, "kiwi", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    let said = second["message"]["text"].as_str().unwrap();
+    assert!(said.contains("as Kiwi") && said.contains("Scout: Hello"), "Kiwi sees what Scout said: {said}");
+    // Settled once both are done.
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == channel.as_str() && f["bot"]["activity"] == "idle").await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=20"), None).await;
+    assert_eq!(page["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").count(), 3);
+
+    // Renamed and given instructions; a member deleted leaves the channel to the other.
+    let (_, changed) = s.call("PATCH", &format!("/api/bots/{channel}"), Some(json!({ "name": "Allotment", "soul": "Keep it short." }))).await;
+    assert_eq!((changed["bot"]["name"].as_str(), changed["bot"]["soul"].as_str()), (Some("Allotment"), Some("Keep it short.")));
+    s.call("DELETE", &format!("/api/bots/{}", ids[1]), None).await;
+    let (status, after) = s.call("GET", &format!("/api/bots/{channel}"), None).await;
+    assert_eq!(status, 200);
+    assert_eq!(after["bot"]["channel"]["lead"], ids[0].as_str());
+    assert_eq!(after["bot"]["messages"].as_array().unwrap().len(), 5, "the talk survives");
+    assert_eq!(s.call("DELETE", &format!("/api/bots/{channel}"), None).await.0, 200);
+    assert_eq!(s.call("GET", &format!("/api/bots/{channel}"), None).await.0, 404);
+}

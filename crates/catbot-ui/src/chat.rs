@@ -38,6 +38,8 @@ pub struct Msg {
     pub attachments: Vec<Attached>,
     /// The person's reactions on it.
     pub reactions: Vec<String>,
+    /// The bot that said it (a channel has several).
+    pub bot_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,7 +119,8 @@ impl Msg {
         let send_id = wire["sendId"].as_str().map(str::to_string);
         let attachments = Attached::list(&wire["attachments"]);
         let reactions = wire["reactions"].as_array().map(|r| r.iter().filter_map(|e| e.as_str().map(str::to_string)).collect()).unwrap_or_default();
-        Some(Msg { id, at, send_id, body, attachments, reactions })
+        let bot_id = wire["botId"].as_str().map(str::to_string);
+        Some(Msg { id, at, send_id, body, attachments, reactions, bot_id })
     }
 
     fn is_step(&self) -> bool {
@@ -127,6 +130,7 @@ impl Msg {
 
 /// What the transcript draws: single messages, and runs of two or more steps folded into a line.
 #[derive(Clone, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Item {
     One(Msg),
     Run(Vec<Msg>),
@@ -344,7 +348,7 @@ pub fn Chat(bot: Bot) -> Element {
                             }
                             {
                                 match item {
-                                    Item::One(m) => rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone(), bot_id: bot.id.clone(), working } },
+                                    Item::One(m) => rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone(), bot_id: bot.id.clone(), working, speakers: bot.channel.clone() } },
                                     Item::Run(steps) => rsx! { Run { steps, bot_name: bot.name.clone(), asking } },
                                 }
                             }
@@ -373,7 +377,7 @@ fn LiveTurn(live: Live) -> Element {
             if live.text.is_empty() {
                 Working {}
             } else {
-                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new() } }
+                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: None } }
             }
         }
     }
@@ -552,8 +556,28 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         "Answer the approval above to continue".to_string()
     } else if working {
         format!("{} is working. Sends when this turn finishes", bot.name)
+    } else if let Some(info) = &bot.channel {
+        format!("Message {} · @Name asks one bot, otherwise {} answers", bot.name, info.lead_name())
     } else {
         format!("Message {}", bot.name)
+    };
+    // In a channel, typing @ offers the members whose names start with what follows it.
+    let mentions: Vec<(String, String, String, String)> = match &bot.channel {
+        Some(info) => {
+            let typed = text.read().clone();
+            match typed.rsplit([' ', '\n']).next().filter(|w| w.starts_with('@')) {
+                Some(word) => {
+                    let start = word[1..].to_lowercase();
+                    let mut found: Vec<_> = info.members.iter().filter(|m| m.1.to_lowercase().starts_with(&start)).cloned().collect();
+                    if "everyone".starts_with(&start) && info.members.len() > 1 {
+                        found.push(("everyone".into(), "everyone".into(), String::new(), String::new()));
+                    }
+                    found
+                }
+                None => Vec::new(),
+            }
+        }
+        None => Vec::new(),
     };
     let has_text = !text.read().trim().is_empty() || tray.read().iter().any(|t| matches!(t.state, TrayState::Ready(_)));
     let pick = move |e: FormEvent| {
@@ -616,6 +640,27 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                                                 }
                                             }
                                         }
+                                    }
+                                }
+                            }
+                        }
+                        if !mentions.is_empty() {
+                            div { class: "flex flex-wrap gap-1.5 px-1 pb-1.5 pt-1", "data-mentions": true,
+                                for (id, name, _, _) in mentions {
+                                    button {
+                                        key: "{id}",
+                                        r#type: "button",
+                                        "data-mention": "{name}",
+                                        class: "rounded-full bg-raised px-2.5 py-0.5 text-[12px] text-ink hover:bg-control",
+                                        onclick: move |_| {
+                                            let typed = text.peek().clone();
+                                            let cut = typed.rfind(['@']).unwrap_or(typed.len());
+                                            let next = format!("{}@{} ", &typed[..cut], name);
+                                            text.set(next.clone());
+                                            set_box(&next);
+                                            document::eval(r#"document.getElementById("composer-box")?.focus();"#);
+                                        },
+                                        "@{name}"
                                     }
                                 }
                             }
@@ -746,7 +791,7 @@ fn ChatHead(bot: Bot) -> Element {
                 button {
                     r#type: "button",
                     "data-chathead-pill": true,
-                    title: "Open bot settings",
+                    title: if bot.channel.is_some() { "Open channel settings" } else { "Open bot settings" },
                     "aria-label": "{label}",
                     "aria-expanded": "{open}",
                     class: "group flex min-w-0 max-w-full items-center gap-2 rounded-full py-0.5 pl-1.5 pr-3 text-ink {ELEVATED_FLOAT} transition-colors duration-[120ms] hover:bg-[color-mix(in_srgb,var(--color-composer),var(--color-ink)_7%)]",
@@ -812,6 +857,9 @@ fn Row(
     #[props(default)] thread: String,
     #[props(default)] bot_id: String,
     #[props(default)] working: bool,
+    /// In a channel: its members, to name who said each reply.
+    #[props(default)]
+    speakers: Option<crate::bots::ChannelInfo>,
 ) -> Element {
     let when = clock(message.at);
     let full_time = full_date(message.at);
@@ -839,8 +887,15 @@ fn Row(
                 "w-fit max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct))] rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed text-ink"
             };
             let html = markdown::to_html(text);
+            let speaker = speakers.as_ref().and_then(|info| message.bot_id.as_ref().and_then(|id| info.members.iter().find(|m| &m.0 == id)).cloned());
             rsx! {
                 div { class: "group flex w-full flex-col items-start",
+                    if let Some((_, name, mark, color)) = speaker {
+                        div { class: "mb-1 flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary", "data-speaker": "{name}",
+                            crate::mascots::BotMark { color, initial: name.chars().next().map(|c| c.to_string()).unwrap_or_default(), size: 18, mark }
+                            "{name}"
+                        }
+                    }
                     div { class: "flex w-full items-center justify-start gap-1.5",
                         div { class: "{shape}", title: "{full_time}",
                             div { class: "chat-md min-w-0 [&>*+*]:mt-2", dangerous_inner_html: "{html}" }
@@ -1270,7 +1325,7 @@ mod tests {
     use serde_json::json;
 
     fn step(id: &str, name: &str, at: f64) -> Msg {
-        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) }, attachments: Vec::new(), reactions: Vec::new() }
+        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) }, attachments: Vec::new(), reactions: Vec::new(), bot_id: None }
     }
 
     #[test]
@@ -1292,7 +1347,7 @@ mod tests {
 
     #[test]
     fn steps_fold_into_runs() {
-        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()), attachments: Vec::new(), reactions: Vec::new() };
+        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: None };
         let items = group(&[step("a", "Read", 1.0), step("b", "Read", 1.0), step("c", "Bash", 2.0), reply.clone(), step("d", "Edit", 4.0)]);
         assert_eq!(items.len(), 3);
         assert!(matches!(&items[0], Item::Run(steps) if steps.len() == 3));

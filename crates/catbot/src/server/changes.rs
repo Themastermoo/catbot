@@ -21,7 +21,19 @@ pub fn of(app: &App, bot: &Bot) -> Option<Checkpoints> {
         return None;
     }
     let home = app.with_store(|store| Ok(store.home().to_path_buf()))?;
-    Some(Checkpoints::new(&home, &bot.id, &bot.folder))
+    Some(Checkpoints::new(&home, &key(app, bot), &bot.folder))
+}
+
+/// Which private repository a folder's checkpoints live in: the bot's own for its own folder,
+/// one per folder otherwise (a channel's), so one folder's snapshots never land in another.
+fn key(app: &App, bot: &Bot) -> String {
+    let own = app.with_store(|store| store.bot_by_id(&bot.id)).flatten().map(|b| b.folder);
+    if own.as_ref() == Some(&bot.folder) {
+        return bot.id.clone();
+    }
+    // FNV-1a of the folder's path: short, and the same every time.
+    let hash = bot.folder.to_string_lossy().bytes().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3));
+    format!("folder-{hash:016x}")
 }
 
 /// Snapshots the bot's folder (off the async threads); None when there's no checkpoint.
@@ -56,7 +68,11 @@ pub async fn after_turn(app: &Arc<App>, thread: &str, points: Option<Checkpoints
 pub async fn route(app: &Arc<App>, thread: &str, message: &str, action: Option<&str>) -> Answer {
     let id = wire::parse_message_id(message).ok_or_else(|| bad("which turn?"))?;
     let conversation = app.try_store(|store| store.conversation(thread)).map_err(fail)?.ok_or_else(|| bad("no such chat"))?;
-    let bot = app.try_store(|store| store.bot_by_id(&conversation.bot_id)).map_err(fail)?.ok_or_else(|| bad("no such bot"))?;
+    let mut bot = app.try_store(|store| store.bot_by_id(&conversation.bot_id)).map_err(fail)?.ok_or_else(|| bad("no such bot"))?;
+    // A channel's turns changed the channel's folder.
+    if let Some(channel) = conversation.channel_id.as_deref().and_then(|id| app.with_store(|store| store.channel(id)).flatten()) {
+        bot.folder = channel.folder;
+    }
     let row = app
         .try_store(|store| store.message_in(thread, id))
         .map_err(fail)?

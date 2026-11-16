@@ -51,6 +51,11 @@ pub fn mode_from_approval(level: &str) -> Option<PermissionMode> {
 /// A bot that hasn't picked a colour gets one of these from its id, so it never changes.
 const DEFAULT_COLORS: [&str; 6] = ["blue", "teal", "purple", "orange", "red", "yellow"];
 
+/// A bot's colour, as the interface draws it.
+pub fn color_of(bot: &Bot) -> String {
+    color(bot)
+}
+
 fn color(bot: &Bot) -> String {
     bot.color.clone().unwrap_or_else(|| {
         let sum: usize = bot.id.bytes().map(usize::from).sum();
@@ -201,6 +206,10 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
             }
             if let Some(attached) = detail.get("attachments").filter(|a| a.is_array()) {
                 fields["attachments"] = attached.clone();
+            }
+            // Which bot said it: in a channel, there are several.
+            if let Some(bot) = detail["botId"].as_str() {
+                fields["botId"] = json!(bot);
             }
             fields
         }

@@ -222,7 +222,7 @@ fn random() -> f64 {
 
 /// The person's message as it's shown before the server has it.
 pub fn optimistic(text: &str, send_id: &str, now: f64, attachments: Vec<crate::attach::Attached>) -> Msg {
-    Msg { id: format!("optimistic-{send_id}"), at: now, send_id: Some(send_id.to_string()), body: Body::Person(text.to_string()), attachments, reactions: Vec::new() }
+    Msg { id: format!("optimistic-{send_id}"), at: now, send_id: Some(send_id.to_string()), body: Body::Person(text.to_string()), attachments, reactions: Vec::new(), bot_id: None }
 }
 
 #[cfg(test)]
@@ -319,7 +319,7 @@ mod tests {
     #[test]
     fn earlier_pages_go_in_front() {
         let mut s = state();
-        let m = |id: &str| Msg { id: id.into(), at: 0.0, send_id: None, body: Body::Reply(id.into()), attachments: Vec::new(), reactions: Vec::new() };
+        let m = |id: &str| Msg { id: id.into(), at: 0.0, send_id: None, body: Body::Reply(id.into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: None };
         s.loaded("t1", vec![m("c"), m("d")], true, false);
         s.loaded("t1", vec![m("a"), m("b")], false, true);
         let ids: Vec<_> = s.threads["t1"].messages.iter().map(|m| m.id.as_str()).collect();

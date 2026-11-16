@@ -206,6 +206,7 @@ pub fn BotMark(
         "letter" => rsx! { LetterMark { color, initial, size, state } },
         "cat-sitting" => rsx! { CatSitting { color, size, state } },
         "cat-visor" => rsx! { CatVisor { color, size, state } },
+        "channel" => rsx! { ChannelMark { color, size, state } },
         _ => rsx! { CatHead { color, size, state } },
     }
 }
@@ -234,6 +235,29 @@ fn Gradient(id: String, color: String) -> Element {
 fn new_id(kind: &str) -> (String, String) {
     let n = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     (format!("{kind}-{n}"), vary(n))
+}
+
+/// A channel's picture: a "#" on a rounded square in its colour.
+#[component]
+fn ChannelMark(color: String, size: u32, state: String) -> Element {
+    let (light, fill, dark) = stops(&color);
+    let background = format!("linear-gradient(160deg, {light}, {fill} 55%, {dark})");
+    let font = size / 2;
+    let corner = size / 4;
+    rsx! {
+        span {
+            "aria-hidden": "true",
+            class: "catbot-mark flex shrink-0 select-none items-center justify-center font-bold text-white",
+            "data-mark": "channel",
+            "data-state": "{state}",
+            width: "{size}px",
+            height: "{size}px",
+            font_size: "{font}px",
+            border_radius: "{corner}px",
+            background: "{background}",
+            "#"
+        }
+    }
 }
 
 /// The letter in a circle: the stand-in from before the cats, kept as a choice.

@@ -9,6 +9,7 @@ mod emoji_list;
 mod react;
 mod bots;
 mod changes;
+mod channels;
 mod chat;
 mod chats;
 mod devices;
