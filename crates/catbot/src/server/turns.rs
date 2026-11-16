@@ -143,6 +143,7 @@ async fn run(
     emit(json!({ "type": "turn.started" }));
 
     let codex = chat::codex_dir(bot, &app.codex);
+    app.seed_memory(bot);
     let mut session = match &conversation.session_id {
         Some(id) => Session::Resume(id.clone()),
         None => Session::New(uuid::Uuid::new_v4().to_string()),
@@ -212,7 +213,7 @@ async fn drive(
     emit: &impl Fn(Value),
 ) -> Result_ {
     let mut result = Result_::default();
-    let turn = chat::bot_turn(bot, text.to_string(), session.clone(), app.cli.clone(), app.helper.clone(), codex);
+    let turn = chat::bot_turn(bot, text.to_string(), session.clone(), app.cli.clone(), app.helper.clone(), codex, app.memory.clone());
     let mut running = match claude::start(&turn).await {
         Ok(running) => running,
         Err(err) => {

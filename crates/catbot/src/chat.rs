@@ -25,10 +25,12 @@ pub struct Options {
     pub cli: Vec<String>,
     /// The Codex vault, for bots allowed to use it.
     pub codex: PathBuf,
+    /// The memory vault (`memory.rs`), if it's on.
+    pub memory: Option<PathBuf>,
 }
 
-/// The bot's standing instructions: who it is, where it works, and how to use Codex.
-pub fn system_prompt(bot: &Bot, codex: Option<&Path>) -> String {
+/// The bot's standing instructions: who it is, where it works, and how to use Codex and the memory vault.
+pub fn system_prompt(bot: &Bot, codex: Option<&Path>, memory: Option<&Path>) -> String {
     let mut prompt = format!("You are {}, one of the person's bots in Catbot, a chat app where they talk to a team of AI bots.", bot.name);
     if !bot.instructions.is_empty() {
         prompt.push_str("\n\n");
@@ -50,22 +52,33 @@ pub fn system_prompt(bot: &Bot, codex: Option<&Path>) -> String {
             path = codex.display()
         ));
     }
+    if let Some(memory) = memory {
+        prompt.push_str(&crate::memory::prompt(memory, bot, codex.is_some() && crate::memory::has_codex(memory)));
+    }
     prompt
 }
 
-/// The turn that runs a bot: its model, approval level, folder, instructions and Codex.
-pub fn bot_turn(bot: &Bot, prompt: String, session: Session, cli: Vec<String>, approval_helper: Option<Vec<String>>, codex: Option<PathBuf>) -> Turn {
+/// The turn that runs a bot: its model, approval level, folder, instructions, Codex and memory vault.
+pub fn bot_turn(
+    bot: &Bot,
+    prompt: String,
+    session: Session,
+    cli: Vec<String>,
+    approval_helper: Option<Vec<String>>,
+    codex: Option<PathBuf>,
+    memory: Option<PathBuf>,
+) -> Turn {
     Turn {
         prompt,
         session,
         model: bot.model.clone(),
         permission_mode: bot.mode,
         cwd: bot.folder.clone(),
-        system_prompt: Some(system_prompt(bot, codex.as_deref())),
+        system_prompt: Some(system_prompt(bot, codex.as_deref(), memory.as_deref())),
         cli,
         isolated: true,
         approval_helper,
-        extra_dirs: codex.into_iter().collect(),
+        extra_dirs: memory.into_iter().chain(codex).collect(),
     }
 }
 
@@ -87,6 +100,7 @@ pub async fn chat(store: &Store, options: Options) -> Result<bool, BoxError> {
         std::fs::create_dir_all(&bot.folder)?;
     }
     let codex = codex_for(&bot, &options.codex, &paint);
+    let memory = memory_for(&bot, options.memory.as_deref(), &options.codex, &paint);
     let approvals_on = !options.no_approvals && console::can_ask(options.json);
 
     let current = if options.new { None } else { store.current_conversation(&bot.id)? };
@@ -111,7 +125,7 @@ pub async fn chat(store: &Store, options: Options) -> Result<bool, BoxError> {
     }
 
     let helper = approvals_on.then(ask::helper).transpose()?;
-    let mut turn = bot_turn(&bot, options.message.clone(), session.clone(), options.cli.clone(), helper, codex);
+    let mut turn = bot_turn(&bot, options.message.clone(), session.clone(), options.cli.clone(), helper, codex, memory);
     if let Session::New(id) = &session {
         store.set_session(&conversation.id, id)?;
     }
@@ -176,6 +190,21 @@ fn save(store: &Store, conversation_id: &str, transcript: &Transcript) -> Result
 }
 
 /// The vault, if this bot may use it and it exists.
+/// The memory vault, made ready with the bot's own note; None if it's off or can't be made.
+pub fn memory_ready(bot: &Bot, memory: Option<&Path>, codex: &Path) -> Result<Option<PathBuf>, std::io::Error> {
+    let Some(memory) = memory else { return Ok(None) };
+    crate::memory::prepare(memory, Some(codex))?;
+    crate::memory::ensure_bot_note(memory, bot)?;
+    Ok(Some(memory.to_path_buf()))
+}
+
+fn memory_for(bot: &Bot, memory: Option<&Path>, codex: &Path, paint: &Paint) -> Option<PathBuf> {
+    memory_ready(bot, memory, codex).unwrap_or_else(|err| {
+        eprintln!("{}", paint.dim(&format!("  (the memory vault couldn't be made ready: {err}; this turn runs without it)")));
+        None
+    })
+}
+
 fn codex_for(bot: &Bot, codex: &Path, paint: &Paint) -> Option<PathBuf> {
     if !bot.codex {
         return None;
@@ -251,13 +280,16 @@ mod tests {
         let bot = store
             .create_bot(NewBot { name: "Scout".into(), instructions: "Find things.".into(), model: None, mode: PermissionMode::Default, codex: true })
             .unwrap();
-        let with = system_prompt(&bot, Some(Path::new("/home/moo/VaultCodex")));
+        let with = system_prompt(&bot, Some(Path::new("/home/moo/VaultCodex")), None);
         assert!(with.starts_with("You are Scout"));
         assert!(with.contains("Find things."));
         assert!(with.contains(&bot.folder.display().to_string()));
         assert!(with.contains("/home/moo/VaultCodex"));
-        let without = system_prompt(&bot, None);
+        let without = system_prompt(&bot, None, None);
         assert!(!without.contains("Codex"));
+        let remembering = system_prompt(&bot, None, Some(Path::new("/home/moo/CatbotMemory")));
+        assert!(remembering.contains("/home/moo/CatbotMemory") && remembering.contains("Bots/Scout.md"));
+        assert!(!remembering.contains("Codex"));
     }
 
     #[test]

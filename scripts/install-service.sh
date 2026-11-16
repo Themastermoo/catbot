@@ -53,7 +53,7 @@ mkdir -p "$UNIT_DIR"
 # systemd reads % in a unit as the start of a specifier, so each % is written as %%.
 unit_value() { local v="$1"; printf '%s' "${v//%/%%}"; }
 extra=""
-for var in CATBOT_HOME CATBOT_CODEX CATBOT_TITLE_MODEL CATBOT_ARCHIVE_DAYS CATBOT_PUBLIC_URL; do
+for var in CATBOT_HOME CATBOT_CODEX CATBOT_MEMORY CATBOT_TITLE_MODEL CATBOT_ARCHIVE_DAYS CATBOT_PUBLIC_URL; do
   if [[ -n "${!var:-}" ]]; then
     extra+="Environment=\"$var=$(unit_value "${!var}")\""$'\n'
   fi

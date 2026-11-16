@@ -33,6 +33,10 @@ impl Setup {
         Setup { dir, store, _turn: turn }
     }
 
+    fn memory(&self) -> std::path::PathBuf {
+        self.dir.path().join("memory")
+    }
+
     fn log(&self) -> std::path::PathBuf {
         self.dir.path().join("cli.log")
     }
@@ -48,6 +52,7 @@ impl Setup {
             no_approvals: true,
             cli: vec!["python3".into(), FAKE.into()],
             codex: self.dir.path().join("Codex"),
+            memory: Some(self.memory()),
         };
         chat::chat(&self.store, options).await.unwrap()
     }
@@ -60,6 +65,12 @@ impl Setup {
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
     }
+}
+
+/// Every value given after `flag`.
+fn args_after<'a>(start: &'a Value, flag: &str) -> Vec<&'a str> {
+    let args = start["args"].as_array().unwrap();
+    args.windows(2).filter(|w| w[0] == flag).filter_map(|w| w[1].as_str()).collect()
 }
 
 fn arg_after<'a>(start: &'a Value, flag: &str) -> Option<&'a str> {
@@ -78,9 +89,14 @@ async fn a_chat_reaches_claude_as_the_bot_and_is_saved() {
     assert_eq!(Path::new(start["cwd"].as_str().unwrap()), bot.folder.canonicalize().unwrap());
     assert_eq!(arg_after(start, "--model"), Some("haiku"));
     assert_eq!(arg_after(start, "--permission-mode"), Some("acceptEdits"));
-    assert_eq!(arg_after(start, "--add-dir"), Some(s.dir.path().join("Codex").to_str().unwrap()));
+    let memory = s.memory();
+    assert_eq!(args_after(start, "--add-dir"), [memory.to_str().unwrap(), s.dir.path().join("Codex").to_str().unwrap()]);
     let system = arg_after(start, "--append-system-prompt").unwrap();
     assert!(system.starts_with("You are Scout") && system.contains("Find things.") && system.contains("Codex"));
+    assert!(system.contains(memory.to_str().unwrap()) && system.contains("Bots/Scout.md"));
+    // The vault was made, linked to the Codex, and the bot's note seeded before the turn.
+    assert!(memory.join("Codex").is_dir() && memory.join("AGENTS.md").is_file());
+    assert!(std::fs::read_to_string(memory.join("Bots/Scout.md")).unwrap().contains("Find things."));
 
     let conversation = s.store.current_conversation(&bot.id).unwrap().unwrap();
     assert_eq!(conversation.session_id.as_deref(), arg_after(start, "--session-id"));
@@ -143,7 +159,9 @@ async fn a_bot_kept_out_of_codex_never_sees_it() {
     s.store.update_bot(&bot).unwrap();
     s.say("hi", false).await;
     let start = &s.starts()[0];
-    assert_eq!(arg_after(start, "--add-dir"), None);
+    // Only its memory vault is added, and nothing tells it about the Codex. (The vault's Codex
+    // folder still leads there for anyone who follows it; see memory.rs.)
+    assert_eq!(args_after(start, "--add-dir"), [s.memory().to_str().unwrap()]);
     assert!(!arg_after(start, "--append-system-prompt").unwrap().contains("Codex"));
 }
 

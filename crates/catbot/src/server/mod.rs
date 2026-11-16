@@ -45,6 +45,8 @@ pub struct Options {
     pub upstream: String,
     pub home: PathBuf,
     pub codex: PathBuf,
+    /// The memory vault (`memory.rs`); None turns it off.
+    pub memory: Option<PathBuf>,
     pub cli: Vec<String>,
     /// Record the traffic passed to the reference server into this folder.
     pub record: Option<PathBuf>,
@@ -60,6 +62,8 @@ pub struct App {
     pub turns: turns::Turns,
     pub proxy: Arc<Proxy>,
     pub codex: PathBuf,
+    /// The memory vault the bots keep (`memory.rs`), if it's on.
+    pub memory: Option<PathBuf>,
     pub cli: Vec<String>,
     /// The approval helper (this program), so every turn can ask before it acts.
     pub helper: Option<Vec<String>>,
@@ -78,6 +82,7 @@ impl App {
         store: Store,
         proxy: Arc<Proxy>,
         codex: PathBuf,
+        memory: Option<PathBuf>,
         cli: Vec<String>,
         helper: Option<Vec<String>>,
         ui: Option<PathBuf>,
@@ -88,6 +93,7 @@ impl App {
             turns: turns::Turns::default(),
             proxy,
             codex,
+            memory,
             cli,
             helper,
             ui,
@@ -124,6 +130,15 @@ impl App {
         wire::bot(store, bot, &self.activity(), messages)
     }
 
+    /// Seeds the bot's own note in the memory vault, if the vault is on and the note isn't there.
+    pub fn seed_memory(&self, bot: &Bot) {
+        if let Some(memory) = &self.memory
+            && let Err(err) = crate::memory::ensure_bot_note(memory, bot)
+        {
+            eprintln!("catbot: couldn't seed {}'s memory note: {err}", bot.name);
+        }
+    }
+
     /// Sends a bot's current state (no messages) to every open interface.
     pub fn announce_bot(&self, bot_id: &str) {
         let wire = self.with_store(|store| {
@@ -156,7 +171,23 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
         }
         built
     });
-    let app = App::new(store, proxy, options.codex, options.cli, helper, ui.clone());
+    let memory = options.memory.filter(|dir| match crate::memory::prepare(dir, Some(&options.codex)) {
+        Ok(()) => {
+            let linked = if crate::memory::has_codex(dir) { ", linked to the Codex" } else { "" };
+            eprintln!("catbot: the bots' memory vault: {}{linked}", dir.display());
+            for bot in store.bots().unwrap_or_default() {
+                if let Err(err) = crate::memory::ensure_bot_note(dir, &bot) {
+                    eprintln!("catbot: couldn't seed {}'s memory note: {err}", bot.name);
+                }
+            }
+            true
+        }
+        Err(err) => {
+            eprintln!("catbot: no memory vault: couldn't make {} ({err})", dir.display());
+            false
+        }
+    });
+    let app = App::new(store, proxy, options.codex, memory, options.cli, helper, ui.clone());
 
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
@@ -388,6 +419,7 @@ async fn create_bot(app: &Arc<App>, req: Request) -> Answer {
     let mut bot = bot;
     apply_changes(&mut bot, &changes)?;
     app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
+    app.seed_memory(&bot);
     let wire = app.try_store(|store| app.wire_bot(store, &bot, Some(50))).map_err(fail)?;
     app.announce_bot(&bot.id);
     eprintln!("catbot: made {} ({})", bot.name, bot.folder.display());
@@ -437,8 +469,14 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
 }
 
 fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
+    let before = bot.clone();
     apply_changes(&mut bot, &body)?;
     app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
+    if let Some(memory) = &app.memory
+        && let Err(err) = crate::memory::rename_bot(memory, &before, &bot)
+    {
+        eprintln!("catbot: couldn't move {}'s memory note to its new name: {err}", bot.name);
+    }
     let wire = app.try_store(|store| app.wire_bot(store, &bot, None)).map_err(fail)?;
     app.hub.send(json!({ "kind": "bot", "bot": wire }));
     Ok((StatusCode::OK, json!({ "bot": wire })))

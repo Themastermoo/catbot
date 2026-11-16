@@ -233,7 +233,16 @@ async fn run() -> Result<(), BoxError> {
         }
         Command::Chat { bot, message, new, json, no_approvals, cli } => {
             let store = Store::open(&store::default_home())?;
-            let options = chat::Options { bot, message, new, json, no_approvals, cli: vec![cli], codex: store::default_codex() };
+            let options = chat::Options {
+                bot,
+                message,
+                new,
+                json,
+                no_approvals,
+                cli: vec![cli],
+                codex: store::default_codex(),
+                memory: catbot::memory::default_dir(),
+            };
             if !chat::chat(&store, options).await? {
                 std::process::exit(1);
             }
@@ -261,6 +270,7 @@ async fn run() -> Result<(), BoxError> {
                 upstream,
                 home: store::default_home(),
                 codex: store::default_codex(),
+                memory: catbot::memory::default_dir(),
                 cli: vec![cli],
                 record: record.then(default_traffic_dir),
                 ui: Some(ui),

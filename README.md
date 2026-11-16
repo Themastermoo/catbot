@@ -125,8 +125,8 @@ bash scripts/install-service.sh --remove  # back to starting it by hand
 ```
 
 Run the install from your normal terminal: the service takes that terminal's `PATH` (to find
-`claude`) and any `CATBOT_HOME`, `CATBOT_CODEX`, `CATBOT_TITLE_MODEL`, `CATBOT_ARCHIVE_DAYS`
-or `CATBOT_PUBLIC_URL`.
+`claude`) and any `CATBOT_HOME`, `CATBOT_CODEX`, `CATBOT_MEMORY`, `CATBOT_TITLE_MODEL`,
+`CATBOT_ARCHIVE_DAYS` or `CATBOT_PUBLIC_URL`.
 Run it again after moving or reinstalling Claude Code, or to change one of those; running it
 again also restarts Catbot on the new build. Stop any Catbot you started by hand
 first, since only one can use port 8788.
@@ -188,6 +188,16 @@ move it); they're told to follow its `AGENTS.md` protocol: they look there for c
 learn something worth keeping. On the default approval setting every write asks you first;
 a bot set to `accept-edits` (or looser) can write there without asking. `--no-codex` on
 `bot new`, or `bot edit --codex false`, keeps a bot out.
+
+**Memory vault.** Each computer running Catbot keeps a folder of linked Markdown notes the bots
+write as they work: `~/CatbotMemory` (`$CATBOT_MEMORY` to move it, `off` to turn it off).
+`Bots/` holds a note per bot (Catbot seeds it when the bot is made and moves it when the bot is
+renamed), `Projects/` a note per project shared by the bots, and `Journal/` a note per bot per
+day. Every bot is told where the vault is and how to keep it (its `AGENTS.md`), and gets it as a
+folder it can work in. When the Codex exists, the vault has a `Codex` link to it (a link, not a
+copy), so the notes point into it: `[[Codex/20 Projects/Catbot|Catbot]]`. Open the folder in
+Obsidian as its own vault. A bot kept out of the Codex isn't told about it or given it, but the
+link is still in its vault, so that switch points bots away rather than walling them off.
 
 ## Talking to Claude through Catbot
 

@@ -49,6 +49,8 @@ struct Setup {
     base: String,
     /// The remote door.
     away: String,
+    /// The bots' memory vault.
+    memory: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
 
@@ -64,10 +66,13 @@ async fn setup() -> Setup {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("home")).unwrap();
     let proxy = Proxy::new(&format!("http://{reference}"), None, 16 * 1024).unwrap();
+    let memory = dir.path().join("memory");
+    catbot::memory::prepare(&memory, None).unwrap();
     let app = server::App::new(
         store,
         proxy,
         dir.path().join("no-codex"),
+        Some(memory.clone()),
         vec!["python3".into(), FAKE_CLAUDE.into()],
         Some(vec![env!("CARGO_BIN_EXE_catbot").into()]),
         Some(ui_dir(dir.path())),
@@ -75,7 +80,7 @@ async fn setup() -> Setup {
     let addr = listen(server::router(app.clone())).await;
     let away = listen(server::remote::router(app.clone())).await;
     app.remote.set(away).unwrap();
-    Setup { base: format!("http://{addr}"), away: format!("http://{away}"), _dir: dir }
+    Setup { base: format!("http://{addr}"), away: format!("http://{away}"), memory, _dir: dir }
 }
 
 impl Setup {
@@ -280,12 +285,15 @@ async fn bots_are_renamed_retuned_and_deleted() {
     let s = setup().await;
     let (_, made) = s.call("POST", "/api/bots", Some(json!({}))).await;
     assert_eq!(made["bot"]["name"], "New bot");
+    assert!(s.memory.join("Bots/New bot.md").is_file(), "a new bot gets its memory note");
     let bot = made["bot"]["id"].as_str().unwrap().to_string();
     let (status, patched) = s
         .call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "name": "Ranger", "approvalMode": "edits", "soul": "Scout.", "modelSelection": { "instanceId": "claude", "model": "claude-opus-5-5" } })))
         .await;
     assert_eq!(status, 200);
     assert_eq!(patched["bot"]["name"], "Ranger");
+    assert!(!s.memory.join("Bots/New bot.md").exists());
+    assert!(std::fs::read_to_string(s.memory.join("Bots/Ranger.md")).unwrap().contains("# Ranger"), "the note follows the name");
     assert_eq!(patched["bot"]["approvalMode"], "edits");
     assert_eq!(patched["bot"]["modelSelection"]["model"], "claude-opus-5-5");
     let (status, _) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "codex", "model": "gpt" } }))).await;

@@ -6,6 +6,7 @@ pub mod bots;
 pub mod chat;
 pub mod claude;
 pub mod console;
+pub mod memory;
 pub mod proxy;
 pub mod record;
 pub mod routes;
