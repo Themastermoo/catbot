@@ -210,6 +210,15 @@ learn something worth keeping. On the default approval setting every write asks 
 a bot set to `accept-edits` (or looser) can write there without asking. `--no-codex` on
 `bot new`, or `bot edit --codex false`, keeps a bot out.
 
+**Which AI.** A bot runs on Claude (through Claude Code) unless you move it to a chat API in its
+settings: OpenAI, Grok (xAI), Groq, Mistral, Cerebras, DeepSeek, OpenRouter, MiniMax, or a
+model on this computer through Ollama or LM Studio. Their keys are typed into Catbot (kept in its
+private store, never sent to a phone or shown again, only their last four characters) or set in
+the environment (`OPENAI_API_KEY`, `XAI_API_KEY`, `GROQ_API_KEY`, …). Bots on a chat API get
+Catbot's own tools: reading, listing and searching files, writing and editing them, and running
+commands, in their own folder and the folders they're given (memory vault, Codex). Changes and
+commands ask first as a Claude bot's would; a path outside their folders is refused.
+
 **Memory vault.** Each computer running Catbot keeps a folder of linked Markdown notes the bots
 write as they work: `~/CatbotMemory` (`$CATBOT_MEMORY` to move it, `off` to turn it off).
 `Bots/` holds a note per bot (Catbot seeds it when the bot is made and moves it when the bot is

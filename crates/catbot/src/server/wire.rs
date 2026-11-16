@@ -63,7 +63,7 @@ fn sha256(text: &str) -> String {
 }
 
 fn model_selection(bot: &Bot) -> Value {
-    json!({ "instanceId": INSTANCE, "model": bot.model.clone().unwrap_or_default() })
+    json!({ "instanceId": bot.engine, "model": bot.model.clone().unwrap_or_default() })
 }
 
 /// What a chat is doing: "idle", "working" or "waiting-on-you", by its id.

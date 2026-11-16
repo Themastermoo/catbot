@@ -549,3 +549,105 @@ async fn devices_pair_at_home_and_reach_catbot_from_away() {
     let (_, overview) = s.call("DELETE", "/api/devices/pairing", None).await;
     assert!(overview["pairing"].is_null());
 }
+
+/// A stand-in chat API, OpenAI-style. Asked to "write", it calls write_file once; given the
+/// tool's result, it answers. Every request it gets is kept, with its Authorization header.
+fn fake_api(seen: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Router {
+    let kept = seen.clone();
+    Router::new()
+        .route("/v1/models", get(|| async { axum::Json(json!({ "data": [{ "id": "gpt-test" }, { "id": "text-embedding-3" }] })) }))
+        .route("/v1/chat/completions", post(move |headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+            let kept = kept.clone();
+            async move {
+                let auth = headers.get("authorization").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                kept.lock().unwrap().push(json!({ "auth": auth, "body": body }));
+                let last = body["messages"].as_array().unwrap().last().unwrap().clone();
+                let chunks: Vec<Value> = if last["role"] == "tool" {
+                    vec![json!({ "choices": [{ "delta": { "content": "Done: " } }] }), json!({ "choices": [{ "delta": { "content": "the plan is saved." } }] })]
+                } else {
+                    vec![
+                        json!({ "choices": [{ "delta": { "content": "Writing it." } }] }),
+                        json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "id": "call-1", "function": { "name": "write_file", "arguments": "{\"path\":\"plan.md\"," } }] } }] }),
+                        json!({ "choices": [{ "delta": { "tool_calls": [{ "index": 0, "function": { "arguments": "\"content\":\"carrots\"}" } }] } }] }),
+                    ]
+                };
+                let mut text: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+                text.push_str("data: [DONE]\n\n");
+                Response::builder().header("content-type", "text/event-stream").body(Body::from(text)).unwrap()
+            }
+        }))
+}
+
+#[tokio::test]
+async fn a_bot_on_a_chat_api_uses_its_tools_with_approval() {
+    let s = setup().await;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let api = listen(fake_api(seen.clone())).await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+
+    // The engines, with no key yet; then the key and the stand-in's address, saved at home only.
+    let (_, list) = s.call("GET", "/api/engines", None).await;
+    let openai = list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "openai").unwrap().clone();
+    assert_eq!((openai["ready"].as_bool(), openai["keyHint"].is_null()), (Some(false), true));
+    assert_eq!(s.call("PUT", "/api/engines/openai/key", Some(json!({ "key": "https://not-a-key" }))).await.0, 400);
+    let (status, saved) = s
+        .call("PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-test-1234", "url": format!("http://{api}/v1") })))
+        .await;
+    assert_eq!(status, 200, "{saved}");
+    assert_eq!((saved["engine"]["ready"].as_bool(), saved["engine"]["keyHint"].as_str()), (Some(true), Some("…1234")));
+    assert!(!saved.to_string().contains("sk-test-1234"), "the key itself never goes out");
+    let (_, models) = s.call("GET", "/api/engines/openai/models", None).await;
+    assert_eq!(models, json!({ "models": ["gpt-test"], "live": true }));
+
+    // A bot moved to it.
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    assert_eq!(made["bot"]["modelSelection"]["instanceId"], "claude");
+    let (status, moved) = s
+        .call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "openai", "model": "gpt-test" } })))
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(moved["bot"]["modelSelection"], json!({ "instanceId": "openai", "model": "gpt-test" }));
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "skynet" } }))).await.0, 400);
+
+    // It writes a file, asking first; then answers.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "write the plan", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    assert_eq!(asked["event"]["tool"], "Write");
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    let plan = s._dir.path().join("home/bots/scout/plan.md");
+    assert!(!plan.exists(), "nothing is written before the yes");
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["kind"] == "text" && f["message"]["role"] == "bot").await;
+    assert_eq!(reply["message"]["text"], "Writing it.\n\nDone: the plan is saved.");
+    let done = until(&mut events, "turn.completed", |f| runtime(f, "turn.completed")).await;
+    assert_eq!(done["event"]["ok"], true);
+    assert_eq!(std::fs::read_to_string(&plan).unwrap(), "carrots");
+
+    // What the API was sent: the key, the model, the bot's instructions and tools, the history.
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 2);
+    assert_eq!(seen[0]["auth"], "Bearer sk-test-1234");
+    let first = &seen[0]["body"];
+    assert_eq!(first["model"], "gpt-test");
+    assert!(first["messages"][0]["content"].as_str().unwrap().starts_with("You are Scout"));
+    assert_eq!(first["messages"].as_array().unwrap().last().unwrap(), &json!({ "role": "user", "content": "write the plan" }));
+    assert!(first["tools"].as_array().unwrap().iter().any(|t| t["function"]["name"] == "run_command"));
+    let second = seen[1]["body"]["messages"].as_array().unwrap();
+    assert_eq!(second.last().unwrap()["role"], "tool");
+    assert!(second.last().unwrap()["content"].as_str().unwrap().starts_with("Wrote"));
+
+    // Keys are managed at home only, and can be forgotten.
+    let key = {
+        let (_, overview) = s.call("POST", "/api/devices/pairing", None).await;
+        let code = overview["pairing"]["code"].as_str().unwrap().to_string();
+        let (_, paired) = s.away(None, "POST", "/api/pair", Some(json!({ "code": code, "name": "Phone" }))).await;
+        paired["key"].as_str().unwrap().to_string()
+    };
+    assert_eq!(s.away(Some(&key), "GET", "/api/engines", None).await.0, 200);
+    assert_eq!(s.away(Some(&key), "PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-other" }))).await.0, 404);
+    let (_, forgot) = s.call("DELETE", "/api/engines/openai/key", None).await;
+    assert_eq!(forgot["engine"]["ready"], false);
+}

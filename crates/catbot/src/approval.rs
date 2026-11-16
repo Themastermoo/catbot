@@ -117,6 +117,25 @@ pub struct Answerer {
 }
 
 impl Answerer {
+    /// An answerer for questions Catbot asks itself (the chat APIs' tools, `api.rs`), with no
+    /// helper or socket between.
+    pub fn local() -> Self {
+        Self { pending: Arc::default() }
+    }
+
+    /// Opens a question: from now on `answer(id, …)` reaches the returned wait, which ends in a
+    /// deny if the question is dropped unanswered.
+    pub fn expect(&self, id: &str) -> impl std::future::Future<Output = Decision> + Send + 'static {
+        let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+        self.pending.lock().expect("pending lock").insert(id.to_string(), tx);
+        async move {
+            match rx.recv().await.and_then(|line| serde_json::from_str::<Value>(&line).ok()) {
+                Some(answer) => decision_from(&answer),
+                None => Decision::Deny(UNREACHABLE.into()),
+            }
+        }
+    }
+
     pub fn answer(&self, id: &str, decision: Decision) -> bool {
         let Some(reply) = self.pending.lock().expect("pending lock").remove(id) else { return false };
         reply.send(answer_line(id, &decision)).is_ok()
@@ -132,6 +151,18 @@ impl Drop for Broker {
     fn drop(&mut self) {
         self.task.abort();
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// The decision an answer line carries, with the words that keep a refused bot from trying
+/// another way.
+fn decision_from(answer: &Value) -> Decision {
+    if answer["behavior"] == "allow" {
+        Decision::Allow
+    } else {
+        let said = answer["message"].as_str().filter(|m| !m.trim().is_empty()).unwrap_or("The person refused this step.");
+        let stop = if said.ends_with(['.', '!', '?']) { "" } else { "." };
+        Decision::Deny(format!("{said}{stop}{REFUSED_NEXT_STEP}"))
     }
 }
 
@@ -388,13 +419,7 @@ impl BrokerLink {
             if answer["t"] != "answer" || answer["id"] != id.as_str() {
                 continue;
             }
-            return if answer["behavior"] == "allow" {
-                Decision::Allow
-            } else {
-                let said = answer["message"].as_str().filter(|m| !m.trim().is_empty()).unwrap_or("The person refused this step.");
-                let stop = if said.ends_with(['.', '!', '?']) { "" } else { "." };
-                Decision::Deny(format!("{said}{stop}{REFUSED_NEXT_STEP}"))
-            };
+            return decision_from(&answer);
         }
         self.alive = false;
         Decision::Deny(UNREACHABLE.into())

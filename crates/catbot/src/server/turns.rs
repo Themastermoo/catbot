@@ -11,9 +11,11 @@ use tokio::sync::Notify;
 
 use super::{App, hub::runtime, wire};
 use crate::{
+    api,
     approval::{Answerer, Decision},
     chat,
-    claude::{self, Event, Outcome, Session},
+    claude::{self, Event, Outcome, Running, Session},
+    engines,
     console::{Step, summarize},
     store::{Bot, Conversation, Role},
 };
@@ -213,11 +215,16 @@ async fn drive(
     emit: &impl Fn(Value),
 ) -> Result_ {
     let mut result = Result_::default();
-    let turn = chat::bot_turn(bot, text.to_string(), session.clone(), app.cli.clone(), app.helper.clone(), codex, app.memory.clone());
-    let mut running = match claude::start(&turn).await {
+    let started = if bot.engine == engines::CLAUDE {
+        let turn = chat::bot_turn(bot, text.to_string(), session.clone(), app.cli.clone(), app.helper.clone(), codex, app.memory.clone());
+        claude::start(&turn).await.map_err(|err| err.to_string())
+    } else {
+        start_api(app, bot, thread, codex)
+    };
+    let mut running = match started {
         Ok(running) => running,
         Err(err) => {
-            let message = err.to_string();
+            let message = err;
             emit(json!({ "type": "runtime.error", "message": message, "setup": true }));
             result.steps.push(Step::Error { message: message.clone() });
             result.errors.push(message);
@@ -306,6 +313,33 @@ async fn drive(
         }
     }
     result
+}
+
+/// Starts a turn on a chat API: its key and model, the conversation so far (the API keeps
+/// none), and the folders its tools may use.
+fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::PathBuf>) -> Result<Running, String> {
+    let engine = engines::find(&bot.engine)
+        .filter(|e| e.kind == engines::Kind::Api)
+        .ok_or_else(|| format!("This bot runs on {}, which Catbot doesn't know. Pick another AI in its settings.", bot.engine))?;
+    let saved = app.with_store(|store| store.engine_key(engine.id)).flatten();
+    let access = engines::access(engine, saved.as_ref())
+        .ok_or_else(|| format!("{} needs an API key first: add it in this bot's settings.", engine.name))?;
+    let model = bot.model.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(|| engine.default_model.to_string());
+    let history = app
+        .with_store(|store| store.messages(thread, 60))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|m| match m.role {
+            Role::Person => Some((true, m.body)),
+            Role::Bot if !m.body.trim().is_empty() => Some((false, m.body)),
+            _ => None,
+        })
+        .collect();
+    let mut system = chat::system_prompt(bot, codex.as_deref(), app.memory.as_deref());
+    system.push_str(&api::tool_guide(&bot.folder));
+    let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
+    let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode };
+    Ok(api::start(api::ApiTurn { engine, access, model, system, history, workspace }))
 }
 
 /// Marks an approval card answered (`dismissed` when nobody answered it) and shows the change.

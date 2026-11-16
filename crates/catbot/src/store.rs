@@ -47,12 +47,22 @@ pub fn default_codex() -> PathBuf {
     user_home().join("VaultCodex")
 }
 
+/// A chat API's saved key, and its address if it isn't the usual one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EngineKey {
+    pub key: String,
+    pub url: Option<String>,
+    pub updated_at: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Bot {
     pub id: String,
     pub name: String,
     pub instructions: String,
-    /// None: Claude Code's default model.
+    /// Which AI runs it (`engines.rs`): "claude", or a chat API such as "openai" or "xai".
+    pub engine: String,
+    /// None: the engine's default model.
     pub model: Option<String>,
     #[serde(serialize_with = "mode_str")]
     pub mode: PermissionMode,
@@ -292,7 +302,48 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 5 {
+            // Version 5: which AI each bot runs on (bots from before run on Claude), and the keys
+            // for the chat APIs, kept here in Catbot's private folder and never sent out.
+            conn.execute_batch(
+                "BEGIN;
+                 ALTER TABLE bots ADD COLUMN engine TEXT NOT NULL DEFAULT 'claude';
+                 CREATE TABLE engine_keys (
+                     engine     TEXT PRIMARY KEY,
+                     key        TEXT NOT NULL,
+                     url        TEXT,
+                     updated_at TEXT NOT NULL
+                 );
+                 PRAGMA user_version = 5;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { conn, home: home.to_path_buf() })
+    }
+
+    /// The key (and any other address) saved for a chat API.
+    pub fn engine_key(&self, engine: &str) -> Result<Option<EngineKey>, BoxError> {
+        Ok(self
+            .conn
+            .query_row("SELECT key, url, updated_at FROM engine_keys WHERE engine = ?1", [engine], |r| {
+                Ok(EngineKey { key: r.get(0)?, url: r.get(1)?, updated_at: r.get(2)? })
+            })
+            .optional()?)
+    }
+
+    /// Saves a chat API's key, replacing any before it.
+    pub fn set_engine_key(&self, engine: &str, key: &str, url: Option<&str>) -> Result<(), BoxError> {
+        self.conn.execute(
+            "INSERT INTO engine_keys (engine, key, url, updated_at) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(engine) DO UPDATE SET key = excluded.key, url = excluded.url, updated_at = excluded.updated_at",
+            params![engine, key, url, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Forgets a chat API's key. False if there was none.
+    pub fn remove_engine_key(&self, engine: &str) -> Result<bool, BoxError> {
+        Ok(self.conn.execute("DELETE FROM engine_keys WHERE engine = ?1", [engine])? > 0)
     }
 
     /// Pairs a device: `key_hash` is the hash of the key it was given.
@@ -347,6 +398,7 @@ impl Store {
             id: uuid::Uuid::new_v4().to_string(),
             name,
             instructions: new.instructions.trim().to_string(),
+            engine: crate::engines::CLAUDE.to_string(),
             model: new.model.filter(|m| !m.trim().is_empty()),
             mode: new.mode,
             codex: new.codex,
@@ -375,7 +427,7 @@ impl Store {
     }
 
     pub fn bots(&self) -> Result<Vec<Bot>, BoxError> {
-        let mut stmt = self.conn.prepare("SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color FROM bots ORDER BY name")?;
+        let mut stmt = self.conn.prepare("SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine FROM bots ORDER BY name")?;
         let bots = stmt.query_map([], bot_from_row)?.collect::<Result<_, _>>()?;
         Ok(bots)
     }
@@ -385,7 +437,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color FROM bots WHERE name = ?1",
+                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine FROM bots WHERE name = ?1",
                 [name.trim()],
                 bot_from_row,
             )
@@ -396,7 +448,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color FROM bots WHERE id = ?1",
+                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine FROM bots WHERE id = ?1",
                 [id],
                 bot_from_row,
             )
@@ -411,8 +463,8 @@ impl Store {
             return Err(format!("a bot named {} already exists", other.name).into());
         }
         self.conn.execute(
-            "UPDATE bots SET name = ?2, instructions = ?3, model = ?4, mode = ?5, codex = ?6, mark = ?7, color = ?8 WHERE id = ?1",
-            params![bot.id, name, bot.instructions, bot.model, bot.mode.as_str(), bot.codex, bot.mark.as_str(), bot.color],
+            "UPDATE bots SET name = ?2, instructions = ?3, model = ?4, mode = ?5, codex = ?6, mark = ?7, color = ?8, engine = ?9 WHERE id = ?1",
+            params![bot.id, name, bot.instructions, bot.model, bot.mode.as_str(), bot.codex, bot.mark.as_str(), bot.color, bot.engine],
         )?;
         Ok(())
     }
@@ -669,6 +721,7 @@ fn bot_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
         created_at: r.get(7)?,
         mark: r.get::<_, Option<String>>(8)?.as_deref().and_then(Mark::parse).unwrap_or_default(),
         color: r.get::<_, Option<String>>(9)?.filter(|c| COLORS.contains(&c.as_str())),
+        engine: r.get(10)?,
     })
 }
 
@@ -888,8 +941,17 @@ mod tests {
         let store = Store::open(&home).unwrap();
         let bot = store.bot("Old").unwrap().unwrap();
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
+        assert_eq!(bot.engine, "claude", "bots from before run on Claude");
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 4);
+        assert_eq!(version, 5);
+        // And keys for the chat APIs.
+        assert_eq!(store.engine_key("xai").unwrap(), None);
+        store.set_engine_key("xai", "xai-1", None).unwrap();
+        store.set_engine_key("xai", "xai-2", Some("https://example.com/v1")).unwrap();
+        let saved = store.engine_key("xai").unwrap().unwrap();
+        assert_eq!((saved.key.as_str(), saved.url.as_deref()), ("xai-2", Some("https://example.com/v1")));
+        assert!(store.remove_engine_key("xai").unwrap());
+        assert!(!store.remove_engine_key("xai").unwrap());
         // And chats: an old conversation is kept, unnamed, and opened to.
         let conv = store.start_conversation("b1", Some("s1")).unwrap();
         assert_eq!(store.current_conversation("b1").unwrap().unwrap().title, None);

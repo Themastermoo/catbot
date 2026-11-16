@@ -96,6 +96,10 @@ pub fn says_lost(text: &str) -> bool {
 pub async fn chat(store: &Store, options: Options) -> Result<bool, BoxError> {
     let paint = Paint::stderr();
     let bot = find(store, &options.bot)?;
+    if bot.engine != crate::engines::CLAUDE {
+        let name = crate::engines::find(&bot.engine).map(|e| e.name).unwrap_or(bot.engine.as_str());
+        return Err(format!("{} runs on {name}; talk to it in Catbot's window (catbot chat drives Claude bots only, for now)", bot.name).into());
+    }
     if !bot.folder.is_dir() {
         std::fs::create_dir_all(&bot.folder)?;
     }

@@ -271,9 +271,18 @@ pub struct Running {
     pub events: mpsc::Receiver<Event>,
     child: Option<Child>,
     broker: Option<Broker>,
+    /// A turn Catbot runs itself (a chat API, `api.rs`): its task and its own questions.
+    task: Option<tokio::task::JoinHandle<()>>,
+    answers: Option<Answerer>,
 }
 
 impl Running {
+    /// A turn driven inside Catbot rather than by a program: its events, the task making them,
+    /// and the answerer its approval questions wait on.
+    pub fn in_process(events: mpsc::Receiver<Event>, task: tokio::task::JoinHandle<()>, answers: Answerer) -> Self {
+        Self { events, child: None, broker: None, task: Some(task), answers: Some(answers) }
+    }
+
     /// The private folder holding this turn's approval socket, if approvals are on.
     pub fn approval_dir(&self) -> Option<&std::path::Path> {
         self.broker.as_ref().map(Broker::dir)
@@ -281,18 +290,25 @@ impl Running {
 
     /// A handle for answering this turn's questions from elsewhere, if approvals are on.
     pub fn answerer(&self) -> Option<Answerer> {
-        self.broker.as_ref().map(Broker::answerer)
+        self.broker.as_ref().map(Broker::answerer).or_else(|| self.answers.clone())
     }
 
     /// Answers an [`Event::ApprovalRequested`]. Returns false if it was already answered.
     pub fn answer(&self, id: &str, decision: Decision) -> bool {
-        self.broker.as_ref().is_some_and(|broker| broker.answer(id, decision))
+        match (&self.broker, &self.answers) {
+            (Some(broker), _) => broker.answer(id, decision),
+            (None, Some(answers)) => answers.answer(id, decision),
+            (None, None) => false,
+        }
     }
 
     /// Stops the turn now.
     pub async fn stop(&mut self) {
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill().await;
+        }
+        if let Some(task) = self.task.take() {
+            task.abort();
         }
     }
 }
@@ -391,7 +407,7 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
         }
     });
 
-    Ok(Running { events, child: Some(child), broker })
+    Ok(Running { events, child: Some(child), broker, task: None, answers: None })
 }
 
 #[cfg(test)]

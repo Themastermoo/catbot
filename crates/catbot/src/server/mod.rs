@@ -7,6 +7,7 @@
 //! more, until the reference server has nothing left to do.
 
 pub mod devices;
+pub mod engines;
 pub mod events;
 pub mod hub;
 pub mod memory;
@@ -260,6 +261,11 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
     match segments.as_slice() {
         ["api", "events"] if method == Method::GET => events::events(app, req, events::Door::Home).await,
         ["api", "memory", rest @ ..] if method == Method::GET => respond(memory::route(&app, rest, &req)),
+        ["api", "engines", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            respond(engines::route(&app, &method, &rest, req, true).await)
+        }
         ["api", "devices", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
@@ -493,11 +499,12 @@ fn apply_changes(bot: &mut Bot, body: &Value) -> Result<(), (StatusCode, String)
         bot.instructions = soul.trim().to_string();
     }
     if let Some(selection) = body.get("modelSelection").filter(|s| s.is_object()) {
-        let instance = selection["instanceId"].as_str().unwrap_or(wire::INSTANCE);
-        if !instance.is_empty() && instance != wire::INSTANCE {
-            return Err(bad("Catbot bots run on Claude for now"));
-        }
-        bot.model = selection["model"].as_str().map(str::to_string).filter(|m| !m.is_empty());
+        let engine = selection["instanceId"].as_str().filter(|i| !i.is_empty()).unwrap_or(&bot.engine).to_string();
+        let known = crate::engines::find(&engine).ok_or_else(|| bad(format!("Catbot doesn't know the AI {engine}")))?;
+        let model = selection["model"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
+        // A new engine without a model named starts on that engine's own default.
+        bot.model = if known.id != bot.engine && model.is_none() { None } else { model };
+        bot.engine = known.id.to_string();
     }
     if let Some(level) = body["approvalMode"].as_str() {
         bot.mode = wire::mode_from_approval(level).ok_or_else(|| bad(format!("unknown approval level {level}")))?;
