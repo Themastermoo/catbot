@@ -62,6 +62,21 @@ code for one:
 The address in the pairing QR code is `CATBOT_PUBLIC_URL` if set, else this machine's Tailscale
 name (`https://<machine>.<tailnet>.ts.net`).
 
+**Giving Catbot its public address** (Tailscale Funnel, free; Tailscale goes on this machine
+only, the phone needs nothing extra):
+
+```sh
+curl -fsSL https://tailscale.com/install.sh | sh   # once: install Tailscale
+sudo tailscale up                                  # once: sign in (opens a browser)
+sudo tailscale set --operator=$USER                # once: let yourself run Funnel
+bash scripts/remote-setup.sh                       # carry https://<machine>.ts.net to the door
+bash scripts/remote-setup.sh --off                 # take the public address away
+```
+
+The first run may print a link to turn on HTTPS and Funnel for your tailnet; approve it and run
+the script again. It ends by checking the address from outside, where Catbot's door should
+answer 401 (locked). Then pair a phone from the phone button at the top of the sidebar.
+
 ## The desktop app
 
 Catbot's interface also runs as its own window (WebKitGTK), with Catbot's icon in the KDE menu:
