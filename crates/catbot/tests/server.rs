@@ -488,6 +488,21 @@ async fn devices_pair_at_home_and_reach_catbot_from_away() {
     assert_eq!(names, vec!["Kiwi"], "the reference server's bots stay at home");
     assert_eq!(s.away(Some(&key), "GET", "/api/config", None).await.0, 404, "nothing is passed on from away");
     assert_eq!(s.away(Some(&key), "GET", "/api/devices", None).await.0, 404, "devices are managed at home");
+
+    // The memory vault reads the same from away as at home, and only for a paired phone.
+    let (status, home_list) = s.call("GET", "/api/memory", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(s.away(None, "GET", "/api/memory", None).await.0, 401);
+    let (status, away_list) = s.away(Some(&key), "GET", "/api/memory", None).await;
+    assert_eq!((status, &away_list), (200, &home_list));
+    assert!(away_list["notes"].as_array().unwrap().iter().any(|n| n["path"] == "Bots/Kiwi.md"));
+    let (status, note) = s.away(Some(&key), "GET", "/api/memory/note?path=Bots%2FKiwi.md", None).await;
+    assert_eq!(status, 200);
+    assert!(note["text"].as_str().unwrap().starts_with("# Kiwi"), "{note}");
+    let (_, linked) = s.away(Some(&key), "GET", "/api/memory/note?link=Kiwi&from=Home.md", None).await;
+    assert_eq!(linked["path"], "Bots/Kiwi.md");
+    assert_eq!(s.away(Some(&key), "GET", "/api/memory/note?path=..%2Fhome%2Fcatbot.db", None).await.0, 404);
+    assert_eq!(s.away(Some(&key), "POST", "/api/memory", None).await.0, 404, "read-only");
     assert_eq!(s.away(Some(&key), "GET", "/", None).await.0, 404);
     let mut events = s.events_away(&key).await;
     until(&mut events, "hello", |f| f["kind"] == "hello").await;

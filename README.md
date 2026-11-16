@@ -196,7 +196,9 @@ renamed), `Projects/` a note per project shared by the bots, and `Journal/` a no
 day. Every bot is told where the vault is and how to keep it (its `AGENTS.md`), and gets it as a
 folder it can work in. When the Codex exists, the vault has a `Codex` link to it (a link, not a
 copy), so the notes point into it: `[[Codex/20 Projects/Catbot|Catbot]]`. Open the folder in
-Obsidian as its own vault. A bot kept out of the Codex isn't told about it or given it, but the
+Obsidian as its own vault, or read it in Catbot: the book button at the top of the sidebar opens a
+read-only Memory viewer (on the phone app too), where `[[links]]` open the note they lead to,
+Codex notes included. A bot kept out of the Codex isn't told about it or given it, but the
 link is still in its vault, so that switch points bots away rather than walling them off.
 
 ## Talking to Claude through Catbot

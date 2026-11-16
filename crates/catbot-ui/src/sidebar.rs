@@ -26,6 +26,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     let mut query = use_signal(String::new);
     let mut making = use_signal(|| false);
     let mut pairing = use_signal(|| false);
+    let mut remembering = use_signal(|| false);
     // Bots whose chats are showing.
     let mut unfolded = use_signal(HashSet::<String>::new);
     let state = use_context::<Signal<State>>();
@@ -43,6 +44,19 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             class: "relative flex h-full w-[320px] shrink-0 flex-col border-r-[0.5px] border-edge bg-panel max-md:w-full max-md:border-r-0 {phone}",
             div { "data-sidebar-top-row": true, class: "relative flex h-12 items-center pl-4 pr-2",
                 span { class: "min-w-0 flex-1 text-[15px] font-semibold text-ink", "Catbot" }
+                button {
+                    r#type: "button",
+                    "aria-label": "Memory",
+                    title: "The bots' memory",
+                    "data-open-memory": true,
+                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                    onclick: move |_| remembering.set(true),
+                    // Lucide `BookOpen` (ISC).
+                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        path { d: "M12 7v14" }
+                        path { d: "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" }
+                    }
+                }
                 if at_home { button {
                     r#type: "button",
                     "aria-label": "Devices",
@@ -72,6 +86,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             }
             if pairing() {
                 crate::devices::DevicesDialog { on_close: move |_| pairing.set(false) }
+            }
+            if remembering() {
+                crate::memory::MemoryDialog { on_close: move |_| remembering.set(false) }
             }
             div { class: "px-3 pt-1 pb-3",
                 div { class: "flex h-8 items-center gap-2 rounded-full px-3 focus-within:ring-focus {ELEVATED_CONTROL}",

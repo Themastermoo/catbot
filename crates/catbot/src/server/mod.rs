@@ -9,6 +9,7 @@
 pub mod devices;
 pub mod events;
 pub mod hub;
+pub mod memory;
 pub mod remote;
 pub mod turns;
 pub mod wire;
@@ -258,6 +259,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match segments.as_slice() {
         ["api", "events"] if method == Method::GET => events::events(app, req, events::Door::Home).await,
+        ["api", "memory", rest @ ..] if method == Method::GET => respond(memory::route(&app, rest, &req)),
         ["api", "devices", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

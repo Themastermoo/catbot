@@ -14,6 +14,7 @@ mod events;
 mod live;
 mod mascots;
 mod markdown;
+mod memory;
 mod settings;
 mod sidebar;
 

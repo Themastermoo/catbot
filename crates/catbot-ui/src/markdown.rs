@@ -11,6 +11,16 @@ const LINK: &str = "break-words text-accent underline decoration-accent/40 hover
 
 /// Markdown → HTML for the inside of a `.chat-md` block.
 pub fn to_html(text: &str) -> String {
+    render(text, false)
+}
+
+/// A memory note as HTML: like a reply, with its `[[wikilinks]]` as links to other notes
+/// (`<a data-note="target">`, opened by the memory viewer).
+pub fn note_html(text: &str) -> String {
+    render(&wikilinks(text), true)
+}
+
+fn render(text: &str, notes: bool) -> String {
     let options = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
     let mut out = String::with_capacity(text.len() * 2);
     // Links whose address wasn't safe: their closing tag is skipped too.
@@ -49,6 +59,12 @@ pub fn to_html(text: &str) -> String {
                 Tag::Emphasis => out.push_str("<em>"),
                 Tag::Strong => out.push_str("<strong>"),
                 Tag::Strikethrough => out.push_str("<del>"),
+                Tag::Link { dest_url, .. } if notes && dest_url.starts_with(NOTE) => {
+                    out.push_str(r##"<a href="#" data-note=""##);
+                    escape_into(&mut out, &dest_url[NOTE.len()..]);
+                    out.push_str(&format!(r#"" dir="auto" class="{LINK}">"#));
+                    dropped_links.push(false);
+                }
                 Tag::Link { dest_url, .. } => {
                     let safe = safe_href(&dest_url);
                     if safe {
@@ -146,6 +162,100 @@ fn heading(level: HeadingLevel) -> &'static str {
     }
 }
 
+/// How a wikilink's target is carried through the Markdown parser (percent-encoded after it).
+const NOTE: &str = "note:";
+
+/// Turns `[[target]]`, `[[target|label]]` and `![[target]]` into Markdown links to `note:target`,
+/// outside code. The label defaults to the target's last part, without any `#heading`.
+fn wikilinks(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut fenced = false;
+    for line in text.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fenced = !fenced;
+        }
+        if fenced || trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            out.push_str(line);
+            continue;
+        }
+        let mut rest = line;
+        let mut in_code = false;
+        while !rest.is_empty() {
+            if rest.starts_with('`') {
+                in_code = !in_code;
+                out.push('`');
+                rest = &rest[1..];
+                continue;
+            }
+            if !in_code
+                && rest.starts_with("[[")
+                && let Some(end) = rest[2..].find("]]").filter(|&end| !rest[2..2 + end].contains(['\n', '[']))
+            {
+                let inner = &rest[2..2 + end];
+                let (target, label) = match inner.split_once('|') {
+                    Some((target, label)) => (target.trim(), label.trim().to_string()),
+                    None => {
+                        let target = inner.trim();
+                        let shown = target.split('#').next().unwrap_or(target);
+                        (target, shown.rsplit('/').next().unwrap_or(shown).to_string())
+                    }
+                };
+                if out.ends_with('!') {
+                    out.pop();
+                }
+                let label = if label.is_empty() { target.to_string() } else { label };
+                out.push('[');
+                out.push_str(&label.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]"));
+                out.push_str("](");
+                out.push_str(NOTE);
+                out.push_str(&encode(target));
+                out.push(')');
+                rest = &rest[2 + end + 2..];
+                continue;
+            }
+            let c = rest.chars().next().unwrap_or_default();
+            out.push(c);
+            rest = &rest[c.len_utf8()..];
+        }
+    }
+    out
+}
+
+/// Percent-encodes all but letters, digits and `-_.~/`.
+pub fn encode(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-_.~/".contains(&byte) {
+            out.push(byte as char);
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// Undoes `encode`.
+pub fn decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok()).and_then(|h| u8::from_str_radix(h, 16).ok());
+        match (bytes[i], hex) {
+            (b'%', Some(byte)) => {
+                out.push(byte);
+                i += 3;
+            }
+            (byte, _) => {
+                out.push(byte);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Only addresses that open a web page or a mail: no `javascript:`, no `data:`, nothing local.
 fn safe_href(href: &str) -> bool {
     let lower = href.trim().to_ascii_lowercase();
@@ -231,6 +341,20 @@ mod tests {
         let html = to_html("```rust\nfn main() {}\n```\n\n| a | b |\n|---|--:|\n| 1 | 2 |");
         assert!(html.contains(">rust</span>") && html.contains("<code>fn main() {}\n</code>"), "{html}");
         assert!(html.contains(r#"<td class="border-b border-hairline/20 px-2 py-1.5 align-top text-end">2</td>"#), "{html}");
+    }
+
+    #[test]
+    fn notes_link_to_notes() {
+        let html = note_html("See [[Bots/Scout]], [[Codex/20 Projects/Catbot|Catbot]] and ![[Garden#Soil]].\n\n`[[not a link]]`");
+        assert!(html.contains(r##"<a href="#" data-note="Bots/Scout" dir="auto""##) && html.contains(">Scout</a>"), "{html}");
+        assert!(html.contains(r#"data-note="Codex/20%20Projects/Catbot""#) && html.contains(">Catbot</a>"), "{html}");
+        assert!(html.contains(r#"data-note="Garden%23Soil""#) && html.contains(">Garden</a>") && !html.contains('!'), "{html}");
+        assert!(html.contains("<code") && html.contains("[[not a link]]"), "{html}");
+        assert_eq!(decode("Codex/20%20Projects/Catbot"), "Codex/20 Projects/Catbot");
+        // In a reply, nothing is a note link.
+        assert!(!to_html("[x](note:Scout)").contains("data-note"));
+        let fenced = note_html("```\n[[Scout]]\n```");
+        assert!(!fenced.contains("data-note"), "{fenced}");
     }
 
     #[test]
