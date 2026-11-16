@@ -19,6 +19,7 @@ mod chat;
 mod chats;
 mod devices;
 mod drafts;
+mod email;
 mod engines;
 mod link;
 #[cfg(not(target_arch = "wasm32"))]

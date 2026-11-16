@@ -81,6 +81,7 @@ pub fn bot_turn(
         isolated: true,
         approval_helper,
         extra_dirs: memory.into_iter().chain(codex).collect(),
+        catbot_tools: None,
     }
 }
 

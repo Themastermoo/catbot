@@ -172,6 +172,8 @@ async fn run(
     // The bot's skills, in its folder for this turn (and told where, for AIs that don't look).
     let told = super::skills::place(app, &dressed, &dressed.folder);
     dressed.instructions.push_str(&told);
+    // Catbot's own tools for the turn (its mailbox, for one), on a key good until the turn ends.
+    let open = super::bot_tools::open(app, &dressed, thread);
     let bot = &dressed;
     app.announce_bot(&bot.id);
     emit(json!({ "type": "turn.started" }));
@@ -200,7 +202,7 @@ async fn run(
         Session::New(_) if bot.engine == engines::CLAUDE => format!("{}{text}", so_far(app, thread, if fresh { i64::MAX } else { request_id }, bot)),
         _ => text.to_string(),
     };
-    let mut result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit).await;
+    let mut result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
     let lost = result.outcome.as_ref().is_some_and(|o| !o.ok && o.result.as_deref().is_some_and(chat::says_lost))
         || result.errors.iter().any(|e| chat::says_lost(e));
     if matches!(session, Session::Resume(_)) && lost && !result.stopped {
@@ -210,7 +212,7 @@ async fn run(
         let note = "Claude no longer had this conversation, so it continued in a fresh one.";
         save_and_send(app, thread, Role::Note, note, None);
         session = Session::New(id);
-        result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit).await;
+        result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
     }
 
     // Claude turned the turn away at its usage limit before doing anything: a backup takes it.
@@ -226,7 +228,7 @@ async fn run(
                 app.with_store(|store| store.clear_session(thread));
             }
             let fresh = Session::New(uuid::Uuid::new_v4().to_string());
-            result = drive(app, &stand_in, &fresh, text, codex, thread, &item_id, &cancel, &emit).await;
+            result = drive(app, &stand_in, &fresh, text, codex, thread, &item_id, &cancel, &emit, open.as_ref()).await;
             ran_on = stand_in;
         }
     }
@@ -310,15 +312,17 @@ async fn drive(
     item_id: &str,
     cancel: &Notify,
     emit: &impl Fn(Value),
+    tools: Option<&super::bot_tools::Open>,
 ) -> Result_ {
     let mut result = Result_::default();
     let started = if bot.engine == engines::CLAUDE {
-        let turn = chat::bot_turn(bot, text.to_string(), session.clone(), app.cli.clone(), app.helper.clone(), codex, app.memory.clone());
+        let mut turn = chat::bot_turn(bot, text.to_string(), session.clone(), app.cli.clone(), app.helper.clone(), codex, app.memory.clone());
+        turn.catbot_tools = tools.map(|t| t.access.clone());
         claude::start(&turn).await.map_err(|err| err.to_string())
     } else if engines::find(&bot.engine).is_some_and(|e| e.kind == engines::Kind::Agent) {
-        start_agent(app, bot, thread, session, codex)
+        start_agent(app, bot, thread, session, codex, tools)
     } else {
-        start_api(app, bot, thread, codex)
+        start_api(app, bot, thread, codex, tools)
     };
     let mut running = match started {
         Ok(running) => running,
@@ -419,7 +423,7 @@ async fn drive(
 
 /// Starts a turn on a chat API: its key and model, the conversation so far (the API keeps
 /// none), and the folders its tools may use.
-fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::PathBuf>) -> Result<Running, String> {
+fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::PathBuf>, tools: Option<&super::bot_tools::Open>) -> Result<Running, String> {
     let engine = engines::find(&bot.engine)
         .filter(|e| e.kind == engines::Kind::Api)
         .ok_or_else(|| format!("This bot runs on {}, which Catbot doesn't know. Pick another AI in its settings.", bot.engine))?;
@@ -439,13 +443,13 @@ fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::P
     let mut system = chat::system_prompt(bot, codex.as_deref(), app.memory.as_deref());
     system.push_str(&api::tool_guide(&bot.folder));
     let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
-    let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode };
+    let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode, catbot: tools.map(|t| (t.access.clone(), t.tools.clone())) };
     Ok(api::start(api::ApiTurn { engine, access, model, system, history, pictures, workspace }))
 }
 
 /// Starts a turn on an agent program: the program found on this computer, the session to carry
 /// on, and what a new session needs to know.
-fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex: Option<std::path::PathBuf>) -> Result<Running, String> {
+fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex: Option<std::path::PathBuf>, tools: Option<&super::bot_tools::Open>) -> Result<Running, String> {
     let engine = engines::find(&bot.engine).ok_or("no such agent")?;
     let program = engines::agent_program(engine).ok_or_else(|| {
         format!("{} isn't installed on this computer. Install it with `{}`, then sign in with `{}`.", engine.name, engine.install, engine.sign_in)
@@ -458,13 +462,14 @@ fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
     };
     let instructions = chat::system_prompt(bot, codex.as_deref(), app.memory.as_deref());
     let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
-    let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode };
+    let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode, catbot: tools.map(|t| (t.access.clone(), t.tools.clone())) };
     let session = match session {
         Session::Resume(id) => Some(id.clone()),
         Session::New(_) => None,
     };
     let model = bot.model.clone().unwrap_or_default();
-    crate::acp::start(crate::acp::AcpTurn { engine, program, model, session, instructions, earlier: history, text, workspace }).map_err(|e| e.to_string())
+    let mcp = tools.and_then(|t| super::bot_tools::acp_server(app, t)).into_iter().collect();
+    crate::acp::start(crate::acp::AcpTurn { engine, program, model, session, instructions, earlier: history, text, workspace, mcp }).map_err(|e| e.to_string())
 }
 
 /// Marks an approval card answered (`dismissed` when nobody answered it) and shows the change.

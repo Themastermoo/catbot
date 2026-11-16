@@ -241,7 +241,7 @@ async fn ask(client: &reqwest::Client, turn: &ApiTurn, messages: &[Value], with_
         body["stream_options"] = json!({ "include_usage": true });
     }
     if with_tools {
-        body["tools"] = tools::definitions();
+        body["tools"] = tools::definitions(&turn.workspace);
     }
     let mut request = client.post(format!("{}/chat/completions", turn.access.url)).json(&body);
     if let Some(key) = &turn.access.key {

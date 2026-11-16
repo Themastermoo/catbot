@@ -29,6 +29,11 @@ resvg = "0.45"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "rustls-tls"] }
 # Reads and writes the YAML at the top of a team file (MausBot's portable format).
 serde_yaml_ng = "0.10"
+# The person's mailbox (stage 13.9): IMAP over TLS, and reading the messages.
+async-imap = { version = "0.12", default-features = false, features = ["runtime-tokio"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"] }
+webpki-roots = "1"
+mail-parser = "0.11"
 
 [dev-dependencies]
 tempfile = "3"

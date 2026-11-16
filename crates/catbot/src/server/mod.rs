@@ -8,6 +8,7 @@
 
 pub mod attachments;
 pub mod backups;
+pub mod bot_tools;
 pub mod changes;
 pub mod channels;
 pub mod skills;
@@ -19,6 +20,7 @@ pub mod limits;
 pub mod reactions;
 pub mod usage;
 pub mod devices;
+pub mod email;
 pub mod engines;
 pub mod images;
 pub mod events;
@@ -96,6 +98,10 @@ pub struct App {
     pub channels_busy: std::sync::Mutex<std::collections::HashSet<String>>,
     /// AIs that turned a turn away for their usage limit, and until when (`backups.rs`).
     pub limited_until: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    /// Where the home door listens, once it does: how a turn's tools reach Catbot (`bot_tools.rs`).
+    pub local: std::sync::OnceLock<SocketAddr>,
+    /// The keys of turns using Catbot's tools, and whose they are.
+    pub tool_grants: std::sync::Mutex<std::collections::HashMap<String, bot_tools::Grant>>,
 }
 
 impl App {
@@ -124,6 +130,8 @@ impl App {
             plan_usage: std::sync::Mutex::new(None),
             limited_until: std::sync::Mutex::new(std::collections::HashMap::new()),
             channels_busy: std::sync::Mutex::new(std::collections::HashSet::new()),
+            local: std::sync::OnceLock::new(),
+            tool_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -246,6 +254,7 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
         .map_err(|err| format!("could not listen on {}: {err} (is something else using that port?)", options.listen))?;
+    let _ = app.local.set(listener.local_addr().unwrap_or(options.listen));
     eprintln!("catbot: serving http://{} ({bots} Catbot bot(s) in {})", options.listen, options.home.display());
     eprintln!("catbot: everything else goes to the reference server at {}", app.proxy.upstream());
     match &ui {
@@ -328,6 +337,22 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(limits::route(&app, &method, body, true).await)
         }
         ["api", "handoffs"] if method == Method::GET => respond(handoffs::route(&app, None)),
+        ["api", "email", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let query = query_param(&req, "address").map(urlencoding_decode);
+            let body = if method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(email::route(&app, &method, &rest, body, query).await)
+        }
+        ["api", "bot-tools"] if method == Method::GET => respond(bot_tools::route(&app, false, req).await),
+        ["api", "bot-tools", "call"] if method == Method::POST => respond(bot_tools::route(&app, true, req).await),
         ["api", "skills", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

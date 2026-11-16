@@ -17,6 +17,7 @@ fn turn(prompt: &str) -> Turn {
         isolated: true,
         approval_helper: None,
         extra_dirs: Vec::new(),
+        catbot_tools: None,
     }
 }
 

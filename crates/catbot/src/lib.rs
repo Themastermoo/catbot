@@ -5,6 +5,7 @@ pub mod api;
 pub mod approval;
 pub mod ask;
 pub mod bots;
+pub mod catbot_tools;
 pub mod chat;
 pub mod checkpoints;
 pub mod claude;

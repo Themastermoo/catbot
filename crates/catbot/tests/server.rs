@@ -78,6 +78,7 @@ async fn setup() -> Setup {
         Some(ui_dir(dir.path())),
     );
     let addr = listen(server::router(app.clone())).await;
+    app.local.set(addr).unwrap();
     let away = listen(server::remote::router(app.clone())).await;
     app.remote.set(away).unwrap();
     Setup { base: format!("http://{addr}"), away: format!("http://{away}"), memory, _dir: dir }
@@ -1535,4 +1536,69 @@ async fn skills_come_from_the_library_and_a_bot_can_offer_one() {
     assert_eq!(s.call("DELETE", "/api/skills/bed-plan", None).await.0, 200);
     let (_, list) = s.call("GET", "/api/skills", None).await;
     assert_eq!(list["skills"].as_array().unwrap().len(), 1);
+}
+
+/// The fake mail server (`tests/fake-imap.py`): its port, and the process to stop.
+fn fake_imap() -> (u16, std::process::Child) {
+    use std::io::BufRead;
+    let mut child = std::process::Command::new("python3")
+        .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-imap.py"))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(child.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+    (line.trim().parse().unwrap(), child)
+}
+
+#[tokio::test]
+async fn a_chosen_bot_reads_the_mailbox_through_catbots_tools() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (port, mut imap) = fake_imap();
+    let mailbox = |password: &str, host: &str| json!({ "address": "moo@y.com", "password": password, "imapHost": host, "imapPort": port, "imapSecurity": "plain", "smtpHost": "127.0.0.1", "smtpPort": 1, "smtpSecurity": "plain" });
+
+    // Kept only once the mailbox lets Catbot in; never without TLS away from this computer.
+    let (status, refused) = s.call("PUT", "/api/email", Some(mailbox("wrong", "127.0.0.1"))).await;
+    assert_eq!(status, 400);
+    assert!(refused["error"].as_str().unwrap().contains("app password"), "{refused}");
+    let (status, far) = s.call("PUT", "/api/email", Some(mailbox("right", "mail.example.org"))).await;
+    assert_eq!(status, 400);
+    assert!(far["error"].as_str().unwrap().contains("without TLS"), "{far}");
+    let (status, view) = s.call("PUT", "/api/email", Some(mailbox("right", "127.0.0.1"))).await;
+    assert_eq!((status, view["connected"].as_bool(), view["bots"].clone()), (200, Some(true), json!([])), "{view}");
+    assert!(view.get("password").is_none(), "the password never goes back");
+    let (_, guessed) = s.call("GET", "/api/email/guess?address=moo%40gmail.com", None).await;
+    assert_eq!(guessed["imapHost"], "imap.gmail.com");
+
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let ask = |text: &str| json!({ "text": text });
+    let reply = async |s: &Setup, events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, text: &str| -> String {
+        s.call("POST", &format!("/api/bots/{scout}/messages"), Some(ask(text))).await;
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+
+    // Not chosen: no mail tools.
+    assert!(reply(&s, &mut events, "catbot-tool: mail_search {}").await.contains("no tool mail_search"));
+
+    // Chosen: it searches, reads and lists folders.
+    s.call("PUT", "/api/email/bots", Some(json!({ "bots": [scout] }))).await;
+    let found = reply(&s, &mut events, r#"catbot-tool: mail_search {"query": "invoice"}"#).await;
+    assert!(found.contains("id 2") && found.contains("from Ann <ann@z.com>") && found.contains("“Invoice 42”") && found.contains("unread") && !found.contains("Seeds"), "{found}");
+    let newest = reply(&s, &mut events, "catbot-tool: mail_search {}").await;
+    assert!(newest.find("id 2").unwrap() < newest.find("id 1").unwrap(), "newest first: {newest}");
+    let read = reply(&s, &mut events, r#"catbot-tool: mail_read {"id": 1}"#).await;
+    assert!(read.contains("From: Bob <bob@x.com>") && read.contains("The seeds came today."), "{read}");
+    assert!(reply(&s, &mut events, "catbot-tool: mail_folders {}").await.contains("INBOX, Archive"));
+    let missing = reply(&s, &mut events, r#"catbot-tool: mail_read {"id": 9}"#).await;
+    assert!(missing.starts_with("ERROR: ") && missing.contains("no message 9"), "{missing}");
+
+    // Disconnected: gone.
+    s.call("DELETE", "/api/email", None).await;
+    assert!(reply(&s, &mut events, "catbot-tool: mail_search {}").await.contains("no tool mail_search"));
+    imap.kill().unwrap();
 }

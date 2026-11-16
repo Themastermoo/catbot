@@ -64,7 +64,7 @@ pub struct Broker {
 impl Broker {
     /// Opens the socket and writes the MCP config. `helper` is the program (and leading
     /// arguments) that runs `catbot`; questions arrive as events on `events`.
-    pub fn start(helper: &[String], events: mpsc::WeakSender<Event>) -> std::io::Result<Self> {
+    pub fn start(helper: &[String], events: mpsc::WeakSender<Event>, tools: Option<&crate::catbot_tools::Access>) -> std::io::Result<Self> {
         let dir = private_dir()?;
         let (socket, listener) = door::open(&dir)?;
 
@@ -73,7 +73,12 @@ impl Broker {
             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no approval helper given"))?;
         let mut helper_args: Vec<String> = leading.to_vec();
         helper_args.extend(["approval-mcp".to_string(), socket.to_string_lossy().into_owned()]);
-        let config = json!({ "mcpServers": { SERVER_NAME: { "command": program, "args": helper_args } } });
+        let mut server = json!({ "command": program, "args": helper_args });
+        // Catbot's own tools for the turn come through the same helper.
+        if let Some(tools) = tools {
+            server["env"] = json!(tools.env().into_iter().collect::<std::collections::HashMap<_, _>>());
+        }
+        let config = json!({ "mcpServers": { SERVER_NAME: server } });
         let config_path = dir.join("mcp.json");
         write_private(&config_path, config.to_string().as_bytes())?;
 
@@ -315,6 +320,9 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, pendi
 /// `catbot approval-mcp <socket>`: the MCP server Claude Code starts for a turn. Speaks
 /// JSON-RPC on stdin/stdout, and relays each `approve` call to the broker on `socket`.
 pub async fn serve_mcp(socket: &Path) -> std::io::Result<()> {
+    // Catbot's own tools for the turn, when it has any. With no socket ("-"), only those.
+    let tools = crate::catbot_tools::Access::from_env();
+    let approvals = socket != Path::new("-");
     let mut stdout = tokio::io::stdout();
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     let mut broker: Option<BrokerLink> = None;
@@ -331,19 +339,38 @@ pub async fn serve_mcp(socket: &Path) -> std::io::Result<()> {
                 "capabilities": { "tools": {} },
                 "serverInfo": { "name": "catbot-approvals", "version": env!("CARGO_PKG_VERSION") },
             })),
-            "tools/list" => Some(json!({ "tools": [{
-                "name": "approve",
-                "description": "Ask the person who owns this bot whether a tool use is allowed",
-                "inputSchema": {
-                    "type": "object",
-                    "properties": {
-                        "tool_name": { "type": "string" },
-                        "input": { "type": "object" },
-                        "tool_use_id": { "type": "string" },
-                    },
-                    "required": ["tool_name", "input"],
-                },
-            }] })),
+            "tools/list" => {
+                let mut list = Vec::new();
+                if approvals {
+                    list.push(json!({
+                        "name": "approve",
+                        "description": "Ask the person who owns this bot whether a tool use is allowed",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "tool_name": { "type": "string" },
+                                "input": { "type": "object" },
+                                "tool_use_id": { "type": "string" },
+                            },
+                            "required": ["tool_name", "input"],
+                        },
+                    }));
+                }
+                if let Some(tools) = &tools {
+                    list.extend(crate::catbot_tools::list(tools).await);
+                }
+                Some(json!({ "tools": list }))
+            }
+            "tools/call" if msg["params"]["name"] != "approve" && tools.is_some() => {
+                let name = msg["params"]["name"].as_str().unwrap_or_default();
+                let args = if msg["params"]["arguments"].is_object() { msg["params"]["arguments"].clone() } else { json!({}) };
+                let access = tools.as_ref().expect("checked");
+                let (text, failed) = match crate::catbot_tools::call(access, name, &args).await {
+                    Ok(text) => (text, false),
+                    Err(text) => (text, true),
+                };
+                Some(json!({ "content": [{ "type": "text", "text": text }], "isError": failed }))
+            }
             "tools/call" if msg["params"]["name"] == "approve" => {
                 let args = &msg["params"]["arguments"];
                 let tool = args["tool_name"].as_str().unwrap_or("tool");

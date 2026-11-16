@@ -54,6 +54,8 @@ pub struct AcpTurn {
     /// The person's message.
     pub text: String,
     pub workspace: Workspace,
+    /// MCP servers the agent may use (Catbot's own tools), in ACP's form.
+    pub mcp: Vec<Value>,
 }
 
 /// Starts the program and the turn; its events arrive on the returned `Running`.
@@ -196,7 +198,7 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>) -> Resu
     let can_load = init["agentCapabilities"]["loadSession"] == true;
     let mut session = None;
     if let (true, Some(id)) = (can_load, turn.session.as_ref())
-        && link.call("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": [] }), Some(START_TIME)).await.is_ok()
+        && link.call("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": turn.mcp }), Some(START_TIME)).await.is_ok()
     {
         session = Some(id.clone());
     }
@@ -207,7 +209,7 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>) -> Resu
     let session = match session {
         Some(id) => id,
         None => {
-            let made = link.call("session/new", json!({ "cwd": cwd, "mcpServers": [] }), Some(START_TIME)).await?;
+            let made = link.call("session/new", json!({ "cwd": cwd, "mcpServers": turn.mcp }), Some(START_TIME)).await?;
             made["sessionId"].as_str().map(str::to_string).ok_or("the agent made no session")?
         }
     };
@@ -478,7 +480,8 @@ mod tests {
             instructions: "You are Scout.".into(),
             earlier: vec![(true, "Plant carrots?".into()), (false, "Yes, in spring.".into())],
             text: "And beans?".into(),
-            workspace: Workspace { folder: PathBuf::from("/tmp"), roots: vec![PathBuf::from("/tmp")], mode: PermissionMode::Default },
+            workspace: Workspace { folder: PathBuf::from("/tmp"), roots: vec![PathBuf::from("/tmp")], mode: PermissionMode::Default, catbot: None },
+            mcp: Vec::new(),
         };
         let prompt = first_prompt(&turn);
         assert!(prompt.starts_with("<catbot_instructions>\nYou are Scout."));

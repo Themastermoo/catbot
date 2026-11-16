@@ -11,7 +11,8 @@ The prompt picks the behaviour:
   "Name the conversation…" -> a chat's name, the way Catbot asks for one
   anything else -> streams "Hello, <prompt>" back (ending "@Name, over to you." for a bot
                    whose instructions say "fake-pass @Name"; "what are your instructions?" -> its system prompt;
-                   "team: {…}" -> proposes that team change; "offer a skill" -> offers one)
+                   "team: {…}" -> proposes that team change; "offer a skill" -> offers one;
+                   "catbot-tool: name {json}" -> calls one of Catbot's tools and says what it answered)
 """
 import json, subprocess, sys
 
@@ -41,6 +42,26 @@ def ask_permission(tool_name, tool_input):
     server.wait()
     return json.loads(result["result"]["content"][0]["text"])
 
+def call_catbot_tool(name, arguments):
+    """A Catbot tool, the way the real CLI reaches an MCP server's tool: start it, list, call."""
+    config = json.load(open(arg_after("--mcp-config")))["mcpServers"]["catbot"]
+    env = dict(os.environ, **config.get("env", {}))
+    server = subprocess.Popen([config["command"], *config["args"]], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, env=env)
+    def rpc(id, method, params):
+        server.stdin.write(json.dumps({"jsonrpc": "2.0", "id": id, "method": method, "params": params}) + "\n")
+        server.stdin.flush()
+        return json.loads(server.stdout.readline())
+    rpc(1, "initialize", {"protocolVersion": "2024-11-05"})
+    tools = [t["name"] for t in rpc(2, "tools/list", {})["result"]["tools"]]
+    if name not in tools:
+        server.stdin.close(); server.wait()
+        return f"(no tool {name}; have {tools})"
+    result = rpc(3, "tools/call", {"name": name, "arguments": arguments})["result"]
+    server.stdin.close()
+    server.wait()
+    return ("ERROR: " if result.get("isError") else "") + result["content"][0]["text"]
+
+import os
 session = arg_after("--session-id") or arg_after("--resume") or "none"
 message = json.loads(sys.stdin.readline())
 
@@ -120,6 +141,10 @@ if first_line.startswith("team: "):
 # "offer a skill" (the first line) offers one, as a bot that worked out a way would.
 if first_line == "offer a skill":
     reply = "This will come up again.\n<save-skill>---\nname: weed-check\ndescription: Check the beds for weeds.\n---\n\nWalk each bed.\n</save-skill>"
+# "catbot-tool: name {json}" (the first line) calls one of Catbot's own tools and replies with what it said.
+if first_line.startswith("catbot-tool: "):
+    name, _, arguments = first_line[len("catbot-tool: "):].partition(" ")
+    reply = call_catbot_tool(name, json.loads(arguments or "{}"))
 # "what are your instructions?" (the last line) gets the system prompt it was given, to check what a bot is told.
 if last_line == "what are your instructions?":
     reply = system

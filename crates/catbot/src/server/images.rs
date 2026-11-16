@@ -290,6 +290,7 @@ async fn ask_claude(app: &App, bot: &Bot, system: &str, prompt: &str) -> Result<
         isolated: true,
         approval_helper: None,
         extra_dirs: Vec::new(),
+        catbot_tools: None,
     };
     let mut running = claude::start(&turn).await.map_err(|e| format!("couldn't start Claude ({e})"))?;
     let mut text = String::new();

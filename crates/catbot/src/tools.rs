@@ -29,10 +29,20 @@ pub struct Workspace {
     /// Every folder it may read and write (its own first).
     pub roots: Vec<PathBuf>,
     pub mode: PermissionMode,
+    /// Catbot's own tools for this turn (`catbot_tools.rs`), if it has any: where, and which.
+    pub catbot: Option<(crate::catbot_tools::Access, Vec<Value>)>,
 }
 
-/// The tools, as the chat API is told about them.
-pub fn definitions() -> Value {
+/// The tools, as the chat API is told about them: the workspace's own, and Catbot's.
+pub fn definitions(ws: &Workspace) -> Value {
+    let mut all = base_definitions();
+    if let (Some(list), Some((_, tools))) = (all.as_array_mut(), &ws.catbot) {
+        list.extend(tools.iter().map(crate::catbot_tools::as_function));
+    }
+    all
+}
+
+fn base_definitions() -> Value {
     let path = json!({ "type": "string", "description": "A file path, relative to your working folder or absolute inside one of your folders." });
     json!([
         tool("read_file", "Read a text file. Long files come in parts: give offset (the first line, from 1) and limit (how many lines).",
@@ -75,6 +85,8 @@ enum Work {
     Write { file: PathBuf, content: String },
     Edit { file: PathBuf, old: String, new: String },
     Run { command: String },
+    /// One of Catbot's own tools, answered by `catbot serve`.
+    Catbot { name: String, args: Value },
 }
 
 /// Checks a call: its arguments, its paths, and whether it needs a yes. An error is told to the bot.
@@ -129,7 +141,12 @@ pub fn plan(ws: &Workspace, name: &str, args: &Value) -> Result<Planned, String>
             let ask = ws.mode != PermissionMode::BypassPermissions;
             Planned { shown: "Bash", input: json!({ "command": command }), ask, work: Work::Run { command } }
         }
-        other => return Err(format!("There's no tool called {other}.")),
+        other => match &ws.catbot {
+            Some((_, tools)) if tools.iter().any(|t| t["name"] == other) => {
+                Planned { shown: "Catbot", input: json!({ "tool": other, "input": args }), ask: false, work: Work::Catbot { name: other.to_string(), args: args.clone() } }
+            }
+            _ => return Err(format!("There's no tool called {other}.")),
+        },
     })
 }
 
@@ -195,6 +212,10 @@ fn real_path(path: &Path) -> PathBuf {
 /// Does the work. `Ok` is what the bot reads back; `Err` is a failure it's told about.
 pub async fn run(planned: &Planned, ws: &Workspace) -> Result<String, String> {
     match &planned.work {
+        Work::Catbot { name, args } => match &ws.catbot {
+            Some((access, _)) => crate::catbot_tools::call(access, name, args).await,
+            None => Err("Catbot's tools aren't open to this turn".into()),
+        },
         Work::Read { file, offset, limit } => {
             let bytes = tokio::fs::read(file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
             if bytes.contains(&0) {
@@ -348,6 +369,18 @@ async fn run_command(command: &str, folder: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn catbot_tools_join_the_list_and_need_no_yes() {
+        let (_dir, mut ws) = workspace(PermissionMode::Default);
+        let mail = json!({ "name": "mail_search", "description": "Search mail", "inputSchema": { "type": "object", "properties": {} } });
+        ws.catbot = Some((crate::catbot_tools::Access { url: "http://127.0.0.1:1".into(), key: "k".into() }, vec![mail]));
+        let names: Vec<String> = definitions(&ws).as_array().unwrap().iter().map(|t| t["function"]["name"].as_str().unwrap().to_string()).collect();
+        assert!(names.contains(&"read_file".to_string()) && names.contains(&"mail_search".to_string()));
+        let planned = plan(&ws, "mail_search", &json!({ "query": "seeds" })).unwrap();
+        assert_eq!((planned.shown, planned.ask), ("Catbot", false));
+        assert!(plan(&ws, "mail_send", &json!({})).is_err(), "only the tools it was given");
+    }
+
     fn workspace(mode: PermissionMode) -> (tempfile::TempDir, Workspace) {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join("bot");
@@ -355,7 +388,7 @@ mod tests {
         std::fs::create_dir_all(&folder).unwrap();
         std::fs::create_dir_all(&memory).unwrap();
         std::fs::write(dir.path().join("secret.txt"), "no").unwrap();
-        let ws = Workspace { folder: folder.clone(), roots: vec![folder, memory], mode };
+        let ws = Workspace { folder: folder.clone(), roots: vec![folder, memory], mode, catbot: None };
         (dir, ws)
     }
 

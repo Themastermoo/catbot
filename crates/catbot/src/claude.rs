@@ -75,6 +75,8 @@ pub struct Turn {
     pub approval_helper: Option<Vec<String>>,
     /// More folders the bot may use besides `cwd` (the Codex vault). Writes there still ask.
     pub extra_dirs: Vec<PathBuf>,
+    /// Catbot's own tools for this turn, served through the approval helper (`catbot_tools.rs`).
+    pub catbot_tools: Option<crate::catbot_tools::Access>,
 }
 
 /// What a turn reports while it runs.
@@ -385,7 +387,7 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no claude program given"))?;
     let (tx, events) = mpsc::channel(256);
     let broker = match &turn.approval_helper {
-        Some(helper) => Some(Broker::start(helper, tx.downgrade())?),
+        Some(helper) => Some(Broker::start(helper, tx.downgrade(), turn.catbot_tools.as_ref())?),
         None => None,
     };
     let mut command_args = args(turn);
@@ -469,6 +471,7 @@ mod tests {
             isolated: true,
             approval_helper: None,
             extra_dirs: vec!["/home/moo/VaultCodex".into()],
+            catbot_tools: None,
         }
     }
 
