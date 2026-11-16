@@ -71,8 +71,9 @@ bash scripts/install-service.sh --remove  # back to starting it by hand
 ```
 
 Run the install from your normal terminal: the service takes that terminal's `PATH` (to find
-`claude`) and any `CATBOT_HOME` / `CATBOT_CODEX`. Run it again after moving or reinstalling Claude
-Code; running it again also restarts Catbot on the new build. Stop any Catbot you started by hand
+`claude`) and any `CATBOT_HOME`, `CATBOT_CODEX`, `CATBOT_TITLE_MODEL` or `CATBOT_ARCHIVE_DAYS`.
+Run it again after moving or reinstalling Claude Code, or to change one of those; running it
+again also restarts Catbot on the new build. Stop any Catbot you started by hand
 first, since only one can use port 8788.
 
 ## Running OpenMausBot's interface on Catbot
