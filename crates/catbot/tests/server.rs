@@ -47,6 +47,8 @@ fn ui_dir(base: &std::path::Path) -> std::path::PathBuf {
 
 struct Setup {
     base: String,
+    /// The remote door.
+    away: String,
     _dir: tempfile::TempDir,
 }
 
@@ -70,20 +72,30 @@ async fn setup() -> Setup {
         Some(vec![env!("CARGO_BIN_EXE_catbot").into()]),
         Some(ui_dir(dir.path())),
     );
-    let addr = listen(server::router(app)).await;
-    Setup { base: format!("http://{addr}"), _dir: dir }
+    let addr = listen(server::router(app.clone())).await;
+    let away = listen(server::remote::router(app.clone())).await;
+    app.remote.set(away).unwrap();
+    Setup { base: format!("http://{addr}"), away: format!("http://{away}"), _dir: dir }
 }
 
 impl Setup {
     async fn call(&self, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+        self.send(&self.base, None, method, path, body).await
+    }
+
+    /// A call at the remote door, with a device's key if given.
+    async fn away(&self, key: Option<&str>, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
+        self.send(&self.away, key, method, path, body).await
+    }
+
+    async fn send(&self, base: &str, key: Option<&str>, method: &str, path: &str, body: Option<Value>) -> (u16, Value) {
         let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
         let body = body.map(|b| Bytes::from(b.to_string())).unwrap_or_default();
-        let req = hyper::Request::builder()
-            .method(method)
-            .uri(format!("{}{path}", self.base))
-            .header("content-type", "application/json")
-            .body(Full::new(body))
-            .unwrap();
+        let mut req = hyper::Request::builder().method(method).uri(format!("{base}{path}")).header("content-type", "application/json");
+        if let Some(key) = key {
+            req = req.header("authorization", format!("Bearer {key}"));
+        }
+        let req = req.body(Full::new(body)).unwrap();
         let resp = client.request(req).await.unwrap();
         let status = resp.status().as_u16();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
@@ -92,8 +104,21 @@ impl Setup {
 
     /// Opens the live stream; frames arrive on the returned channel.
     async fn events(&self) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+        self.stream(&self.base, None).await
+    }
+
+    /// Opens the live stream at the remote door; the channel closes when the stream ends.
+    async fn events_away(&self, key: &str) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
+        self.stream(&self.away, Some(key)).await
+    }
+
+    async fn stream(&self, base: &str, key: Option<&str>) -> tokio::sync::mpsc::UnboundedReceiver<Value> {
         let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
-        let req = hyper::Request::get(format!("{}/api/events?window=1", self.base)).body(Full::new(Bytes::new())).unwrap();
+        let mut req = hyper::Request::get(format!("{base}/api/events?window=1"));
+        if let Some(key) = key {
+            req = req.header("authorization", format!("Bearer {key}"));
+        }
+        let req = req.body(Full::new(Bytes::new())).unwrap();
         let mut body = client.request(req).await.unwrap().into_body();
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         tokio::spawn(async move {
@@ -415,4 +440,89 @@ async fn chats_are_named_switched_and_tidied() {
     let (_, other) = s.call("POST", "/api/bots", Some(json!({ "name": "Other" }))).await;
     let other_thread = other["bot"]["threadId"].as_str().unwrap();
     assert_eq!(s.call("DELETE", &format!("/api/bots/{bot}/tasks/{other_thread}"), None).await.0, 404);
+}
+
+#[tokio::test]
+async fn devices_pair_at_home_and_reach_catbot_from_away() {
+    let s = setup().await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Kiwi" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+
+    // Nothing at the remote door without a key, and no pairing without a code waiting.
+    assert_eq!(s.away(None, "GET", "/api/bots", None).await.0, 401);
+    assert_eq!(s.away(Some(&"0".repeat(64)), "GET", "/api/bots", None).await.0, 401);
+    assert_eq!(s.away(None, "GET", "/api/events", None).await.0, 401);
+    assert_eq!(s.away(None, "POST", "/api/pair", Some(json!({ "code": "ABCDEFGHJK", "name": "x" }))).await.0, 401);
+
+    // At home: a code, good for a while and five tries.
+    let (status, overview) = s.call("POST", "/api/devices/pairing", None).await;
+    assert_eq!(status, 200);
+    let code = overview["pairing"]["code"].as_str().unwrap().to_string();
+    assert_eq!(code.len(), 10);
+    assert!(overview["pairing"]["secondsLeft"].as_u64().unwrap() > 500);
+    assert_eq!(overview["remote"], s.away.trim_start_matches("http://"));
+
+    // A wrong code counts against it; the right one (any case, with dashes) pairs, once.
+    assert_eq!(s.away(None, "POST", "/api/pair", Some(json!({ "code": "WRONGCODE2", "name": "x" }))).await.0, 401);
+    let typed = format!("{}-{}", &code[..5], &code[5..]).to_lowercase();
+    let (status, paired) = s.away(None, "POST", "/api/pair", Some(json!({ "code": typed, "name": "Moo's phone" }))).await;
+    assert_eq!(status, 201, "{paired}");
+    let key = paired["key"].as_str().unwrap().to_string();
+    assert_eq!(key.len(), 64);
+    assert_eq!(s.away(None, "POST", "/api/pair", Some(json!({ "code": code, "name": "again" }))).await.0, 401, "a code works once");
+
+    // With its key, the phone has Catbot's own routes, and nothing else.
+    let (status, me) = s.away(Some(&key), "GET", "/api/device", None).await;
+    assert_eq!((status, me["device"]["name"].as_str()), (200, Some("Moo's phone")));
+    let (_, list) = s.away(Some(&key), "GET", "/api/bots", None).await;
+    let names: Vec<&str> = list["bots"].as_array().unwrap().iter().map(|b| b["name"].as_str().unwrap()).collect();
+    assert_eq!(names, vec!["Kiwi"], "the reference server's bots stay at home");
+    assert_eq!(s.away(Some(&key), "GET", "/api/config", None).await.0, 404, "nothing is passed on from away");
+    assert_eq!(s.away(Some(&key), "GET", "/api/devices", None).await.0, 404, "devices are managed at home");
+    assert_eq!(s.away(Some(&key), "GET", "/", None).await.0, 404);
+    let mut events = s.events_away(&key).await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (status, _) = s.away(Some(&key), "POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello from away", "threadId": thread }))).await;
+    assert_eq!(status, 202);
+    until(&mut events, "a turn finishing", |f| f["kind"] == "runtime" && f["event"]["type"] == "turn.completed").await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), async {
+            loop {
+                match events.recv().await {
+                    Some(f) if f["kind"] == "notify" => return true,
+                    Some(_) => continue,
+                    None => return false,
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "the reference server's frames stay at home"
+    );
+
+    // Home sees the device; removing it ends its key and its open stream.
+    let (_, overview) = s.call("GET", "/api/devices", None).await;
+    let device = overview["devices"][0]["id"].as_str().unwrap().to_string();
+    assert_eq!(overview["devices"][0]["name"], "Moo's phone");
+    assert!(overview["devices"][0]["lastSeenAt"].is_string());
+    assert_eq!(s.call("DELETE", &format!("/api/devices/{device}"), None).await.0, 200);
+    let ended = tokio::time::timeout(Duration::from_secs(5), async { while events.recv().await.is_some() {} }).await;
+    assert!(ended.is_ok(), "the removed device's stream ends");
+    assert_eq!(s.away(Some(&key), "GET", "/api/bots", None).await.0, 401);
+    assert_eq!(s.call("DELETE", &format!("/api/devices/{device}"), None).await.0, 404);
+
+    // Five wrong tries and the code is gone, even for the right one after.
+    let (_, overview) = s.call("POST", "/api/devices/pairing", None).await;
+    let code = overview["pairing"]["code"].as_str().unwrap().to_string();
+    for _ in 0..5 {
+        assert_eq!(s.away(None, "POST", "/api/pair", Some(json!({ "code": "WRONGCODE2" }))).await.0, 401);
+    }
+    assert_eq!(s.away(None, "POST", "/api/pair", Some(json!({ "code": code }))).await.0, 401);
+    let (_, overview) = s.call("GET", "/api/devices", None).await;
+    assert!(overview["pairing"].is_null());
+    // And a waiting code can be cancelled.
+    s.call("POST", "/api/devices/pairing", None).await;
+    let (_, overview) = s.call("DELETE", "/api/devices/pairing", None).await;
+    assert!(overview["pairing"].is_null());
 }

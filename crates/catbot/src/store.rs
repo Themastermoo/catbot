@@ -120,6 +120,16 @@ pub struct Conversation {
     pub archived_at: Option<String>,
 }
 
+/// A device paired to reach Catbot from away (`server::remote`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Device {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    /// When it last asked for anything; none until it does.
+    pub last_seen_at: Option<String>,
+}
+
 /// A conversation's columns, in the order `conversation_from_row` reads them.
 const CONVERSATION: &str = "id, bot_id, session_id, created_at, updated_at, title, title_by_person, archived_at";
 
@@ -248,7 +258,59 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 4 {
+            // Version 4: devices paired to reach Catbot from away (the phone app). Only a hash
+            // of each device's key is kept.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE devices (
+                     id           TEXT PRIMARY KEY,
+                     name         TEXT NOT NULL,
+                     key_hash     TEXT NOT NULL UNIQUE,
+                     created_at   TEXT NOT NULL,
+                     last_seen_at TEXT
+                 );
+                 PRAGMA user_version = 4;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { conn, home: home.to_path_buf() })
+    }
+
+    /// Pairs a device: `key_hash` is the hash of the key it was given.
+    pub fn add_device(&self, name: &str, key_hash: &str) -> Result<Device, BoxError> {
+        let device = Device { id: uuid::Uuid::new_v4().to_string(), name: name.to_string(), created_at: now(), last_seen_at: None };
+        self.conn.execute(
+            "INSERT INTO devices (id, name, key_hash, created_at) VALUES (?1, ?2, ?3, ?4)",
+            params![device.id, device.name, key_hash, device.created_at],
+        )?;
+        Ok(device)
+    }
+
+    /// The device whose key hashes to this, if it's still paired.
+    pub fn device_by_key_hash(&self, key_hash: &str) -> Result<Option<Device>, BoxError> {
+        Ok(self
+            .conn
+            .query_row("SELECT id, name, created_at, last_seen_at FROM devices WHERE key_hash = ?1", [key_hash], device_from_row)
+            .optional()?)
+    }
+
+    /// Paired devices, the newest first.
+    pub fn devices(&self) -> Result<Vec<Device>, BoxError> {
+        let mut stmt = self.conn.prepare("SELECT id, name, created_at, last_seen_at FROM devices ORDER BY created_at DESC")?;
+        let list = stmt.query_map([], device_from_row)?.collect::<Result<Vec<_>, _>>()?;
+        Ok(list)
+    }
+
+    /// Unpairs a device: its key stops working. False if there was no such device.
+    pub fn remove_device(&self, id: &str) -> Result<bool, BoxError> {
+        Ok(self.conn.execute("DELETE FROM devices WHERE id = ?1", [id])? > 0)
+    }
+
+    /// Notes that a device was just heard from.
+    pub fn device_seen(&self, id: &str) -> Result<(), BoxError> {
+        self.conn.execute("UPDATE devices SET last_seen_at = ?2 WHERE id = ?1", params![id, now()])?;
+        Ok(())
     }
 
     pub fn home(&self) -> &Path {
@@ -603,6 +665,10 @@ fn message_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
     })
 }
 
+fn device_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Device> {
+    Ok(Device { id: r.get(0)?, name: r.get(1)?, created_at: r.get(2)?, last_seen_at: r.get(3)? })
+}
+
 fn conversation_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation> {
     Ok(Conversation {
         id: r.get(0)?,
@@ -805,7 +871,7 @@ mod tests {
         let bot = store.bot("Old").unwrap().unwrap();
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
         // And chats: an old conversation is kept, unnamed, and opened to.
         let conv = store.start_conversation("b1", Some("s1")).unwrap();
         assert_eq!(store.current_conversation("b1").unwrap().unwrap().title, None);
@@ -843,6 +909,20 @@ mod tests {
         let only = store.ensure_conversation(&other.id).unwrap();
         age(&only, 100);
         assert!(store.archive_idle(cutoff, &|_| false).unwrap().is_empty());
+    }
+
+    #[test]
+    fn devices_pair_and_unpair() {
+        let (_dir, store) = store();
+        let phone = store.add_device("Moo's phone", "hash-1").unwrap();
+        assert_eq!(store.device_by_key_hash("hash-1").unwrap().unwrap().id, phone.id);
+        assert!(store.device_by_key_hash("hash-2").unwrap().is_none());
+        assert!(store.add_device("Copy", "hash-1").is_err(), "two devices can't share a key");
+        store.device_seen(&phone.id).unwrap();
+        assert!(store.devices().unwrap()[0].last_seen_at.is_some());
+        assert!(store.remove_device(&phone.id).unwrap());
+        assert!(!store.remove_device(&phone.id).unwrap());
+        assert!(store.device_by_key_hash("hash-1").unwrap().is_none(), "a removed device's key stops working");
     }
 
     #[test]

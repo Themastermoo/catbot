@@ -38,14 +38,28 @@ impl Drop for Tasks {
     }
 }
 
-pub async fn events(app: Arc<App>, req: Request) -> Response {
+/// Which door a stream was opened at.
+pub enum Door {
+    /// At home: Catbot's frames and the reference server's.
+    Home,
+    /// A paired device away from home: Catbot's frames only, and the stream ends when the
+    /// device is removed.
+    Away { device: String },
+}
+
+pub async fn events(app: Arc<App>, req: Request, door: Door) -> Response {
     let (tx, rx) = mpsc::channel::<Out>(512);
 
     let mut ours = app.hub.subscribe();
     let to_us = tx.clone();
+    let away = match &door {
+        Door::Away { device } => Some(device.clone()),
+        Door::Home => None,
+    };
     let mine = tokio::spawn(async move {
         loop {
             let out = match ours.recv().await {
+                Ok(frame) if away.is_some() && frame["kind"] == "devices" && frame["removed"].as_str() == away.as_deref() => Out::End,
                 Ok(frame) => Out::Frame(frame),
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => Out::End,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -57,7 +71,10 @@ pub async fn events(app: Arc<App>, req: Request) -> Response {
         }
     });
 
-    let theirs = tokio::spawn(upstream(app.clone(), req, tx.clone()));
+    let theirs = match door {
+        Door::Home => tokio::spawn(upstream(app.clone(), req, tx.clone())),
+        Door::Away { .. } => tokio::spawn(async {}),
+    };
 
     let to_ping = tx;
     let pinger = tokio::spawn(async move {

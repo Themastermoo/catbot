@@ -42,6 +42,26 @@ cargo run -- serve        # then open http://127.0.0.1:8788
 `target/dx/catbot-ui/release/web/public` (`--ui` to change). OpenMausBot's interface on port 5199
 keeps working at the same time.
 
+## Away from home (paired devices)
+
+`catbot serve` also opens a **remote door** on `127.0.0.1:8789` (`--remote <address>` to move
+it, `--remote off` to close it). Only this machine can reach it until Tailscale Funnel gives it a
+public https address. Everything there needs a paired device's key, except trading a pairing
+code for one:
+
+- At home, make a pairing code (`POST /api/devices/pairing`). It lasts ten minutes and five
+  tries, and works once.
+- The phone trades it at the remote door (`POST /api/pair` `{ code, name }`) for its own key,
+  and sends that as `Authorization: Bearer <key>` from then on. Catbot keeps only a hash of it.
+- With its key a device can do what the home screen can with Catbot's bots (chats, messages,
+  approvals, settings, live events). It can't reach OpenMausBot's reference server, the
+  interface's files, or the device list.
+- `GET /api/devices` at home lists paired devices; `DELETE /api/devices/<id>` unpairs one, which
+  stops its key at once and ends any live stream it has open.
+
+The address in the pairing QR code is `CATBOT_PUBLIC_URL` if set, else this machine's Tailscale
+name (`https://<machine>.<tailnet>.ts.net`).
+
 ## The desktop app
 
 Catbot's interface also runs as its own window (WebKitGTK), with Catbot's icon in the KDE menu:
@@ -71,7 +91,8 @@ bash scripts/install-service.sh --remove  # back to starting it by hand
 ```
 
 Run the install from your normal terminal: the service takes that terminal's `PATH` (to find
-`claude`) and any `CATBOT_HOME`, `CATBOT_CODEX`, `CATBOT_TITLE_MODEL` or `CATBOT_ARCHIVE_DAYS`.
+`claude`) and any `CATBOT_HOME`, `CATBOT_CODEX`, `CATBOT_TITLE_MODEL`, `CATBOT_ARCHIVE_DAYS`
+or `CATBOT_PUBLIC_URL`.
 Run it again after moving or reinstalling Claude Code, or to change one of those; running it
 again also restarts Catbot on the new build. Stop any Catbot you started by hand
 first, since only one can use port 8788.

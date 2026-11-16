@@ -110,6 +110,10 @@ enum Command {
         /// Catbot's interface: the `public` folder of its dx build, served at `/`.
         #[arg(long, default_value = "target/dx/catbot-ui/release/web/public")]
         ui: PathBuf,
+        /// The remote door for paired devices away from home (Tailscale Funnel points here),
+        /// or "off".
+        #[arg(long, default_value = "127.0.0.1:8789")]
+        remote: String,
     },
     /// Pass every request through to the reference server and record it.
     Record {
@@ -247,7 +251,11 @@ async fn run() -> Result<(), BoxError> {
             }
             Ok(())
         }
-        Command::Serve { listen, upstream, cli, record, ui } => {
+        Command::Serve { listen, upstream, cli, record, ui, remote } => {
+            let remote = match remote.trim() {
+                "off" | "" => None,
+                addr => Some(addr.parse::<SocketAddr>().map_err(|err| format!("--remote {addr}: {err}"))?),
+            };
             server::serve(server::Options {
                 listen,
                 upstream,
@@ -256,6 +264,7 @@ async fn run() -> Result<(), BoxError> {
                 cli: vec![cli],
                 record: record.then(default_traffic_dir),
                 ui: Some(ui),
+                remote,
             })
             .await
         }

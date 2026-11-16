@@ -6,8 +6,10 @@
 //! the live event stream are merged, so the interface sees one team. Over time Catbot answers
 //! more, until the reference server has nothing left to do.
 
+pub mod devices;
 pub mod events;
 pub mod hub;
+pub mod remote;
 pub mod turns;
 pub mod wire;
 
@@ -48,6 +50,8 @@ pub struct Options {
     pub record: Option<PathBuf>,
     /// Catbot's own interface (the `dx` build's `public` folder), served at `/`.
     pub ui: Option<PathBuf>,
+    /// The remote door, for paired devices away from home (`remote.rs`); None turns it off.
+    pub remote: Option<SocketAddr>,
 }
 
 pub struct App {
@@ -63,6 +67,10 @@ pub struct App {
     pub ui: Option<PathBuf>,
     /// The model that names new chats (`titles`); None keeps their first-line names.
     pub title_model: Option<String>,
+    /// Where the remote door listens, once it does.
+    pub remote: std::sync::OnceLock<SocketAddr>,
+    /// The pairing code waiting for a device, if any (`devices.rs`).
+    pub pairing: std::sync::Mutex<Option<devices::Pairing>>,
 }
 
 impl App {
@@ -84,6 +92,8 @@ impl App {
             helper,
             ui,
             title_model: titles::model_from_env(),
+            remote: std::sync::OnceLock::new(),
+            pairing: std::sync::Mutex::new(None),
         })
     }
 
@@ -158,6 +168,22 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
         None => eprintln!("catbot: OpenMausBot's interface: start it with OMB_PORT={} pnpm dev", options.listen.port()),
     }
 
+    if let Some(addr) = options.remote {
+        match tokio::net::TcpListener::bind(addr).await {
+            Ok(door) => {
+                let _ = app.remote.set(addr);
+                eprintln!("catbot: remote door for paired devices: http://{addr} (Tailscale Funnel points here)");
+                let app = app.clone();
+                tokio::spawn(async move {
+                    if let Err(err) = axum::serve(door, remote::router(app)).await {
+                        eprintln!("catbot: the remote door stopped: {err}");
+                    }
+                });
+            }
+            Err(err) => eprintln!("catbot: no remote door: could not listen on {addr}: {err}"),
+        }
+    }
+
     tokio::spawn(tidy(app.clone(), archive_after_days()));
     axum::serve(listener, router(app)).await?;
     Ok(())
@@ -200,7 +226,12 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
     let method = req.method().clone();
     let segments: Vec<&str> = path.trim_start_matches('/').split('/').collect();
     match segments.as_slice() {
-        ["api", "events"] if method == Method::GET => events::events(app, req).await,
+        ["api", "events"] if method == Method::GET => events::events(app, req, events::Door::Home).await,
+        ["api", "devices", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            respond(devices::route(&app, &method, &rest).await)
+        }
         ["api", "bots"] if method == Method::GET => list_bots(&app, req).await,
         ["api", "bots"] if method == Method::POST => respond(create_bot(&app, req).await),
         ["api", "bots", id, rest @ ..] if owns_bot(&app, id) => {
@@ -301,6 +332,25 @@ async fn list_bots(app: &Arc<App>, req: Request) -> Response {
             bots.push(bot);
         }
     }
+    (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], list.to_string()).into_response()
+}
+
+/// `GET /api/bots` at the remote door: Catbot's bots alone, in the same shape.
+fn catbot_bots(app: &Arc<App>, req: &Request) -> Response {
+    let limit = query_param(req, "messages").and_then(|n| n.parse().ok()).unwrap_or(50usize).min(500);
+    let ours = app.with_store(|store| {
+        let mut wires = Vec::new();
+        for bot in store.bots()? {
+            wires.push(app.wire_bot(store, &bot, Some(limit))?);
+        }
+        Ok(wires)
+    });
+    let bots = ours.unwrap_or_default();
+    let control: serde_json::Map<String, Value> = bots
+        .iter()
+        .map(|b| (b["id"].as_str().unwrap_or_default().to_string(), json!({ "held": false, "helpReason": null })))
+        .collect();
+    let list = json!({ "bots": bots, "botQueuedMessages": {}, "sections": [], "groups": [], "computerControl": control });
     (StatusCode::OK, [(header::CONTENT_TYPE, "application/json")], list.to_string()).into_response()
 }
 
