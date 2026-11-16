@@ -46,6 +46,9 @@ pub struct LiveStep {
 pub struct State {
     pub bots: Vec<Bot>,
     pub threads: HashMap<String, Thread>,
+    /// Goes up whenever the paired devices or the waiting pairing change (`devices` frames),
+    /// so the devices dialog knows to look again.
+    pub devices_changed: u64,
 }
 
 /// What a frame asks of the app beyond changing `State`.
@@ -102,6 +105,7 @@ impl State {
                     None => self.bots.push(newer),
                 }
             }
+            Some("devices") => self.devices_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();
                 self.bots.retain(|b| b.id != id);

@@ -959,11 +959,19 @@ fn Icon(path: &'static str, class: &'static str, #[props(default = 13)] size: u3
     }
 }
 
-fn js_now() -> f64 {
+pub fn js_now() -> f64 {
     #[cfg(target_arch = "wasm32")]
     return js_sys::Date::now();
     #[cfg(not(target_arch = "wasm32"))]
     return chrono::Utc::now().timestamp_millis() as f64;
+}
+
+/// An RFC 3339 time as ms since the epoch (NaN if it isn't one).
+pub fn parse_time(at: &str) -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    return js_sys::Date::parse(at);
+    #[cfg(not(target_arch = "wasm32"))]
+    return chrono::DateTime::parse_from_rfc3339(at).map(|t| t.timestamp_millis() as f64).unwrap_or(f64::NAN);
 }
 
 /// "Today", "Yesterday", or "Sat, Nov 14", as their `dayLabel` says it in English.

@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 dioxus = { version = "0.7.10", features = [] }
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 pulldown-cmark = { version = "0.13", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }

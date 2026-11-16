@@ -25,6 +25,7 @@ const ELEVATED_CONTROL: &str = "bg-composer ring-1 ring-inset ring-ink/[0.07]";
 pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> Element {
     let mut query = use_signal(String::new);
     let mut making = use_signal(|| false);
+    let mut pairing = use_signal(|| false);
     // Bots whose chats are showing.
     let mut unfolded = use_signal(HashSet::<String>::new);
     let state = use_context::<Signal<State>>();
@@ -40,6 +41,19 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                 span { class: "min-w-0 flex-1 text-[15px] font-semibold text-ink", "Catbot" }
                 button {
                     r#type: "button",
+                    "aria-label": "Devices",
+                    title: "Devices away from home",
+                    "data-open-devices": true,
+                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                    onclick: move |_| pairing.set(true),
+                    // Lucide `Smartphone` (ISC).
+                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        rect { x: "5", y: "2", width: "14", height: "20", rx: "2" }
+                        path { d: "M12 18h.01" }
+                    }
+                }
+                button {
+                    r#type: "button",
                     "aria-label": "New Bot",
                     title: "New Bot",
                     class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
@@ -51,6 +65,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             }
             if making() {
                 crate::settings::NewBotDialog { on_close: move |_| making.set(false) }
+            }
+            if pairing() {
+                crate::devices::DevicesDialog { on_close: move |_| pairing.set(false) }
             }
             div { class: "px-3 pt-1 pb-3",
                 div { class: "flex h-8 items-center gap-2 rounded-full px-3 focus-within:ring-focus {ELEVATED_CONTROL}",

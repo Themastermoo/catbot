@@ -7,6 +7,7 @@ mod api;
 mod bots;
 mod chat;
 mod chats;
+mod devices;
 mod events;
 mod live;
 mod mascots;
