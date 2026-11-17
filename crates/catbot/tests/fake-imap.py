@@ -1,15 +1,27 @@
 """A tiny IMAP server for tests: two messages, plain on 127.0.0.1; and a tiny SMTP server that
 appends what it's sent to the file named by FAKE_SMTP_LOG. Prints both ports, then serves.
 
-The password is "right". It answers LOGIN, EXAMINE/SELECT, UID SEARCH (ALL, TEXT, FROM, UNSEEN),
-UID FETCH (headers or whole messages), LIST and LOGOUT, which is what Catbot asks.
+The password is "right". It answers LOGIN, EXAMINE/SELECT, UID SEARCH (ALL, TEXT, FROM, UNSEEN,
+UID n:*), UID FETCH (headers or whole messages), LIST and LOGOUT, which is what Catbot asks.
+New mail: each .eml file in the folder FAKE_NEW_MAIL names (if set) arrives in INBOX, in name
+order, the next time a folder is opened.
 """
-import re, socket, sys, threading
+import os, re, socket, sys, threading
 
 MESSAGES = {
     1: (True, b"From: Bob <bob@x.com>\r\nTo: Moo <moo@y.com>\r\nSubject: Seeds\r\nDate: Mon, 16 Nov 2026 09:00:00 -0600\r\nMessage-ID: <seeds@x.com>\r\n\r\nThe seeds came today.\r\n"),
     2: (False, b"From: Ann <ann@z.com>\r\nTo: Moo <moo@y.com>\r\nSubject: Invoice 42\r\nDate: Mon, 16 Nov 2026 10:30:00 -0600\r\nMessage-ID: <invoice@z.com>\r\n\r\nPlease pay invoice 42.\r\n"),
 }
+
+def take_new_mail():
+    folder = os.environ.get("FAKE_NEW_MAIL")
+    if not folder or not os.path.isdir(folder): return
+    for name in sorted(os.listdir(folder)):
+        if name.endswith(".eml"):
+            path = os.path.join(folder, name)
+            with open(path, "rb") as f:
+                MESSAGES[max(MESSAGES) + 1] = (False, f.read())
+            os.remove(path)
 
 def matches(uid, criteria):
     seen, raw = MESSAGES[uid]
@@ -21,6 +33,10 @@ def matches(uid, criteria):
         if key == "FROM" and not re.search(r"^from:.*" + re.escape(value), head, re.M): return False
         if key == "SUBJECT" and not re.search(r"^subject:.*" + re.escape(value), head, re.M): return False
     if "UNSEEN" in criteria and seen: return False
+    since = re.search(r"UID (\d+):\*", criteria)
+    if since and uid < int(since.group(1)):
+        # As real servers do, "n:*" still includes the newest message when nothing is that new.
+        return uid == max(MESSAGES)
     return True
 
 def serve(conn):
@@ -43,7 +59,8 @@ def serve(conn):
         elif cmd.startswith("EXAMINE") or cmd.startswith("SELECT"):
             if "INBOX" not in rest.upper():
                 send(f"{tag} NO no such folder\r\n"); continue
-            send(f"* {len(MESSAGES)} EXISTS\r\n* 0 RECENT\r\n* FLAGS (\\Seen)\r\n* OK [UIDVALIDITY 1] ok\r\n{tag} OK [READ-ONLY] done\r\n")
+            take_new_mail()
+            send(f"* {len(MESSAGES)} EXISTS\r\n* 0 RECENT\r\n* FLAGS (\\Seen)\r\n* OK [UIDVALIDITY 1] ok\r\n* OK [UIDNEXT {max(MESSAGES) + 1}] next\r\n{tag} OK [READ-ONLY] done\r\n")
         elif cmd.startswith("UID SEARCH"):
             criteria = rest[len("UID SEARCH "):]
             found = [str(u) for u in MESSAGES if matches(u, criteria)]

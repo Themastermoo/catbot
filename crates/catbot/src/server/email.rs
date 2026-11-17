@@ -292,6 +292,55 @@ async fn read(m: &Mailbox, args: &Value) -> Result<String, String> {
     Ok(render(uid as u32, raw))
 }
 
+/// What came into a folder since the last look (stage 14.4, "when an email arrives"): the
+/// folder's UID validity and the newest UID now, and up to `most` of the new messages that
+/// match `query` (as mail_search reads it), newest last, shortened. With no last look, it only
+/// notes where things stand: mail already there doesn't count as arriving. Nothing is marked
+/// read.
+pub async fn arrived(m: &Mailbox, folder: &str, last: Option<(u32, u32)>, query: &str, most: usize) -> Result<(u32, u32, Vec<String>, usize), String> {
+    let wanted = criteria(query)?;
+    let mut session = open(m).await?;
+    let opened = session.examine(folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
+    let validity = opened.uid_validity.unwrap_or(0);
+    let newest = opened.uid_next.unwrap_or(1).saturating_sub(1);
+    // First look, or the folder was rebuilt: start from here.
+    let Some((was_validity, last_uid)) = last.filter(|(v, _)| *v == validity) else {
+        let _ = session.logout().await;
+        return Ok((validity, newest, Vec::new(), 0));
+    };
+    let _ = was_validity;
+    if newest <= last_uid {
+        let _ = session.logout().await;
+        return Ok((validity, last_uid, Vec::new(), 0));
+    }
+    let search = format!("UID {}:* {wanted}", last_uid + 1);
+    // "n:*" can include the newest message even when it's older than n: only newer ones count.
+    let mut uids: Vec<u32> = session.uid_search(&search).await.map_err(imap_error)?.into_iter().filter(|u| *u > last_uid).collect();
+    uids.sort_unstable();
+    let total = uids.len();
+    let shown: Vec<u32> = uids.iter().rev().take(most).rev().copied().collect();
+    let mut out = Vec::new();
+    if !shown.is_empty() {
+        let set = shown.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+        let fetched: Vec<_> = session.uid_fetch(&set, "(UID BODY.PEEK[])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
+        let mut rows: Vec<(u32, String)> = fetched
+            .iter()
+            .filter_map(|f| {
+                let uid = f.uid?;
+                let mut text = render(uid, f.body()?);
+                if text.chars().count() > 3000 {
+                    text = text.chars().take(3000).collect::<String>() + "\n(…cut short; mail_read has it all)";
+                }
+                Some((uid, text))
+            })
+            .collect();
+        rows.sort_unstable_by_key(|r| r.0);
+        out = rows.into_iter().map(|r| r.1).collect();
+    }
+    let _ = session.logout().await;
+    Ok((validity, newest.max(uids.last().copied().unwrap_or(0)), out, total))
+}
+
 /// A whole message, as a bot reads it.
 pub fn render(uid: u32, raw: &[u8]) -> String {
     let Some(m) = mail_parser::MessageParser::default().parse(raw) else { return format!("Message {uid} couldn't be read.") };

@@ -100,6 +100,8 @@ fn TriggerRow(trigger: Value, on_edit: EventHandler<Value>, on_close: EventHandl
     let mut history = use_signal(|| None::<Vec<Value>>);
     let mut showing_address = use_signal(|| false);
     let has_address = trigger["hasAddress"].as_bool().unwrap_or(false);
+    let watches_mail = trigger["kind"] == "email";
+    let problem_now = trigger["problem"].as_str().map(str::to_string);
     let id = trigger["id"].as_str().unwrap_or_default().to_string();
     let name = trigger["name"].as_str().unwrap_or_default().to_string();
     let bot = trigger["botName"].as_str().unwrap_or_default().to_string();
@@ -142,8 +144,11 @@ fn TriggerRow(trigger: Value, on_edit: EventHandler<Value>, on_close: EventHandl
                         }
                     }
                     div { class: "text-[12px] text-ink-secondary", "{bot} · {when}" }
+                    if let Some(p) = &problem_now {
+                        div { class: "text-[12px] text-danger", "Can't look: {p}" }
+                    }
                     div { class: "text-[11px] text-ink-tertiary",
-                        if has_address { if on { "Waiting for its address to be called" } else { "Not listening" } } else if let Some(next) = &next { "Next: {next}" } else if on { "Doesn't run again" } else { "Not running" }
+                        if has_address { if on { "Waiting for its address to be called" } else { "Not listening" } } else if watches_mail { if on { "Looks at the mailbox every 5 minutes" } else { "Not looking" } } else if let Some(next) = &next { "Next: {next}" } else if on { "Doesn't run again" } else { "Not running" }
                         if let Some((status, words)) = &last {
                             span { class: if status == "failed" { "text-danger" } else { "" }, " · {words}" }
                         }
@@ -278,10 +283,16 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
     let state = use_context::<Signal<State>>();
     let is_new = trigger.is_null();
     let s = trigger["schedule"].clone();
-    let start_kind = if trigger["kind"] == "webhook" { "webhook".to_string() } else { s["type"].as_str().unwrap_or("weekly").to_string() };
-    // A trigger keeps its kind: a schedule stays a schedule, a webhook a webhook.
-    let fixed_webhook = !trigger.is_null() && trigger["kind"] == "webhook";
-    let fixed_schedule = !trigger.is_null() && trigger["kind"] != "webhook";
+    let start_kind = match trigger["kind"].as_str() {
+        Some("webhook") => "webhook".to_string(),
+        Some("email") => "email".to_string(),
+        _ => s["type"].as_str().unwrap_or("weekly").to_string(),
+    };
+    // A trigger keeps its kind: a schedule stays a schedule, a webhook a webhook, and so on.
+    let existing_kind = (!trigger.is_null()).then(|| trigger["kind"].as_str().unwrap_or("schedule").to_string());
+    let mut mail_from = use_signal(|| trigger["email"]["from"].as_str().unwrap_or_default().to_string());
+    let mut mail_subject = use_signal(|| trigger["email"]["subject"].as_str().unwrap_or_default().to_string());
+    let mut mail_folder = use_signal(|| trigger["email"]["folder"].as_str().unwrap_or("INBOX").to_string());
     let start_days: Vec<u32> = s["days"].as_array().map(|d| d.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect()).unwrap_or_else(|| vec![1, 2, 3, 4, 5]);
     let first_bot = state.read().bots.iter().find(|b| b.channel.is_none()).map(|b| b.id.clone()).unwrap_or_default();
     let mut bot = use_signal(|| trigger["botId"].as_str().map(str::to_string).unwrap_or(first_bot));
@@ -306,6 +317,11 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
             if is_new {
                 body["kind"] = json!("webhook");
             }
+        } else if kind() == "email" {
+            if is_new {
+                body["kind"] = json!("email");
+            }
+            body["email"] = json!({ "from": mail_from(), "subject": mail_subject(), "folder": mail_folder() });
         } else {
             body["schedule"] = When { kind: kind(), at: at(), time: time(), days: days(), every: every(), from: from(), to: to(), start: start.clone() }.schedule();
         }
@@ -379,9 +395,12 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
             div { class: "flex flex-col gap-2",
                 span { class: "text-[12px] text-ink-secondary", "When" }
                 div { role: "radiogroup", class: "flex gap-1",
-                    for (value, label) in [("weekly", "On days at a time"), ("interval", "Every so often"), ("once", "Once"), ("webhook", "When called (webhook)")] {
+                    for (value, label) in [("weekly", "On days at a time"), ("interval", "Every so often"), ("once", "Once"), ("webhook", "When called (webhook)"), ("email", "When an email arrives")] {
                         button { key: "{value}", r#type: "button", role: "radio", "aria-checked": "{kind() == value}", "data-trigger-kind": "{value}",
-                            disabled: (fixed_webhook && value != "webhook") || (fixed_schedule && value == "webhook"),
+                            disabled: existing_kind.as_deref().is_some_and(|k| {
+                                let this = match value { "webhook" => "webhook", "email" => "email", _ => "schedule" };
+                                k != this
+                            }),
                             class: if kind() == value { "rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-white" } else { "rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink-secondary" },
                             onclick: move |_| kind.set(value.to_string()),
                             "{label}"
@@ -389,6 +408,19 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
                     }
                 }
                 match kind().as_str() {
+                    "email" => rsx! {
+                        p { class: "text-[12px] leading-relaxed text-ink-secondary",
+                            "Catbot looks at the mailbox (Settings › Email) every 5 minutes. Mail already there doesn't count; new mail that fits goes to the bot, several at once in one run. The bot has to be one that may use the mailbox."
+                        }
+                        div { class: "flex flex-wrap items-center gap-2 text-[13px] text-ink-secondary",
+                            "From"
+                            input { class: "{SMALL} w-48", placeholder: "anyone", "data-trigger-mail-from": true, value: "{mail_from}", oninput: move |e| mail_from.set(e.value()) }
+                            "about"
+                            input { class: "{SMALL} w-48", placeholder: "anything", "data-trigger-mail-subject": true, value: "{mail_subject}", oninput: move |e| mail_subject.set(e.value()) }
+                            "in"
+                            input { class: "{SMALL} w-28", value: "{mail_folder}", oninput: move |e| mail_folder.set(e.value()) }
+                        }
+                    },
                     "webhook" => rsx! {
                         p { class: "text-[12px] leading-relaxed text-ink-secondary",
                             "Another app calls its address (a form, GitHub, a home-automation hub) and the bot gets to work with what it sent. You'll get the address once it's made."
@@ -494,7 +526,7 @@ pub fn TriggerCard(card: Value) -> Element {
         "created" => Some(("DELETE", format!("/api/triggers/{id}"), None)),
         "deleted" => {
             let d = &card["deleted"];
-            Some(("POST", "/api/triggers".to_string(), Some(json!({ "botId": d["botId"], "name": d["name"], "prompt": d["prompt"], "schedule": d["schedule"] }))))
+            Some(("POST", "/api/triggers".to_string(), Some(json!({ "botId": d["botId"], "name": d["name"], "prompt": d["prompt"], "schedule": d["schedule"], "kind": d["kind"], "email": d["email"] }))))
         }
         _ if card["before"].is_object() => Some(("PUT", format!("/api/triggers/{id}"), Some(card["before"].clone()))),
         _ => None,

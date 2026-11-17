@@ -285,6 +285,7 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
     tokio::spawn(tidy(app.clone(), archive_after_days()));
     tokio::spawn(chief::keep_watch(app.clone()));
     tokio::spawn(triggers::keep_time(app.clone()));
+    tokio::spawn(triggers::watch_mail(app.clone()));
     axum::serve(listener, router(app)).await?;
     Ok(())
 }
