@@ -32,11 +32,13 @@ impl Drop for Open {
     }
 }
 
-/// The tools a bot has: publishing pages, its triggers, and its mailbox if it may use one.
+/// The tools a bot has: publishing pages, its triggers, its mailbox if it may use one, and the
+/// connected apps it's ticked for.
 pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
     let mut tools = super::pages::tools();
     tools.extend(super::triggers::tools());
     tools.extend(super::email::tools_for(app, bot_id));
+    tools.extend(super::apps::tools_for(app, bot_id));
     tools
 }
 
@@ -75,6 +77,7 @@ pub async fn route(app: &Arc<App>, call: bool, req: Request) -> Answer {
         "page_publish" => super::pages::propose(app, &grant, &args).await,
         "trigger_info" | "trigger" | "delete_trigger" => super::triggers::call(app, &grant, name, &args),
         _ if name.starts_with("mail_") => super::email::call(app, &grant, name, &args).await,
+        _ if super::apps::knows(app, &grant.bot_id, name) => super::apps::call(app, &grant, name, &args).await,
         _ => Err(format!("unknown tool {name}")),
     };
     Ok((StatusCode::OK, match answer {

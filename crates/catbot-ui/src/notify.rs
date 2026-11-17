@@ -193,7 +193,7 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
                 role: "dialog",
                 "aria-label": "Settings",
                 "data-app-settings": true,
-                class: "flex max-h-[88vh] w-full max-w-[500px] flex-col gap-4 overflow-y-auto rounded-2xl bg-panel p-5 shadow-2xl",
+                class: "flex max-h-[88vh] w-full max-w-[620px] flex-col gap-4 overflow-y-auto rounded-2xl bg-panel p-5 shadow-2xl",
                 onclick: move |e| e.stop_propagation(),
                 div { class: "flex items-center",
                     span { class: "min-w-0 flex-1 text-[17px] font-semibold text-ink", "Settings" }
@@ -205,13 +205,17 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
                         "×"
                     }
                 }
-                div { role: "tablist", class: "flex gap-1", "data-settings-pages": true,
+                div { role: "tablist", class: "flex shrink-0 gap-1 overflow-x-auto whitespace-nowrap", "data-settings-pages": true,
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"general\"}", class: tab(page() == "general"), onclick: move |_| page.set("general"), "General" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"chief\"}", "data-settings-chief": true, class: tab(page() == "chief"), onclick: move |_| page.set("chief"), "Chief of Staff" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"team\"}", "data-settings-team": true, class: tab(page() == "team"), onclick: move |_| page.set("team"), "Team" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"skills\"}", "data-settings-skills": true, class: tab(page() == "skills"), onclick: move |_| page.set("skills"), "Skills" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"email\"}", "data-settings-email": true, class: tab(page() == "email"), onclick: move |_| page.set("email"), "Email" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"pages\"}", "data-settings-pages-list": true, class: tab(page() == "pages"), onclick: move |_| page.set("pages"), "Pages" }
+                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"apps\"}", "data-settings-apps": true, class: tab(page() == "apps"), onclick: move |_| page.set("apps"), "Apps" }
+                }
+                if page() == "apps" {
+                    crate::apps::AppsSettings {}
                 }
                 if page() == "pages" {
                     crate::pages::PagesList {}

@@ -137,6 +137,7 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                     }
                     "sending" => rsx! { p { class: "text-ink-secondary", "Sending…" } },
                     "publishing" => rsx! { p { class: "text-ink-secondary", "Publishing…" } },
+                    "working" => rsx! { p { class: "text-ink-secondary", "Working…" } },
                     "declined" => rsx! { p { class: "text-ink-tertiary", "Declined. Nothing changed." } },
                     _ => rsx! {},
                 }

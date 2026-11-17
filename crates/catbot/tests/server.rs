@@ -2148,3 +2148,90 @@ async fn new_mail_that_matches_starts_its_bot_once() {
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
     let _ = imap.kill();
 }
+
+#[tokio::test]
+async fn connected_mcp_apps_give_ticked_bots_tools_and_writes_ask_first() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let notes = s._dir.path().join("notes.log");
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Lin" }))).await;
+    let lin = made["bot"]["id"].as_str().unwrap().to_string();
+    let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-mcp.py");
+
+    // A command: started, greeted, its tools listed (over two pages), and on.
+    let (status, added) = s.call("POST", "/api/apps", Some(json!({ "name": "Notes", "transport": "command", "command": "python3", "args": [fake], "env": [{ "name": "FAKE_MCP_LOG", "value": notes.to_string_lossy() }] }))).await;
+    assert_eq!(status, 201, "{added}");
+    let server = added["server"].clone();
+    assert_eq!((server["enabled"].as_bool(), server["problem"].is_null(), server["tools"].as_array().unwrap().len()), (Some(true), true, 2), "{server}");
+    assert_eq!(server["tools"][0]["readOnly"], true);
+    assert!(server["env"][0]["value"].as_str().unwrap().starts_with("••••"), "keys go back masked");
+    let id = server["id"].as_str().unwrap().to_string();
+
+    // A link that refuses the keys: kept, but off, with why.
+    struct Stop(std::process::Child);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+    let mut http = Stop(std::process::Command::new("python3").arg(fake).arg("--http").stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::null()).spawn().unwrap());
+    let port: u16 = {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::BufReader::new(http.0.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+        line.trim().parse().unwrap()
+    };
+    let (status, refused) = s.call("POST", "/api/apps", Some(json!({ "name": "Remote", "transport": "http", "url": format!("http://127.0.0.1:{port}/mcp"), "headers": [{ "name": "Authorization", "value": "Bearer wrong" }] }))).await;
+    assert_eq!(status, 201);
+    assert_eq!(refused["server"]["enabled"], false);
+    assert!(refused["server"]["problem"].as_str().unwrap().contains("refused the keys"), "{refused}");
+    let remote = refused["server"]["id"].as_str().unwrap().to_string();
+    let (_, fixed) = s.call("PUT", &format!("/api/apps/{remote}"), Some(json!({ "headers": [{ "name": "Authorization", "value": "Bearer good" }], "enabled": true }))).await;
+    assert_eq!((fixed["server"]["problem"].is_null(), fixed["server"]["tools"].as_array().unwrap().len()), (true, 2), "{fixed}");
+
+    // Nobody ticked: no tools. Ticked for Scout only.
+    let ask = async |events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, bot: &str, text: &str| -> String {
+        s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": text }))).await;
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+    // Not offered at all (the stand-in AI says so), or refused.
+    let missing = |said: &str| said.starts_with("ERROR: ") || said.starts_with("(no tool ");
+    let none = ask(&mut events, &scout, r#"catbot-tool: notes__lookup {"q": "seeds"}"#).await;
+    assert!(missing(&none), "{none}");
+    s.call("PUT", &format!("/api/apps/{id}"), Some(json!({ "bots": [scout] }))).await;
+    s.call("PUT", &format!("/api/apps/{remote}"), Some(json!({ "bots": [scout] }))).await;
+
+    // Reading is free, from either app.
+    assert_eq!(ask(&mut events, &scout, r#"catbot-tool: notes__lookup {"q": "seeds"}"#).await, "found seeds");
+    assert_eq!(ask(&mut events, &scout, r#"catbot-tool: remote__lookup {"q": "bulbs"}"#).await, "found bulbs");
+    assert!(missing(&ask(&mut events, &lin, r#"catbot-tool: notes__lookup {"q": "seeds"}"#).await), "Lin isn't ticked");
+
+    // Writing asks: a card with exactly what would be done; nothing happens until yes.
+    let waiting = ask(&mut events, &scout, r#"catbot-tool: notes__make_note {"text": "water the tomatoes"}"#).await;
+    assert!(waiting.contains("waiting for the person's approval"), "{waiting}");
+    assert!(!notes.exists(), "not written yet");
+    let (_, bot) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    let thread = bot["bot"]["threadId"].as_str().unwrap().to_string();
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+    let card = page["messages"].as_array().unwrap().iter().rev().find(|m| m["kind"] == "team-change").unwrap().clone();
+    assert_eq!(card["teamChange"]["title"], "Notes › make_note");
+    assert!(card["teamChange"]["lines"].to_string().contains("water the tomatoes"), "{card}");
+    let (_, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{}", card["id"].as_str().unwrap()), Some(json!({ "approve": true }))).await;
+    assert_eq!(answered["state"], "done", "{answered}");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "water the tomatoes\n");
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+    let card = page["messages"].as_array().unwrap().iter().rev().find(|m| m["kind"] == "team-change").unwrap().clone();
+    assert_eq!(card["teamChange"]["doneText"], "Done. It answered: noted");
+
+    // Turned off, or removed: its tools are gone.
+    s.call("PUT", &format!("/api/apps/{id}"), Some(json!({ "enabled": false }))).await;
+    assert!(missing(&ask(&mut events, &scout, r#"catbot-tool: notes__lookup {"q": "x"}"#).await));
+    assert_eq!(s.call("DELETE", &format!("/api/apps/{remote}"), None).await.0, 200);
+    assert!(missing(&ask(&mut events, &scout, r#"catbot-tool: remote__lookup {"q": "x"}"#).await));
+    drop(http);
+}

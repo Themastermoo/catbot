@@ -6,6 +6,7 @@
 //! the live event stream are merged, so the interface sees one team. Over time Catbot answers
 //! more, until the reference server has nothing left to do.
 
+pub mod apps;
 pub mod attachments;
 pub mod backups;
 pub mod bot_tools;
@@ -399,6 +400,19 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         }
         ["p", id, rest @ ..] if method == Method::GET => pages::serve(&app, id, rest).await,
         ["hooks", id, rest @ ..] => hooks::receive(&app, id, rest, req).await,
+        ["api", "apps", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::POST || method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(apps::route(&app, &method, &rest, body).await)
+        }
         ["api", "triggers", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

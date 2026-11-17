@@ -58,6 +58,7 @@ pub struct State {
     pub email_changed: u64,
     pub pages_changed: u64,
     pub triggers_changed: u64,
+    pub apps_changed: u64,
     pub devices_changed: u64,
 }
 
@@ -124,6 +125,7 @@ impl State {
             Some("email") => self.email_changed += 1,
             Some("pages") => self.pages_changed += 1,
             Some("triggers") => self.triggers_changed += 1,
+            Some("apps") => self.apps_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();
                 self.bots.retain(|b| b.id != id);

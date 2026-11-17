@@ -302,6 +302,7 @@ pub async fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -
     let slow = match detail["action"].as_str() {
         Some("send_mail") => Some("sending"),
         Some("publish_page") => Some("publishing"),
+        Some("app_call") => Some("working"),
         _ => None,
     };
     if let Some(state) = slow {
@@ -339,6 +340,7 @@ async fn apply(app: &Arc<App>, detail: &Value) -> Result<Option<String>, String>
     let channel = || app.with_store(|store| store.channel(target)).flatten().ok_or_else(|| "that channel is gone".to_string());
     let done = match detail["action"].as_str().unwrap_or_default() {
         "publish_page" => return super::pages::publish(app, &body).await.map(Some),
+        "app_call" => return super::apps::run_approved(app, &body).await.map(Some),
         "create_bot" => super::make_bot(app, &body).map(|_| ()).map_err(refused),
         "change_bot" => super::patch_bot(app, bot()?, body).map(|_| ()).map_err(refused),
         "delete_bot" => super::remove_bot(app, &bot()?).map(|_| ()).map_err(refused),
