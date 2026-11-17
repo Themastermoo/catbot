@@ -11,6 +11,7 @@ pub mod attachments;
 pub mod backups;
 pub mod bot_tools;
 pub mod changes;
+pub mod composio;
 pub mod channels;
 pub mod skills;
 pub mod team;
@@ -400,6 +401,20 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         }
         ["p", id, rest @ ..] if method == Method::GET => pages::serve(&app, id, rest).await,
         ["hooks", id, rest @ ..] => hooks::receive(&app, id, rest, req).await,
+        ["api", "composio", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let query = query_param(&req, "search").map(urlencoding_decode);
+            let body = if method == Method::POST || method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(composio::route(&app, &method, &rest, body, query).await)
+        }
         ["api", "apps", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

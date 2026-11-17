@@ -414,6 +414,9 @@ pub async fn call(app: &Arc<App>, grant: &Grant, name: &str, args: &Value) -> Re
 
 /// Runs an approved app call (`team.rs`); what it answered, shortened, becomes the card's note.
 pub async fn run_approved(app: &App, body: &Value) -> Result<String, String> {
+    if body["composio"] == true {
+        return super::composio::run_approved(app, body).await;
+    }
     let id = body["server"].as_str().unwrap_or_default();
     let server = servers(app).into_iter().find(|s| s.id == id).ok_or("that app was removed")?;
     if !server.enabled {

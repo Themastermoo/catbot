@@ -39,6 +39,7 @@ pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
     tools.extend(super::triggers::tools());
     tools.extend(super::email::tools_for(app, bot_id));
     tools.extend(super::apps::tools_for(app, bot_id));
+    tools.extend(super::composio::tools_for(app, bot_id));
     tools
 }
 
@@ -78,6 +79,7 @@ pub async fn route(app: &Arc<App>, call: bool, req: Request) -> Answer {
         "trigger_info" | "trigger" | "delete_trigger" => super::triggers::call(app, &grant, name, &args),
         _ if name.starts_with("mail_") => super::email::call(app, &grant, name, &args).await,
         _ if super::apps::knows(app, &grant.bot_id, name) => super::apps::call(app, &grant, name, &args).await,
+        _ if super::composio::knows(name) => super::composio::call_tool(app, &grant, name, &args).await,
         _ => Err(format!("unknown tool {name}")),
     };
     Ok((StatusCode::OK, match answer {

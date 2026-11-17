@@ -34,6 +34,7 @@ pub fn AppsSettings() -> Element {
     });
     rsx! {
         section { class: "flex flex-col gap-3", "data-apps": true,
+            ComposioSettings {}
             h2 { class: HEADING, "MCP servers" }
             p { class: "text-[13px] leading-relaxed text-ink-secondary",
                 "Programs that give bots tools: run here as a command, or reached at a link. Only the bots you tick get an app's tools. Tools the app marks as only reading run freely; anything else shows you a card first, with exactly what it would do."
@@ -286,6 +287,212 @@ fn ServerForm(server: Value, on_done: EventHandler<()>) -> Element {
                 button { r#type: "button", class: BUTTON, onclick: move |_| on_done.call(()), "Cancel" }
                 button { r#type: "button", class: PRIMARY, "data-app-save": true, disabled: busy(), onclick: save, if busy() { "Testing…" } else if is_new { "Add and test" } else { "Save and test" } }
             }
+        }
+    }
+}
+
+/// Composio (stage 16.2): the project key, the apps signed in through it (each sign-in happens in
+/// the browser, on the app's own page), and which bots get each app.
+#[component]
+fn ComposioSettings() -> Element {
+    let state = use_context::<Signal<State>>();
+    let mut now = use_signal(|| None::<Value>);
+    let mut key = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let mut search = use_signal(String::new);
+    let mut found = use_signal(Vec::<Value>::new);
+    let mut alias = use_signal(String::new);
+    // A sign-in page opened, for if the browser blocked the new tab.
+    let mut signing_in = use_signal(|| None::<(String, String)>);
+    let mut confirm_off = use_signal(|| false);
+    let mut refreshed = use_signal(|| 0u32);
+    use_effect(move || {
+        let _ = state.read().apps_changed;
+        let _ = refreshed();
+        spawn(async move {
+            match api::get("/api/composio").await {
+                Ok(found) => now.set(Some(found)),
+                Err(err) => problem.set(Some(err)),
+            }
+        });
+    });
+    let act = use_callback(move |(method, path, body): (&'static str, String, Option<Value>)| {
+        busy.set(true);
+        problem.set(None);
+        spawn(async move {
+            match api::call(method, &path, body.as_ref()).await {
+                Ok(answer) if answer.get("connected").is_some() => now.set(Some(answer)),
+                Ok(_) => refreshed.set(refreshed() + 1),
+                Err(err) => problem.set(Some(err)),
+            }
+            busy.set(false);
+        });
+    });
+    let look = move |_| {
+        let q = search();
+        spawn(async move {
+            let q: String = q.chars().filter(|c| c.is_alphanumeric() || *c == ' ').collect::<String>().trim().replace(' ', "+");
+            match api::get(&format!("/api/composio/toolkits?search={q}")).await {
+                Ok(answer) => found.set(answer["toolkits"].as_array().cloned().unwrap_or_default()),
+                Err(err) => problem.set(Some(err)),
+            }
+        });
+    };
+    let connect = use_callback(move |(toolkit, name): (String, String)| {
+        // A tab opened now, while the click still counts, so the browser lets it open.
+        document::eval("window.__catbotSignIn = window.open('about:blank', '_blank');");
+        let body = json!({ "toolkit": toolkit, "name": name, "alias": alias() });
+        spawn(async move {
+            match api::post("/api/composio/connect", &body).await {
+                Ok(answer) => {
+                    let url = answer["redirectUrl"].as_str().unwrap_or_default().to_string();
+                    let quoted = serde_json::to_string(&url).unwrap_or_default();
+                    document::eval(&format!("if (window.__catbotSignIn) {{ window.__catbotSignIn.location = {quoted}; }} else {{ window.open({quoted}, '_blank'); }}"));
+                    signing_in.set(Some((name, url)));
+                    found.set(Vec::new());
+                    alias.set(String::new());
+                    refreshed.set(refreshed() + 1);
+                }
+                Err(err) => {
+                    document::eval("if (window.__catbotSignIn) { window.__catbotSignIn.close(); }");
+                    problem.set(Some(err));
+                }
+            }
+        });
+    });
+    let current = now();
+    let connected = current.as_ref().is_some_and(|c| c["connected"] == true);
+    let bots: Vec<(String, String)> = state.read().bots.iter().filter(|b| b.channel.is_none()).map(|b| (b.id.clone(), b.name.clone())).collect();
+    rsx! {
+        h2 { class: HEADING, "Composio" }
+        p { class: "text-[13px] leading-relaxed text-ink-secondary",
+            "Gmail, Outlook, Google Calendar, Slack, GitHub and hundreds more, each signed in on its own page in your browser. Composio keeps those sign-ins; Catbot keeps only your project key, from your Composio project's API Keys page (it starts ak_)."
+        }
+        if !connected {
+            div { class: "flex gap-2",
+                input { class: FIELD, r#type: "password", placeholder: "Composio project key (ak_…)", "data-composio-key": true, value: "{key}", oninput: move |e| key.set(e.value()) }
+                button { r#type: "button", class: PRIMARY, disabled: busy() || key().trim().is_empty(), "data-composio-connect": true,
+                    onclick: move |_| { act.call(("PUT", "/api/composio".to_string(), Some(json!({ "key": key() })))); key.set(String::new()); },
+                    "Connect"
+                }
+            }
+        } else if let Some(c) = current {
+            div { class: "flex items-center gap-2 text-[12px] text-ink-secondary",
+                span { class: "flex-1", "Connected · key …{c[\"keyEnds\"].as_str().unwrap_or_default()}" }
+                button { r#type: "button", class: LINK, onclick: move |_| refreshed.set(refreshed() + 1), "Refresh" }
+                if confirm_off() {
+                    button { r#type: "button", class: "rounded-md bg-danger px-2 py-1 text-[12px] font-medium text-white", onclick: move |_| act.call(("DELETE", "/api/composio".to_string(), None)), "Forget the key" }
+                    button { r#type: "button", class: LINK, onclick: move |_| confirm_off.set(false), "Keep" }
+                } else {
+                    button { r#type: "button", class: LINK, onclick: move |_| confirm_off.set(true), "Forget the key…" }
+                }
+            }
+            if let Some(why) = c["problem"].as_str() {
+                p { class: "text-[12px] text-danger", "{why}" }
+            }
+            for a in c["apps"].as_array().cloned().unwrap_or_default() {
+                {
+                    let toolkit = a["toolkit"].as_str().unwrap_or_default().to_string();
+                    let name = a["name"].as_str().unwrap_or_default().to_string();
+                    let ticked: Vec<String> = a["bots"].as_array().map(|b| b.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                    let accounts = a["accounts"].as_array().cloned().unwrap_or_default();
+                    let working = accounts.iter().any(|x| x["status"] == "ACTIVE");
+                    let (again, remove) = (toolkit.clone(), toolkit.clone());
+                    let again_name = name.clone();
+                    rsx! {
+                        div { key: "{toolkit}", class: "flex flex-col gap-1.5 rounded-lg border border-hairline/40 px-3 py-2", "data-composio-app": "{toolkit}",
+                            div { class: "flex items-center gap-2",
+                                span { class: "flex-1 text-[14px] font-medium text-ink", "{name}" }
+                                if !working {
+                                    span { class: "text-[12px] text-warning", "Not signed in yet" }
+                                }
+                            }
+                            for x in accounts.iter() {
+                                {
+                                    let id = x["id"].as_str().unwrap_or_default().to_string();
+                                    let label = x["alias"].as_str().unwrap_or("(no label)").to_string();
+                                    let status = match x["status"].as_str() { Some("ACTIVE") => "signed in", Some("INITIATED") | Some("INITIALIZING") => "waiting for the sign-in", Some("EXPIRED") => "signed out: connect it again", Some(other) => other, None => "" }.to_string();
+                                    rsx! {
+                                        div { key: "{id}", class: "flex items-center gap-2 text-[12px]",
+                                            span { class: "text-ink", "{label}" }
+                                            span { class: "flex-1 text-ink-tertiary", "{status}" }
+                                            button { r#type: "button", class: LINK, onclick: move |_| act.call(("DELETE", format!("/api/composio/accounts/{id}"), None)), "Disconnect" }
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "flex flex-wrap items-center gap-x-4 gap-y-1",
+                                span { class: "text-[12px] text-ink-secondary", "Bots:" }
+                                for (bot_id, bot_name) in bots.clone() {
+                                    {
+                                        let on = ticked.contains(&bot_id);
+                                        let others = ticked.clone();
+                                        let path = format!("/api/composio/apps/{toolkit}");
+                                        rsx! {
+                                            label { key: "{bot_id}", class: "flex items-center gap-1.5 text-[13px] text-ink",
+                                                input { r#type: "checkbox", checked: on, "data-composio-bot": "{bot_name}",
+                                                    onchange: move |_| {
+                                                        let mut next: Vec<String> = others.iter().filter(|b| **b != bot_id).cloned().collect();
+                                                        if !on {
+                                                            next.push(bot_id.clone());
+                                                        }
+                                                        act.call(("PUT", path.clone(), Some(json!({ "bots": next }))));
+                                                    },
+                                                }
+                                                "{bot_name}"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            div { class: "flex gap-1",
+                                button { r#type: "button", class: LINK, onclick: move |_| connect.call((again.clone(), again_name.clone())), "Add an account" }
+                                span { class: "flex-1" }
+                                button { r#type: "button", class: "{LINK} hover:text-danger", onclick: move |_| act.call(("DELETE", format!("/api/composio/apps/{remove}"), None)), "Remove the app" }
+                            }
+                        }
+                    }
+                }
+            }
+            div { class: "flex flex-col gap-2 rounded-lg border border-dashed border-hairline/60 px-3 py-2",
+                div { class: "flex gap-2",
+                    input { class: FIELD, placeholder: "Find an app: gmail, outlook, calendar, slack…", "data-composio-search": true, value: "{search}", oninput: move |e| search.set(e.value()),
+                        onkeydown: move |e| { if e.key() == Key::Enter { look(()); } },
+                    }
+                    button { r#type: "button", class: BUTTON, onclick: move |_| look(()), "Find" }
+                }
+                if !found.read().is_empty() {
+                    input { class: "{SMALL} w-56", placeholder: "Label, like personal or work", value: "{alias}", oninput: move |e| alias.set(e.value()) }
+                    for t in found() {
+                        {
+                            let toolkit = t["toolkit"].as_str().unwrap_or_default().to_string();
+                            let name = t["name"].as_str().unwrap_or_default().to_string();
+                            let what = t["description"].as_str().unwrap_or_default().to_string();
+                            let (tk, nm) = (toolkit.clone(), name.clone());
+                            rsx! {
+                                div { key: "{toolkit}", class: "flex items-center gap-2",
+                                    div { class: "min-w-0 flex-1",
+                                        div { class: "text-[13px] font-medium text-ink", "{name}" }
+                                        div { class: "truncate text-[11px] text-ink-tertiary", "{what}" }
+                                    }
+                                    button { r#type: "button", class: BUTTON, "data-composio-add": "{toolkit}", onclick: move |_| connect.call((tk.clone(), nm.clone())), "Connect" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((name, url)) = signing_in() {
+                p { class: "text-[12px] text-ink-secondary",
+                    "Finish signing in to {name} in the page that opened, then Refresh. If no page opened: "
+                    a { class: "text-accent underline", href: "{url}", target: "_blank", rel: "noopener", "open the sign-in page" }
+                    "."
+                }
+            }
+        }
+        if let Some(err) = problem() {
+            p { role: "alert", class: "text-[12px] text-danger", "{err}" }
         }
     }
 }

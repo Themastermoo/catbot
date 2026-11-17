@@ -2235,3 +2235,132 @@ async fn connected_mcp_apps_give_ticked_bots_tools_and_writes_ask_first() {
     assert!(missing(&ask(&mut events, &scout, r#"catbot-tool: remote__lookup {"q": "x"}"#).await));
     drop(http);
 }
+
+/// A stand-in for Composio's API: two Gmail tools, sign-ins that finish at once, and a log of
+/// every call as "METHOD path body".
+async fn fake_composio() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let accounts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+    let (seen, held) = (log.clone(), accounts.clone());
+    let addr = listen(Router::new().fallback(move |req: axum::extract::Request| {
+        let (seen, held) = (seen.clone(), held.clone());
+        async move {
+            let (parts, body) = req.into_parts();
+            let path = parts.uri.path().to_string();
+            let query = parts.uri.query().unwrap_or_default().to_string();
+            let body = String::from_utf8_lossy(&body.collect().await.unwrap().to_bytes()).to_string();
+            seen.lock().unwrap().push(format!("{} {path}?{query} {body}", parts.method));
+            let answer = |status: u16, v: Value| Response::builder().status(status).header("content-type", "application/json").body(Body::from(v.to_string())).unwrap();
+            if parts.headers.get("x-api-key").is_none_or(|k| k != "ak_good") {
+                return answer(401, json!({ "error": { "message": "Invalid API key" } }));
+            }
+            let tool = |slug: &str, what: &str| json!({ "slug": slug, "name": slug, "description": what, "input_parameters": { "type": "object" }, "toolkit": { "slug": "gmail" }, "tags": [] });
+            let tools = [tool("GMAIL_FETCH_EMAILS", "Fetch emails."), tool("GMAIL_SEND_EMAIL", "Send an email.")];
+            match (parts.method.as_str(), path.as_str()) {
+                ("POST", "/api/v3/tool_router/session") => answer(201, json!({ "session_id": "trs_1", "mcp": { "type": "http", "url": "https://composio.test/mcp" } })),
+                ("POST", "/api/v3/tool_router/session/trs_1/link") => {
+                    let ask: Value = serde_json::from_str(&body).unwrap();
+                    let mut list = held.lock().unwrap();
+                    let id = format!("ca_{}", list.len() + 1);
+                    // The sign-in finishes at once here.
+                    list.push(json!({ "id": id, "status": "ACTIVE", "alias": ask["alias"], "toolkit": { "slug": ask["toolkit"] } }));
+                    answer(201, json!({ "link_token": "lt_1", "redirect_url": "https://composio.test/link/lt_1", "connected_account_id": id }))
+                }
+                ("GET", "/api/v3/connected_accounts") => answer(200, json!({ "items": *held.lock().unwrap(), "next_cursor": null })),
+                ("DELETE", p) if p.starts_with("/api/v3/connected_accounts/") => {
+                    let id = p.rsplit('/').next().unwrap().to_string();
+                    held.lock().unwrap().retain(|a| a["id"] != id.as_str());
+                    answer(200, json!({ "success": true }))
+                }
+                ("GET", "/api/v3/toolkits") => answer(200, json!({ "items": [{ "slug": "gmail", "name": "Gmail", "meta": { "description": "Email by Google", "logo": "" }, "no_auth": false }], "next_cursor": null })),
+                ("GET", "/api/v3.1/tools") => {
+                    let items: Vec<Value> = match query.split('&').find_map(|p| p.strip_prefix("tool_slugs=")) {
+                        Some(slug) => tools.iter().filter(|t| t["slug"] == slug).cloned().collect(),
+                        None => tools.to_vec(),
+                    };
+                    answer(200, json!({ "items": items, "next_cursor": null }))
+                }
+                ("POST", p) if p.starts_with("/api/v3.1/tools/execute/") => {
+                    let slug = p.rsplit('/').next().unwrap();
+                    answer(200, json!({ "successful": true, "error": null, "data": { "ran": slug, "with": serde_json::from_str::<Value>(&body).unwrap() } }))
+                }
+                _ => answer(404, json!({ "error": { "message": "not here" } })),
+            }
+        }
+    }))
+    .await;
+    (format!("http://{addr}"), log)
+}
+
+#[tokio::test]
+async fn composio_apps_connect_in_the_browser_and_their_writes_ask_first() {
+    let s = setup().await;
+    let (api, calls) = fake_composio().await;
+    // SAFETY: only this test reads it.
+    unsafe { std::env::set_var("CATBOT_COMPOSIO_API", &api) };
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+
+    // The key is checked; a personal key is turned away with what to use instead.
+    assert!(s.call("PUT", "/api/composio", Some(json!({ "key": "ck_personal" }))).await.1["error"].as_str().unwrap().contains("project key"));
+    assert!(s.call("PUT", "/api/composio", Some(json!({ "key": "ak_wrong" }))).await.1["error"].as_str().unwrap().contains("didn't accept"));
+    let (status, set) = s.call("PUT", "/api/composio", Some(json!({ "key": "ak_good" }))).await;
+    assert_eq!((status, set["connected"].as_bool(), set["keyEnds"].as_str()), (200, Some(true), Some("good")), "{set}");
+    assert!(!set.to_string().contains("ak_good"), "the key never goes back");
+
+    // Find an app, connect it (the sign-in opens in the browser), tick a bot.
+    let (_, found) = s.call("GET", "/api/composio/toolkits?search=gma", None).await;
+    assert_eq!(found["toolkits"][0]["toolkit"], "gmail");
+    let (_, link) = s.call("POST", "/api/composio/connect", Some(json!({ "toolkit": "gmail", "name": "Gmail", "alias": "personal" }))).await;
+    assert_eq!(link["redirectUrl"], "https://composio.test/link/lt_1");
+    let (_, now) = s.call("GET", "/api/composio", None).await;
+    assert_eq!((now["apps"][0]["name"].as_str(), now["apps"][0]["accounts"][0]["status"].as_str()), (Some("Gmail"), Some("ACTIVE")), "{now}");
+
+    let ask = async |events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, text: &str| -> String {
+        s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": text }))).await;
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+    let none = ask(&mut events, r#"catbot-tool: app_tools_find {"app": "gmail"}"#).await;
+    assert!(none.starts_with("ERROR: ") || none.starts_with("(no tool "), "not ticked yet: {none}");
+    s.call("PUT", "/api/composio/apps/gmail", Some(json!({ "bots": [scout] }))).await;
+
+    let listed = ask(&mut events, r#"catbot-tool: app_tools_find {"app": "gmail", "query": "email"}"#).await;
+    assert!(listed.contains("GMAIL_FETCH_EMAILS (reads)") && listed.contains("GMAIL_SEND_EMAIL (asks first)"), "{listed}");
+    assert!(ask(&mut events, r#"catbot-tool: app_tools_find {"app": "slack"}"#).await.contains("may not use"));
+
+    // A read runs at once, as the connected account.
+    let read = ask(&mut events, r#"catbot-tool: app_tool_run {"tool": "GMAIL_FETCH_EMAILS", "arguments": {"max_results": 5}}"#).await;
+    assert!(read.contains("\"ran\": \"GMAIL_FETCH_EMAILS\"") && read.contains("\"connected_account_id\": \"ca_1\""), "{read}");
+
+    // A write asks first, and runs once approved.
+    let waiting = ask(&mut events, r#"catbot-tool: app_tool_run {"tool": "GMAIL_SEND_EMAIL", "arguments": {"recipient_email": "ann@z.com", "body": "Hi"}}"#).await;
+    assert!(waiting.contains("waiting for the person's approval"), "{waiting}");
+    assert!(!calls.lock().unwrap().iter().any(|c| c.contains("execute/GMAIL_SEND_EMAIL")), "not sent yet");
+    let (_, bot) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    let thread = bot["bot"]["threadId"].as_str().unwrap().to_string();
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+    let card = page["messages"].as_array().unwrap().iter().rev().find(|m| m["kind"] == "team-change").unwrap().clone();
+    assert_eq!(card["teamChange"]["title"], "Gmail › GMAIL_SEND_EMAIL");
+    assert!(card["teamChange"]["lines"].to_string().contains("ann@z.com"));
+    let (_, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{}", card["id"].as_str().unwrap()), Some(json!({ "approve": true }))).await;
+    assert_eq!(answered["state"], "done", "{answered}");
+    assert!(calls.lock().unwrap().iter().any(|c| c.contains("execute/GMAIL_SEND_EMAIL") && c.contains("ann@z.com")));
+
+    // A second account: the bot has to say which.
+    s.call("POST", "/api/composio/connect", Some(json!({ "toolkit": "gmail", "name": "Gmail", "alias": "work" }))).await;
+    let which = ask(&mut events, r#"catbot-tool: app_tool_run {"tool": "GMAIL_FETCH_EMAILS", "arguments": {}}"#).await;
+    assert!(which.contains("several accounts") && which.contains("personal") && which.contains("work"), "{which}");
+    let chosen = ask(&mut events, r#"catbot-tool: app_tool_run {"tool": "GMAIL_FETCH_EMAILS", "arguments": {}, "account": "work"}"#).await;
+    assert!(chosen.contains("\"connected_account_id\": \"ca_2\""), "{chosen}");
+
+    // An account removed, then the app: disconnected at Composio too.
+    assert_eq!(s.call("DELETE", "/api/composio/accounts/ca_2", None).await.0, 200);
+    assert_eq!(s.call("DELETE", "/api/composio/apps/gmail", None).await.0, 200);
+    assert!(calls.lock().unwrap().iter().any(|c| c.starts_with("DELETE /api/v3/connected_accounts/ca_1")));
+    assert_eq!(s.call("GET", "/api/composio", None).await.1["apps"], json!([]));
+    assert_eq!(s.call("DELETE", "/api/composio", None).await.1["connected"], false);
+}
