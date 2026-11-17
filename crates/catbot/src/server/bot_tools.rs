@@ -76,7 +76,7 @@ pub async fn route(app: &Arc<App>, call: bool, req: Request) -> Answer {
     }
     let answer = match name {
         "page_publish" => super::pages::propose(app, &grant, &args).await,
-        "trigger_info" | "trigger" | "delete_trigger" => super::triggers::call(app, &grant, name, &args),
+        "trigger_info" | "trigger" | "delete_trigger" => super::triggers::call(app, &grant, name, &args).await,
         _ if name.starts_with("mail_") => super::email::call(app, &grant, name, &args).await,
         _ if super::apps::knows(app, &grant.bot_id, name) => super::apps::call(app, &grant, name, &args).await,
         _ if super::composio::knows(name) => super::composio::call_tool(app, &grant, name, &args).await,

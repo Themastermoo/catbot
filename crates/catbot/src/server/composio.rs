@@ -131,7 +131,7 @@ async fn accounts(c: &Composio) -> Result<Vec<Value>, String> {
 // ---- The bots' side --------------------------------------------------------------------------
 
 /// The apps a bot is ticked for.
-fn apps_of(c: &Composio, bot_id: &str) -> Vec<ComposioApp> {
+pub(super) fn apps_of(c: &Composio, bot_id: &str) -> Vec<ComposioApp> {
     c.apps.iter().filter(|a| a.bots.iter().any(|b| b == bot_id)).cloned().collect()
 }
 
@@ -160,6 +160,11 @@ pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": { "tool": { "type": "string" } }, "required": ["tool"] },
         }),
         json!({
+            "name": "app_events_find",
+            "description": "The events a connected app of yours can start a trigger on (a new email, a new Slack message, a new GitHub issue), with the settings each takes. Set one up with the trigger tool (when: \"app\").",
+            "inputSchema": { "type": "object", "properties": { "app": { "type": "string" } }, "required": ["app"] },
+        }),
+        json!({
             "name": "app_tool_run",
             "description": "Run a connected app's tool with its inputs. One that only reads runs at once; anything else shows the person exactly what you asked for, and runs when they approve it (you hear how it went with their next message). If the app has several accounts, name one as account.",
             "inputSchema": { "type": "object", "properties": {
@@ -172,11 +177,11 @@ pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
 }
 
 pub fn knows(name: &str) -> bool {
-    matches!(name, "app_tools_find" | "app_tool_inputs" | "app_tool_run")
+    matches!(name, "app_tools_find" | "app_tool_inputs" | "app_tool_run" | "app_events_find")
 }
 
 /// The account to run a tool as: the one named, or the app's only active one.
-async fn account_for(c: &Composio, toolkit: &str, named: Option<&str>) -> Result<String, String> {
+pub(super) async fn account_for(c: &Composio, toolkit: &str, named: Option<&str>) -> Result<String, String> {
     let all = accounts(c).await?;
     let active: Vec<&Value> = all.iter().filter(|a| a["toolkit"]["slug"] == toolkit && a["status"] == "ACTIVE").collect();
     if let Some(named) = named.filter(|n| !n.trim().is_empty()) {
@@ -240,6 +245,17 @@ pub async fn call_tool(app: &Arc<App>, grant: &Grant, name: &str, args: &Value) 
             }
             Ok(format!("{}{account_line}\napp_tool_inputs shows what one takes.", lines.join("\n")))
         }
+        "app_events_find" => {
+            let toolkit = args["app"].as_str().unwrap_or_default().trim().to_lowercase();
+            if !allowed(&toolkit) {
+                return Err(format!("you may not use {toolkit:?}"));
+            }
+            let events = event_types(&c, &toolkit).await?;
+            if events.is_empty() {
+                return Ok(format!("{toolkit} has no events to start a trigger on."));
+            }
+            Ok(events.iter().map(|e| format!("{} ({}): {}\nsettings: {}", e["event"].as_str().unwrap_or_default(), e["name"].as_str().unwrap_or_default(), e["description"].as_str().unwrap_or_default(), e["config"])).collect::<Vec<_>>().join("\n\n"))
+        }
         "app_tool_inputs" => {
             let slug = args["tool"].as_str().unwrap_or_default().trim().to_string();
             let info = tool_info(&c.key, &slug).await?;
@@ -296,6 +312,37 @@ pub async fn run_approved(app: &App, body: &Value) -> Result<String, String> {
     Ok(format!("Done. It answered: {short}"))
 }
 
+// ---- App events (stage 16.3) ------------------------------------------------------------------
+
+/// The events an app can start a trigger on: (slug, name, description, its settings as a JSON schema).
+pub async fn event_types(c: &Composio, toolkit: &str) -> Result<Vec<Value>, String> {
+    let found = call(&c.key, reqwest::Method::GET, &format!("/api/v3.1/triggers_types?toolkit_slugs={toolkit}&limit=100"), None).await?;
+    Ok(found["items"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .iter()
+        .map(|t| json!({ "event": t["slug"], "name": t["name"], "description": t["description"].as_str().map(|d| d.chars().take(300).collect::<String>()), "config": t["config"] }))
+        .collect())
+}
+
+/// Starts (or changes) Composio's watch for an event, sending each one to `deliver`: its id.
+pub async fn upsert_event(c: &Composio, event: &str, account: &str, config: &Value, deliver: &str) -> Result<String, String> {
+    let made = call(&c.key, reqwest::Method::POST, &format!("/api/v3.1/trigger_instances/{event}/upsert"), Some(json!({ "connected_account_id": account, "trigger_config": config, "egress_url": deliver }))).await?;
+    made["trigger_id"].as_str().map(str::to_string).ok_or_else(|| "Composio didn't say which watch it made".into())
+}
+
+pub async fn switch_event(c: &Composio, instance: &str, on: bool) -> Result<(), String> {
+    call(&c.key, reqwest::Method::PATCH, &format!("/api/v3.1/trigger_instances/manage/{instance}"), Some(json!({ "status": if on { "enable" } else { "disable" } }))).await.map(|_| ())
+}
+
+pub async fn delete_event(c: &Composio, instance: &str) -> Result<(), String> {
+    match call(&c.key, reqwest::Method::DELETE, &format!("/api/v3.1/trigger_instances/manage/{instance}"), None).await {
+        Err(why) if why.contains("404") => Ok(()),
+        other => other.map(|_| ()),
+    }
+}
+
 // ---- The person's side: Settings › Apps › Composio -------------------------------------------
 
 async fn shown(app: &App, c: &Composio) -> Value {
@@ -328,7 +375,8 @@ async fn session(key: &str, user_id: &str) -> Result<String, String> {
 /// `GET`/`PUT`/`DELETE /api/composio`, `GET /api/composio/toolkits?search=` (`query` is the
 /// search), `POST
 /// /api/composio/connect` `{toolkit, name, alias}`, `PUT /api/composio/apps/:toolkit` `{bots}`,
-/// `DELETE /api/composio/apps/:toolkit`, `DELETE /api/composio/accounts/:id`.
+/// `DELETE /api/composio/apps/:toolkit`, `DELETE /api/composio/accounts/:id`, `GET
+/// /api/composio/events?search=<toolkit>` (what an app's triggers can start on).
 pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>, query: Option<String>) -> Answer {
     let body = body.unwrap_or_default();
     let mut c = settings(app);
@@ -369,6 +417,13 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<
                 .map(|t| json!({ "toolkit": t["slug"], "name": t["name"], "description": t["meta"]["description"].as_str().map(|d| d.chars().take(160).collect::<String>()), "noAuth": t["no_auth"] }))
                 .collect();
             Ok((StatusCode::OK, json!({ "toolkits": list })))
+        }
+        (&Method::GET, ["events"]) => {
+            if c.key.is_empty() {
+                return Err(bad("add the Composio key first"));
+            }
+            let toolkit: String = query.unwrap_or_default().chars().filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_').collect();
+            Ok((StatusCode::OK, json!({ "events": event_types(&c, &toolkit).await.map_err(bad)? })))
         }
         (&Method::POST, ["connect"]) => {
             if c.key.is_empty() {

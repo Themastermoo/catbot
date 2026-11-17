@@ -2280,6 +2280,9 @@ async fn fake_composio() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>
                     };
                     answer(200, json!({ "items": items, "next_cursor": null }))
                 }
+                ("GET", "/api/v3.1/triggers_types") => answer(200, json!({ "items": [{ "slug": "GMAIL_NEW_GMAIL_MESSAGE", "name": "New Gmail message", "description": "A new message arrives.", "config": { "type": "object", "properties": { "labelIds": { "type": "string" } } } }] })),
+                ("POST", "/api/v3.1/trigger_instances/GMAIL_NEW_GMAIL_MESSAGE/upsert") => answer(201, json!({ "trigger_id": "ti_1", "type": "poll" })),
+                ("PATCH" | "DELETE", "/api/v3.1/trigger_instances/manage/ti_1") => answer(200, json!({ "status": "success" })),
                 ("POST", p) if p.starts_with("/api/v3.1/tools/execute/") => {
                     let slug = p.rsplit('/').next().unwrap();
                     answer(200, json!({ "successful": true, "error": null, "data": { "ran": slug, "with": serde_json::from_str::<Value>(&body).unwrap() } }))
@@ -2363,4 +2366,67 @@ async fn composio_apps_connect_in_the_browser_and_their_writes_ask_first() {
     assert!(calls.lock().unwrap().iter().any(|c| c.starts_with("DELETE /api/v3/connected_accounts/ca_1")));
     assert_eq!(s.call("GET", "/api/composio", None).await.1["apps"], json!([]));
     assert_eq!(s.call("DELETE", "/api/composio", None).await.1["connected"], false);
+}
+
+#[tokio::test]
+async fn an_app_event_from_composio_starts_its_bot() {
+    use catbot::server::triggers;
+    let s = setup().await;
+    let (api, calls) = fake_composio().await;
+    // SAFETY: only these tests read them; the public address is the remote door's.
+    unsafe {
+        std::env::set_var("CATBOT_COMPOSIO_API", &api);
+        std::env::set_var("CATBOT_PUBLIC_URL", &s.away);
+    }
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let event = json!({ "botId": scout, "kind": "app", "name": "Seed mail", "prompt": "Tell me what came.", "app": { "toolkit": "gmail", "event": "GMAIL_NEW_GMAIL_MESSAGE", "config": { "labelIds": "INBOX" } } });
+
+    // Needs Composio, the app, and the bot ticked for it.
+    assert!(s.call("POST", "/api/triggers", Some(event.clone())).await.1["error"].as_str().unwrap().contains("Composio"));
+    s.call("PUT", "/api/composio", Some(json!({ "key": "ak_good" }))).await;
+    s.call("POST", "/api/composio/connect", Some(json!({ "toolkit": "gmail", "name": "Gmail" }))).await;
+    assert!(s.call("POST", "/api/triggers", Some(event.clone())).await.1["error"].as_str().unwrap().contains("isn't ticked"));
+    s.call("PUT", "/api/composio/apps/gmail", Some(json!({ "bots": [scout] }))).await;
+    let (_, kinds) = s.call("GET", "/api/composio/events?search=gmail", None).await;
+    assert_eq!(kinds["events"][0]["event"], "GMAIL_NEW_GMAIL_MESSAGE");
+
+    let (status, made) = s.call("POST", "/api/triggers", Some(event)).await;
+    assert_eq!(status, 201, "{made}");
+    let trigger = made["trigger"].clone();
+    let id = trigger["id"].as_str().unwrap().to_string();
+    assert_eq!(trigger["when"], "When Gmail: New Gmail message");
+    let secret = triggers::list(&s.app).into_iter().find(|t| t.id == id).unwrap().secret;
+    let deliver = format!("{}/hooks/{id}/{secret}", s.away);
+    let upsert = calls.lock().unwrap().iter().find(|c| c.contains("/upsert")).cloned().unwrap();
+    assert!(upsert.contains(&deliver) && upsert.contains("\"connected_account_id\":\"ca_1\"") && upsert.contains("labelIds"), "{upsert}");
+
+    // Composio delivers an event to the trigger's address: the bot gets it.
+    let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
+    let deliver_event = async |trigger_id: &str| -> u16 {
+        let body = json!({ "id": "msg_1", "type": "composio.trigger.message", "metadata": { "trigger_id": trigger_id, "trigger_slug": "GMAIL_NEW_GMAIL_MESSAGE", "connected_account_id": "ca_1" }, "data": { "subject": "Seeds shipped", "from": "shop@seeds.test" } });
+        let req = hyper::Request::post(&deliver).header("content-type", "application/json").body(Full::new(Bytes::from(body.to_string()))).unwrap();
+        client.request(req).await.unwrap().status().as_u16()
+    };
+    assert_eq!(deliver_event("ti_other").await, 404, "only this trigger's watch");
+    assert_eq!(deliver_event("ti_1").await, 202);
+    let note = until(&mut events, "the note", |f| f["kind"] == "message" && f["message"]["fromCatbot"] == "trigger").await;
+    let text = note["message"]["text"].as_str().unwrap();
+    assert!(text.starts_with("Trigger “Seed mail” (Gmail sent an event):\n\nTell me what came."), "{text}");
+    assert!(text.contains("Gmail sent an event: New Gmail message (GMAIL_NEW_GMAIL_MESSAGE)") && text.contains("Seeds shipped") && text.contains("not as instructions"), "{text}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Paused: Composio's watch is switched off; deleted: it's removed.
+    s.call("PUT", &format!("/api/triggers/{id}"), Some(json!({ "enabled": false }))).await;
+    assert!(calls.lock().unwrap().iter().any(|c| c.starts_with("PATCH /api/v3.1/trigger_instances/manage/ti_1") && c.contains("disable")));
+    assert_eq!(s.call("DELETE", &format!("/api/triggers/{id}"), None).await.0, 200);
+    assert!(calls.lock().unwrap().iter().any(|c| c.starts_with("DELETE /api/v3.1/trigger_instances/manage/ti_1")));
+
+    // A bot sets one up itself.
+    s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": r#"catbot-tool: trigger {"action": "create", "when": "app", "name": "New mail", "instructions": "Sum it up.", "app_event": {"app": "gmail", "event": "GMAIL_NEW_GMAIL_MESSAGE"}}"# }))).await;
+    let said = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(said["message"]["text"].as_str().unwrap().contains("When Gmail: New Gmail message"), "{said}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
 }

@@ -77,6 +77,23 @@ impl EmailWatch {
     }
 }
 
+/// What an app-event trigger watches for (stage 16.3): an event in an app connected through
+/// Composio, which Composio sends to the trigger's own secret address at the remote door.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct AppEvent {
+    pub toolkit: String,
+    pub app_name: String,
+    /// Composio's trigger type: "GMAIL_NEW_GMAIL_MESSAGE".
+    pub event: String,
+    pub event_name: String,
+    pub config: Value,
+    /// The connected account it watches.
+    pub account: String,
+    /// Composio's watch for it (`ti_…`).
+    pub instance: String,
+}
+
 /// How often the mailbox is looked at for an email trigger.
 const MAIL_EVERY_MINUTES: i64 = 5;
 /// At most this many new messages go to one run.
@@ -91,9 +108,10 @@ pub struct Trigger {
     /// What the bot is asked to do each time.
     pub prompt: String,
     pub enabled: bool,
-    /// "schedule", "webhook" or "email".
+    /// "schedule", "webhook", "email" or "app".
     pub kind: String,
     pub email: Option<EmailWatch>,
+    pub app_event: Option<AppEvent>,
     /// Where the last look at the mailbox left off: the folder's UID validity and newest UID.
     pub mail_seen: Option<(u32, u32)>,
     pub last_checked: Option<String>,
@@ -277,6 +295,10 @@ impl Trigger {
         match (self.kind.as_str(), &self.schedule) {
             ("schedule", Some(s)) => s.words(),
             ("webhook", _) => "When its address is called".into(),
+            ("app", _) => {
+                let e = self.app_event.clone().unwrap_or_default();
+                format!("When {}: {}", e.app_name, if e.event_name.is_empty() { e.event.as_str() } else { e.event_name.as_str() })
+            }
             ("email", _) => {
                 let watch = self.email.clone().unwrap_or_default();
                 let mut words = "When an email arrives".to_string();
@@ -367,8 +389,12 @@ pub fn create(app: &App, body: &Value, by: &str) -> Result<Trigger, String> {
         "schedule" => "schedule",
         "webhook" => "webhook",
         "email" => "email",
-        other => return Err(format!("{other:?} isn't a kind of trigger; use schedule, webhook or email")),
+        "app" => "app",
+        other => return Err(format!("{other:?} isn't a kind of trigger; use schedule, webhook, email or app")),
     };
+    if kind == "app" && by != "app-event" {
+        return Err("an app event is set up through create_app".into());
+    }
     if kind == "email" {
         let m = super::email::mailbox(app).ok_or("connect a mailbox first (Settings › Email)")?;
         if !m.bots.contains(&bot.id) {
@@ -380,7 +406,7 @@ pub fn create(app: &App, body: &Value, by: &str) -> Result<Trigger, String> {
         bot_id: bot.id,
         enabled: body["enabled"].as_bool().unwrap_or(true),
         kind: kind.into(),
-        secret: if kind == "webhook" { new_secret() } else { String::new() },
+        secret: if kind == "webhook" || kind == "app" { new_secret() } else { String::new() },
         created_at: now(),
         created_by: by.to_string(),
         ..Trigger::default()
@@ -485,6 +511,82 @@ fn plain_schedule(given: &Value) -> Value {
     s
 }
 
+/// A new app-event trigger (stage 16.3): kept, then Composio is asked to watch for the event and
+/// send each one to the trigger's own secret address. If Composio won't, the trigger isn't kept.
+/// `body.app` is `{toolkit, event, config, account}`; `by` as for `create`.
+pub async fn create_app(app: &App, body: &Value, by: &str) -> Result<Trigger, String> {
+    let c = super::composio::settings(app);
+    if c.key.is_empty() {
+        return Err("app events come through Composio: add its key in Settings › Apps first".into());
+    }
+    let bot_id = body["botId"].as_str().ok_or("which bot?")?;
+    let toolkit = body["app"]["toolkit"].as_str().map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).ok_or("which app?")?;
+    let Some(connected) = super::composio::apps_of(&c, bot_id).into_iter().find(|a| a.toolkit == toolkit) else {
+        return Err(format!("that bot isn't ticked for {toolkit} (Settings › Apps)"));
+    };
+    let event = body["app"]["event"].as_str().map(|s| s.trim().to_uppercase()).filter(|s| !s.is_empty()).ok_or("which event? (app_events_find lists them)")?;
+    let types = super::composio::event_types(&c, &toolkit).await?;
+    let found = types.iter().find(|t| t["event"] == event.as_str()).ok_or_else(|| format!("{toolkit} has no event {event}"))?;
+    let account = super::composio::account_for(&c, &toolkit, body["app"]["account"].as_str()).await?;
+    let (base, public) = super::pages::base_url(app).await;
+    if !public {
+        return Err("app events reach Catbot through the remote door's public address, and there isn't one yet (Devices)".into());
+    }
+    let mut asked = body.clone();
+    asked["kind"] = json!("app");
+    let made = create(app, &asked, "app-event")?;
+    let watch = AppEvent {
+        toolkit: toolkit.clone(),
+        app_name: connected.name.clone(),
+        event: event.clone(),
+        event_name: found["name"].as_str().unwrap_or_default().to_string(),
+        config: if body["app"]["config"].is_object() { body["app"]["config"].clone() } else { json!({}) },
+        account,
+        instance: String::new(),
+    };
+    let deliver = format!("{base}/hooks/{}/{}", made.id, made.secret);
+    match super::composio::upsert_event(&c, &event, &watch.account, &watch.config, &deliver).await {
+        Ok(instance) => {
+            let created_by = by.to_string();
+            change(app, &made.id, |t| {
+                t.app_event = Some(AppEvent { instance, ..watch.clone() });
+                t.created_by = created_by;
+            })
+            .ok_or_else(|| "the trigger vanished".to_string())
+        }
+        Err(why) => {
+            let _ = delete(app, &made.id);
+            Err(why)
+        }
+    }
+}
+
+/// After an app-event trigger is paused or turned back on: Composio's watch follows it (and,
+/// turned on, is pointed at the remote door's address as it is now).
+pub async fn sync_app(app: &App, trigger: &Trigger) -> Result<(), String> {
+    let Some(e) = trigger.app_event.as_ref().filter(|e| !e.instance.is_empty()) else { return Ok(()) };
+    let c = super::composio::settings(app);
+    if c.key.is_empty() {
+        return Err("Composio isn't set up any more".into());
+    }
+    if trigger.enabled {
+        let (base, _) = super::pages::base_url(app).await;
+        let deliver = format!("{base}/hooks/{}/{}", trigger.id, trigger.secret);
+        super::composio::upsert_event(&c, &e.event, &e.account, &e.config, &deliver).await?;
+    }
+    super::composio::switch_event(&c, &e.instance, trigger.enabled).await
+}
+
+/// Composio's watch for a deleted app-event trigger goes too.
+pub async fn unwatch_app(app: &App, trigger: &Trigger) -> Result<(), String> {
+    let Some(e) = trigger.app_event.as_ref().filter(|e| !e.instance.is_empty()) else { return Ok(()) };
+    let c = super::composio::settings(app);
+    if c.key.is_empty() {
+        return Ok(());
+    }
+    super::composio::delete_event(&c, &e.instance).await
+}
+
 pub fn update(app: &App, id: &str, body: &Value) -> Result<Trigger, String> {
     let mut problem = None;
     let changed = change(app, id, |t| {
@@ -529,6 +631,7 @@ pub fn shown(app: &App, trigger: &Trigger, latest: Option<&Run>) -> Value {
         "threadId": trigger.thread,
         "hasAddress": trigger.kind == "webhook",
         "email": trigger.email,
+        "appEvent": trigger.app_event.as_ref().map(|e| json!({ "toolkit": e.toolkit, "appName": e.app_name, "event": e.event, "eventName": e.event_name, "config": e.config })),
         "lastChecked": trigger.last_checked,
         "problem": trigger.problem,
         "nextAt": trigger.next_at,
@@ -553,16 +656,25 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<
     let body = body.unwrap_or_default();
     match (method, rest) {
         (&Method::GET, []) => Ok((StatusCode::OK, all_shown(app))),
+        (&Method::POST, []) if body["kind"] == "app" => {
+            let made = create_app(app, &body, "person").await.map_err(bad)?;
+            Ok((StatusCode::CREATED, json!({ "trigger": shown(app, &made, None) })))
+        }
         (&Method::POST, []) => {
             let made = create(app, &body, "person").map_err(bad)?;
             Ok((StatusCode::CREATED, json!({ "trigger": shown(app, &made, None) })))
         }
         (&Method::PUT, [id]) => {
+            let before = list(app).into_iter().find(|t| t.id == *id);
             let changed = update(app, id, &body).map_err(bad)?;
+            if changed.kind == "app" && before.is_some_and(|b| b.enabled != changed.enabled) {
+                sync_app(app, &changed).await.map_err(bad)?;
+            }
             Ok((StatusCode::OK, json!({ "trigger": shown(app, &changed, None) })))
         }
         (&Method::DELETE, [id]) => {
-            delete(app, id).map_err(bad)?;
+            let gone = delete(app, id).map_err(bad)?;
+            unwatch_app(app, &gone).await.map_err(|why| bad(format!("deleted here, but Composio's watch is still there: {why}")))?;
             Ok((StatusCode::OK, json!({ "deleted": id })))
         }
         (&Method::POST, [id, "run"]) => {
@@ -659,6 +771,7 @@ pub fn start(app: &Arc<App>, trigger: &Trigger, source: &str, scheduled_for: Opt
         "manual" => "run by hand".to_string(),
         "webhook" => "its address was called".to_string(),
         "email" => "new mail came in".to_string(),
+        "app" => trigger.app_event.as_ref().map(|e| format!("{} sent an event", e.app_name)).unwrap_or_else(|| "an app sent an event".into()),
         "schedule" => {
             let when = trigger.when();
             when.chars().next().map(|c| c.to_lowercase().collect::<String>() + &when[c.len_utf8()..]).unwrap_or(when)
@@ -730,7 +843,12 @@ pub fn tick(app: &Arc<App>, now: DateTime<Local>) {
     for trigger in list(app) {
         if app.with_store(|store| store.bot_by_id(&trigger.bot_id)).flatten().is_none() {
             // Its bot was deleted: so is the trigger, of whatever kind.
-            let _ = delete(app, &trigger.id);
+            if let Ok(gone) = delete(app, &trigger.id) {
+                let app = app.clone();
+                tokio::spawn(async move {
+                    let _ = unwatch_app(&app, &gone).await;
+                });
+            }
             continue;
         }
         if !trigger.enabled || trigger.kind != "schedule" {
@@ -832,7 +950,8 @@ pub fn tools() -> Vec<Value> {
                 "name": { "type": "string", "description": "A few words, shown in the Triggers list and as its chat's name." },
                 "instructions": { "type": "string", "description": "What to do each time." },
                 "schedule": { "type": "object", "description": "When it runs; see above." },
-                "when": { "type": "string", "enum": ["schedule", "webhook", "email"], "description": "webhook: it runs when another app calls its address. email: it runs when mail arrives in the person's mailbox (looked at every 5 minutes; only if you may use the mailbox). Leave out for a schedule." },
+                "app_event": { "type": "object", "description": "For when: app. app (its id, from app_tools_find), event (from app_events_find), config (the settings it takes), and account if the app has several.", "properties": { "app": { "type": "string" }, "event": { "type": "string" }, "config": { "type": "object" }, "account": { "type": "string" } } },
+                "when": { "type": "string", "enum": ["schedule", "webhook", "email", "app"], "description": "webhook: it runs when another app calls its address. email: it runs when mail arrives in the person's mailbox (looked at every 5 minutes; only if you may use the mailbox). app: it runs when something happens in a connected app of yours (see app_events_find). Leave out for a schedule." },
                 "email": { "type": "object", "description": "For when: email. folder (INBOX if left out), and optionally from (an address or name) and subject (words in it).", "properties": { "folder": { "type": "string" }, "from": { "type": "string" }, "subject": { "type": "string" } } },
             }, "required": ["action"] },
         }),
@@ -886,7 +1005,7 @@ fn card(app: &App, thread: &str, bot_name: &str, action: &str, trigger: &Trigger
 }
 
 /// One of the bots' trigger tools. A bot sees and changes only its own triggers.
-pub fn call(app: &Arc<App>, grant: &super::bot_tools::Grant, name: &str, args: &Value) -> Result<String, String> {
+pub async fn call(app: &Arc<App>, grant: &super::bot_tools::Grant, name: &str, args: &Value) -> Result<String, String> {
     let bot = app.with_store(|store| store.bot_by_id(&grant.bot_id)).flatten().ok_or("the bot is gone")?;
     let mine = of_bot(app, &bot.id);
     let all_runs = runs(app);
@@ -928,8 +1047,17 @@ pub fn call(app: &Arc<App>, grant: &super::bot_tools::Grant, name: &str, args: &
                     if args["when"] == "webhook" || args["when"] == "email" {
                         body["kind"] = args["when"].clone();
                     }
-                    let made = create(app, &body, &bot.id)?;
+                    let made = if args["when"] == "app" {
+                        let e = &args["app_event"];
+                        body["app"] = json!({ "toolkit": e["app"], "event": e["event"], "config": e["config"], "account": e["account"] });
+                        create_app(app, &body, &bot.id).await?
+                    } else {
+                        create(app, &body, &bot.id)?
+                    };
                     card(app, &grant.thread, &bot.name, "created", &made, None);
+                    if made.kind == "app" {
+                        return Ok(format!("Set up “{}” ({}), id {}. Composio sends each event to Catbot, and you get it in the trigger's own chat.", made.name, made.when(), made.id));
+                    }
                     if made.kind == "email" {
                         return Ok(format!("Set up “{}” ({}), id {}. Catbot looks at the mailbox every {MAIL_EVERY_MINUTES} minutes; mail already there doesn't count.", made.name, made.when(), made.id));
                     }
@@ -947,6 +1075,9 @@ pub fn call(app: &Arc<App>, grant: &super::bot_tools::Grant, name: &str, args: &
                 "pause" | "resume" => {
                     let before = find(args["trigger_id"].as_str())?;
                     let changed = update(app, &before.id, &json!({ "enabled": action == "resume" }))?;
+                    if changed.kind == "app" {
+                        sync_app(app, &changed).await?;
+                    }
                     card(app, &grant.thread, &bot.name, if action == "pause" { "paused" } else { "resumed" }, &changed, Some(&before));
                     Ok(format!("“{}” is {}.", changed.name, if changed.enabled { "on" } else { "paused" }))
                 }
@@ -965,6 +1096,7 @@ pub fn call(app: &Arc<App>, grant: &super::bot_tools::Grant, name: &str, args: &
         "delete_trigger" => {
             let one = find(args["trigger_id"].as_str())?;
             delete(app, &one.id)?;
+            unwatch_app(app, &one).await?;
             card(app, &grant.thread, &bot.name, "deleted", &one, None);
             Ok(format!("Deleted “{}”. Its chat stays.", one.name))
         }

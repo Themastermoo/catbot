@@ -101,6 +101,7 @@ fn TriggerRow(trigger: Value, on_edit: EventHandler<Value>, on_close: EventHandl
     let mut showing_address = use_signal(|| false);
     let has_address = trigger["hasAddress"].as_bool().unwrap_or(false);
     let watches_mail = trigger["kind"] == "email";
+    let watches_app = trigger["appEvent"]["appName"].as_str().map(str::to_string);
     let problem_now = trigger["problem"].as_str().map(str::to_string);
     let id = trigger["id"].as_str().unwrap_or_default().to_string();
     let name = trigger["name"].as_str().unwrap_or_default().to_string();
@@ -148,7 +149,7 @@ fn TriggerRow(trigger: Value, on_edit: EventHandler<Value>, on_close: EventHandl
                         div { class: "text-[12px] text-danger", "Can't look: {p}" }
                     }
                     div { class: "text-[11px] text-ink-tertiary",
-                        if has_address { if on { "Waiting for its address to be called" } else { "Not listening" } } else if watches_mail { if on { "Looks at the mailbox every 5 minutes" } else { "Not looking" } } else if let Some(next) = &next { "Next: {next}" } else if on { "Doesn't run again" } else { "Not running" }
+                        if has_address { if on { "Waiting for its address to be called" } else { "Not listening" } } else if let Some(app_name) = &watches_app { if on { "Waiting for {app_name} to send an event" } else { "Not listening" } } else if watches_mail { if on { "Looks at the mailbox every 5 minutes" } else { "Not looking" } } else if let Some(next) = &next { "Next: {next}" } else if on { "Doesn't run again" } else { "Not running" }
                         if let Some((status, words)) = &last {
                             span { class: if status == "failed" { "text-danger" } else { "" }, " · {words}" }
                         }
@@ -209,7 +210,7 @@ fn TriggerRow(trigger: Value, on_edit: EventHandler<Value>, on_close: EventHandl
                         {
                             let at = run["startedAt"].as_str().map(parse_time).filter(|t| !t.is_nan()).map(short_when).unwrap_or_default();
                             let status = run["status"].as_str().unwrap_or_default().to_string();
-                            let source = match run["source"].as_str() { Some("manual") => "by hand", Some("schedule") => "on time", Some(other) => other, None => "" }.to_string();
+                            let source = match run["source"].as_str() { Some("manual") => "by hand", Some("schedule") => "on time", Some("app") => "app event", Some(other) => other, None => "" }.to_string();
                             let said = run["output"].as_str().or(run["error"].as_str()).unwrap_or_default().lines().next().unwrap_or_default().chars().take(140).collect::<String>();
                             rsx! {
                                 div { key: "{run[\"id\"].as_str().unwrap_or_default()}", class: "flex gap-2 text-[12px]",
@@ -286,6 +287,7 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
     let start_kind = match trigger["kind"].as_str() {
         Some("webhook") => "webhook".to_string(),
         Some("email") => "email".to_string(),
+        Some("app") => "app".to_string(),
         _ => s["type"].as_str().unwrap_or("weekly").to_string(),
     };
     // A trigger keeps its kind: a schedule stays a schedule, a webhook a webhook, and so on.
@@ -293,12 +295,41 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
     let mut mail_from = use_signal(|| trigger["email"]["from"].as_str().unwrap_or_default().to_string());
     let mut mail_subject = use_signal(|| trigger["email"]["subject"].as_str().unwrap_or_default().to_string());
     let mut mail_folder = use_signal(|| trigger["email"]["folder"].as_str().unwrap_or("INBOX").to_string());
+    // An app event: the app, the event, and its settings (name, value).
+    let mut app_toolkit = use_signal(|| trigger["appEvent"]["toolkit"].as_str().unwrap_or_default().to_string());
+    let mut app_event = use_signal(|| trigger["appEvent"]["event"].as_str().unwrap_or_default().to_string());
+    let mut app_config = use_signal(|| {
+        trigger["appEvent"]["config"].as_object().map(|o| o.iter().map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string()))).collect::<Vec<_>>()).unwrap_or_default()
+    });
+    let mut composio_apps = use_signal(Vec::<Value>::new);
+    let mut app_events = use_signal(Vec::<Value>::new);
     let start_days: Vec<u32> = s["days"].as_array().map(|d| d.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect()).unwrap_or_else(|| vec![1, 2, 3, 4, 5]);
     let first_bot = state.read().bots.iter().find(|b| b.channel.is_none()).map(|b| b.id.clone()).unwrap_or_default();
     let mut bot = use_signal(|| trigger["botId"].as_str().map(str::to_string).unwrap_or(first_bot));
     let mut name = use_signal(|| trigger["name"].as_str().unwrap_or_default().to_string());
     let mut prompt = use_signal(|| trigger["prompt"].as_str().unwrap_or_default().to_string());
     let mut kind = use_signal(|| start_kind);
+    use_effect(move || {
+        if kind() != "app" {
+            return;
+        }
+        spawn(async move {
+            if let Ok(found) = api::get("/api/composio").await {
+                composio_apps.set(found["apps"].as_array().cloned().unwrap_or_default());
+            }
+        });
+    });
+    use_effect(move || {
+        let toolkit = app_toolkit();
+        if kind() != "app" || toolkit.is_empty() {
+            return;
+        }
+        spawn(async move {
+            if let Ok(found) = api::get(&format!("/api/composio/events?search={toolkit}")).await {
+                app_events.set(found["events"].as_array().cloned().unwrap_or_default());
+            }
+        });
+    });
     let mut at = use_signal(|| s["at"].as_str().map(|a| a.chars().take(16).collect()).unwrap_or_else(|| local_now(60.0)));
     let mut time = use_signal(|| s["time"].as_str().unwrap_or("09:00").to_string());
     let mut days = use_signal(|| start_days);
@@ -316,6 +347,19 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
         if kind() == "webhook" {
             if is_new {
                 body["kind"] = json!("webhook");
+            }
+        } else if kind() == "app" {
+            if is_new {
+                body["kind"] = json!("app");
+                let config: serde_json::Map<String, Value> = app_config()
+                    .into_iter()
+                    .filter(|(_, v)| !v.trim().is_empty())
+                    .map(|(k, v)| {
+                        let typed = v.trim().parse::<i64>().map(Value::from).or_else(|_| v.trim().parse::<bool>().map(Value::from)).unwrap_or(Value::from(v));
+                        (k, typed)
+                    })
+                    .collect();
+                body["app"] = json!({ "toolkit": app_toolkit(), "event": app_event(), "config": config });
             }
         } else if kind() == "email" {
             if is_new {
@@ -394,20 +438,74 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
             }
             div { class: "flex flex-col gap-2",
                 span { class: "text-[12px] text-ink-secondary", "When" }
-                div { role: "radiogroup", class: "flex gap-1",
-                    for (value, label) in [("weekly", "On days at a time"), ("interval", "Every so often"), ("once", "Once"), ("webhook", "When called (webhook)"), ("email", "When an email arrives")] {
+                div { role: "radiogroup", class: "flex flex-wrap gap-1",
+                    for (value, label) in [("weekly", "On days at a time"), ("interval", "Every so often"), ("once", "Once"), ("webhook", "When called (webhook)"), ("email", "When an email arrives"), ("app", "When something happens in an app")] {
                         button { key: "{value}", r#type: "button", role: "radio", "aria-checked": "{kind() == value}", "data-trigger-kind": "{value}",
                             disabled: existing_kind.as_deref().is_some_and(|k| {
-                                let this = match value { "webhook" => "webhook", "email" => "email", _ => "schedule" };
+                                let this = match value { "webhook" => "webhook", "email" => "email", "app" => "app", _ => "schedule" };
                                 k != this
                             }),
-                            class: if kind() == value { "rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-white" } else { "rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink-secondary" },
+                            class: if kind() == value { "whitespace-nowrap rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-white" } else { "whitespace-nowrap rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink-secondary" },
                             onclick: move |_| kind.set(value.to_string()),
                             "{label}"
                         }
                     }
                 }
                 match kind().as_str() {
+                    "app" if !is_new => rsx! {
+                        p { class: "text-[12px] text-ink-secondary", "It watches for the same event. To watch for another, make a new trigger." }
+                    },
+                    "app" => rsx! {
+                        p { class: "text-[12px] leading-relaxed text-ink-secondary",
+                            "Composio watches the app and sends each event to this trigger's own address at the remote door, so it needs the remote door's public address (Devices). The bot has to be ticked for the app (Settings › Apps)."
+                        }
+                        if composio_apps.read().is_empty() {
+                            p { class: "text-[12px] text-warning", "No apps are connected through Composio yet (Settings › Apps)." }
+                        }
+                        div { class: "flex flex-wrap items-center gap-2 text-[13px] text-ink-secondary",
+                            "App"
+                            select { class: "{SMALL} w-44", "data-trigger-app": true,
+                                onchange: move |e| { app_toolkit.set(e.value()); app_event.set(String::new()); app_config.set(Vec::new()); },
+                                option { value: "", selected: app_toolkit().is_empty(), "Choose…" }
+                                for a in composio_apps() {
+                                    {
+                                        let tk = a["toolkit"].as_str().unwrap_or_default().to_string();
+                                        let nm = a["name"].as_str().unwrap_or_default().to_string();
+                                        rsx! { option { key: "{tk}", value: "{tk}", selected: app_toolkit() == tk, "{nm}" } }
+                                    }
+                                }
+                            }
+                            "Event"
+                            select { class: "{SMALL} min-w-0 flex-1", "data-trigger-app-event": true,
+                                onchange: move |e| {
+                                    let chosen = e.value();
+                                    // Its settings, empty to fill in.
+                                    let fields: Vec<(String, String)> = app_events().iter().find(|x| x["event"] == chosen.as_str()).and_then(|x| x["config"]["properties"].as_object().map(|o| o.keys().map(|k| (k.clone(), String::new())).collect())).unwrap_or_default();
+                                    app_config.set(fields);
+                                    app_event.set(chosen);
+                                },
+                                option { value: "", selected: app_event().is_empty(), "Choose…" }
+                                for ev in app_events() {
+                                    {
+                                        let slug = ev["event"].as_str().unwrap_or_default().to_string();
+                                        let nm = ev["name"].as_str().unwrap_or_default().to_string();
+                                        rsx! { option { key: "{slug}", value: "{slug}", selected: app_event() == slug, "{nm}" } }
+                                    }
+                                }
+                            }
+                        }
+                        for (i, (field, value)) in app_config().into_iter().enumerate() {
+                            {
+                                let hint = app_events().iter().find(|x| x["event"] == app_event().as_str()).and_then(|x| x["config"]["properties"][&field]["description"].as_str().map(str::to_string)).unwrap_or_default();
+                                rsx! {
+                                    label { key: "{field}", class: "flex flex-col gap-0.5 text-[12px] text-ink-secondary",
+                                        "{field}"
+                                        input { class: "{SMALL}", placeholder: "{hint}", value: "{value}", oninput: move |e| { app_config.write()[i].1 = e.value(); } }
+                                    }
+                                }
+                            }
+                        }
+                    },
                     "email" => rsx! {
                         p { class: "text-[12px] leading-relaxed text-ink-secondary",
                             "Catbot looks at the mailbox (Settings › Email) every 5 minutes. Mail already there doesn't count; new mail that fits goes to the bot, several at once in one run. The bot has to be one that may use the mailbox."
