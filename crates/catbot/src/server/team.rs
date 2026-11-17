@@ -288,6 +288,16 @@ pub async fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -
         remember(app, thread, &format!("The person declined: {title}."));
         return Ok((StatusCode::OK, json!({ "ok": true, "state": "declined" })));
     }
+    // A card with a choice (where a page goes): the person's pick, if it's one of the card's own.
+    if detail["choice"].is_object() {
+        let options = detail["choice"]["options"].as_array().cloned().unwrap_or_default();
+        let picked = body["choice"].as_str().or(detail["choice"]["value"].as_str()).unwrap_or_default().to_string();
+        if !options.iter().any(|o| o["id"] == picked.as_str()) {
+            return Err(bad("that isn't one of the card's choices"));
+        }
+        detail["choice"]["value"] = json!(picked);
+        detail["body"]["choice"] = json!(picked);
+    }
     // Sending an email or publishing a page takes a moment: the card says so meanwhile.
     let slow = match detail["action"].as_str() {
         Some("send_mail") => Some("sending"),

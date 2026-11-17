@@ -66,8 +66,10 @@ pub struct Page {
     pub bot_id: String,
     pub thread: String,
     pub published_at: String,
-    /// "catbot" for now; "netlify" and "cloudflare" in 13.12.2.
+    /// "catbot", "netlify" or "cloudflare".
     pub host: String,
+    /// The page's own site there: Netlify's site id, or Cloudflare's project name.
+    pub site: String,
     pub url: String,
     pub files: usize,
     pub bytes: u64,
@@ -196,16 +198,27 @@ pub async fn propose(app: &Arc<App>, grant: &Grant, args: &Value) -> Result<Stri
         None => None,
     };
     let (_, public) = base_url(app).await;
+    let hosts = super::page_hosts::hosts(app);
+    // An update stays where it is; a new page's card asks where, when there's a choice.
+    let options = if update.is_some() { Vec::new() } else { hosts.options() };
     let shown: Vec<&str> = files.iter().take(8).map(|(_, r)| r.as_str()).collect();
     let mut lines = vec![format!("Files: {}{} ({} in all, {})", shown.join(", "), if files.len() > 8 { ", …" } else { "" }, files.len(), size_words(bytes))];
-    lines.push(if public {
-        "Where: served from this computer, at a link only those you give it to can find; up while the computer is on".into()
+    let here = if public {
+        "served from this computer, at a link only those you give it to can find; up while the computer is on"
     } else {
-        "Where: served from this computer, for this computer only (set up the remote door for a public link)".into()
-    });
-    if let Some(old) = &update {
-        lines.push(format!("Replaces the page at {}", old.url));
+        "served from this computer, for this computer only (set up the remote door for a public link)"
+    };
+    match &update {
+        Some(old) if old.host != "catbot" => lines.push(format!("Where: {}, replacing the page at {}", super::page_hosts::label(&old.host), old.url)),
+        Some(old) => lines.push(format!("Where: {here}; replaces the page at {}", old.url)),
+        None if options.len() > 1 => lines.push(if public {
+            "Where: pick below. On this computer it's up while the computer is on".to_string()
+        } else {
+            "Where: pick below. On this computer only this computer can open it (set up the remote door for a public link)".to_string()
+        }),
+        None => lines.push(format!("Where: {here}")),
     }
+    let public = public || options.len() > 1 || update.as_ref().is_some_and(|u| u.host != "catbot");
     let detail = json!({
         "kind": "team-change",
         "heading": format!("{} wants to publish a page", bot.name),
@@ -218,6 +231,14 @@ pub async fn propose(app: &Arc<App>, grant: &Grant, args: &Value) -> Result<Stri
         "body": { "source": source, "title": title, "botId": bot.id, "thread": grant.thread, "update": update.map(|u| u.id) },
         "state": "asking",
     });
+    let mut detail = detail;
+    if options.len() > 1 {
+        detail["choice"] = json!({
+            "label": "Where",
+            "options": options.iter().map(|(id, words)| json!({ "id": id, "label": words })).collect::<Vec<_>>(),
+            "value": hosts.start(),
+        });
+    }
     super::turns::save_and_send(app, &grant.thread, Role::Step, &format!("Page: {title}"), Some(&detail));
     Ok("It's waiting for the person's approval in the chat. You'll hear the link with their next message. Don't publish it again.".into())
 }
@@ -234,37 +255,73 @@ pub async fn publish(app: &Arc<App>, body: &Value) -> Result<String, String> {
     let files = gather(&source)?;
     let dir = pages_dir(app).ok_or("no pages folder")?;
     let mut list = pages(app);
-    let id = body["update"].as_str().filter(|u| list.iter().any(|p| p.id == *u)).map(str::to_string).unwrap_or_else(new_id);
+    let old = body["update"].as_str().and_then(|u| list.iter().find(|p| p.id == u)).cloned();
+    let id = old.as_ref().map(|p| p.id.clone()).unwrap_or_else(new_id);
+    let title = body["title"].as_str().unwrap_or("A page").to_string();
+    let host = match &old {
+        Some(p) => p.host.clone(),
+        None => body["choice"].as_str().unwrap_or("catbot").to_string(),
+    };
+    let bytes: u64 = files.iter().filter_map(|(p, _)| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    let mut page = Page {
+        id: id.clone(),
+        title: title.clone(),
+        bot_id: body["botId"].as_str().unwrap_or_default().to_string(),
+        thread: body["thread"].as_str().unwrap_or_default().to_string(),
+        published_at: chrono::Utc::now().to_rfc3339(),
+        host: host.clone(),
+        url: String::new(),
+        site: old.as_ref().map(|p| p.site.clone()).unwrap_or_default(),
+        files: files.len(),
+        bytes,
+    };
+    if host != "catbot" {
+        let hosts = super::page_hosts::hosts(app);
+        let site = (!page.site.is_empty()).then_some(page.site.as_str());
+        let (site, url) = match host.as_str() {
+            "netlify" if !hosts.netlify_token.is_empty() => super::page_hosts::netlify_publish(&hosts.netlify_token, &files, &title, site).await?,
+            "cloudflare" if !hosts.cloudflare_token.is_empty() => {
+                // wrangler uploads a folder: a copy of just the page's files.
+                let copy = dir.join(format!(".{id}-cloudflare"));
+                copy_files(&files, &copy)?;
+                let done = super::page_hosts::cloudflare_publish(&hosts, &copy, &title, site).await;
+                let _ = std::fs::remove_dir_all(&copy);
+                done?
+            }
+            _ => return Err(format!("{} isn't connected any more (Settings › Pages)", super::page_hosts::label(&host))),
+        };
+        page.site = site;
+        page.url = url.clone();
+        list.retain(|p| p.id != id);
+        list.push(page);
+        keep(app, &list)?;
+        return Ok(format!("It's at {url}, on {} (page id {id}).", super::page_hosts::label(&host)));
+    }
     let target = dir.join(&id);
     let staging = dir.join(format!(".{id}-new"));
-    let _ = std::fs::remove_dir_all(&staging);
-    for (from, relative) in &files {
-        let to = staging.join(relative);
+    copy_files(&files, &staging)?;
+    let _ = std::fs::remove_dir_all(&target);
+    std::fs::rename(&staging, &target).map_err(|e| e.to_string())?;
+    let (base, public) = base_url(app).await;
+    let url = format!("{base}/p/{id}/");
+    page.url = url.clone();
+    list.retain(|p| p.id != id);
+    list.push(page);
+    keep(app, &list)?;
+    Ok(if public { format!("It's at {url} (page id {id}).") } else { format!("It's at {url}, on this computer only (page id {id}).") })
+}
+
+/// The page's files, into a fresh folder.
+fn copy_files(files: &[(PathBuf, String)], into: &Path) -> Result<(), String> {
+    let _ = std::fs::remove_dir_all(into);
+    for (from, relative) in files {
+        let to = into.join(relative);
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }
         std::fs::copy(from, &to).map_err(|e| format!("couldn't copy {relative}: {e}"))?;
     }
-    let _ = std::fs::remove_dir_all(&target);
-    std::fs::rename(&staging, &target).map_err(|e| e.to_string())?;
-    let (base, public) = base_url(app).await;
-    let url = format!("{base}/p/{id}/");
-    let bytes: u64 = files.iter().filter_map(|(p, _)| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
-    let page = Page {
-        id: id.clone(),
-        title: body["title"].as_str().unwrap_or("A page").to_string(),
-        bot_id: body["botId"].as_str().unwrap_or_default().to_string(),
-        thread: body["thread"].as_str().unwrap_or_default().to_string(),
-        published_at: chrono::Utc::now().to_rfc3339(),
-        host: "catbot".into(),
-        url: url.clone(),
-        files: files.len(),
-        bytes,
-    };
-    list.retain(|p| p.id != id);
-    list.push(page);
-    keep(app, &list)?;
-    Ok(if public { format!("It's at {url} (page id {id}).") } else { format!("It's at {url}, on this computer only (page id {id}).") })
+    Ok(())
 }
 
 /// `GET /p/:id/*path`: a published page's file, sandboxed. A folder means its index.html.
@@ -307,9 +364,15 @@ pub async fn serve(app: &App, id: &str, rest: &[&str]) -> Response {
     response
 }
 
-/// `GET /api/pages`; at home `DELETE /api/pages/:id` takes one down.
-pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str]) -> Answer {
+/// `GET /api/pages`; at home `DELETE /api/pages/:id` takes one down, and `GET`/`PUT
+/// /api/pages/hosts` are where pages can go.
+pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>) -> Answer {
     match (method, rest) {
+        (&Method::GET, ["hosts"]) => Ok((StatusCode::OK, json!({ "hosts": super::page_hosts::hosts(app).shown() }))),
+        (&Method::PUT, ["hosts"]) => {
+            let shown = super::page_hosts::change(app, &body.unwrap_or_default()).await.map_err(bad)?;
+            Ok((StatusCode::OK, json!({ "hosts": shown })))
+        }
         (&Method::GET, []) => {
             let names: std::collections::HashMap<String, String> = app.with_store(|store| store.bots()).unwrap_or_default().into_iter().map(|b| (b.id, b.name)).collect();
             let list: Vec<Value> = pages(app)
@@ -327,6 +390,14 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str]) -> Answer {
         (&Method::DELETE, [id]) => {
             let mut list = pages(app);
             let page = list.iter().find(|p| p.id == *id).cloned().ok_or_else(|| bad("no such page"))?;
+            // On a service: its site is deleted there first, or the page stays listed.
+            let hosts = super::page_hosts::hosts(app);
+            let gone = match page.host.as_str() {
+                "netlify" if !page.site.is_empty() => super::page_hosts::netlify_remove(&hosts.netlify_token, &page.site).await,
+                "cloudflare" if !page.site.is_empty() => super::page_hosts::cloudflare_remove(&hosts, &page.site).await,
+                _ => Ok(()),
+            };
+            gone.map_err(|why| (StatusCode::BAD_GATEWAY, format!("couldn't take it down from {}: {why}", super::page_hosts::label(&page.host))))?;
             if let Some(dir) = pages_dir(app) {
                 let _ = std::fs::remove_dir_all(dir.join(&page.id));
             }

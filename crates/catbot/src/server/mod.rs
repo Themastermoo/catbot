@@ -23,6 +23,7 @@ pub mod devices;
 pub mod email;
 pub mod engines;
 pub mod images;
+pub mod page_hosts;
 pub mod pages;
 pub mod events;
 pub mod hub;
@@ -393,10 +394,18 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(chief::route(&app, &method, &rest, body))
         }
         ["p", id, rest @ ..] if method == Method::GET => pages::serve(&app, id, rest).await,
-        ["api", "pages", rest @ ..] if method == Method::GET || method == Method::DELETE => {
+        ["api", "pages", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
-            respond(pages::route(&app, &method, &rest).await)
+            let body = if method != Method::PUT {
+                None
+            } else {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            };
+            respond(pages::route(&app, &method, &rest, body).await)
         }
         ["api", "handoffs"] if method == Method::PUT => match json_body(req).await {
             Ok(body) => respond(handoffs::route(&app, Some(body))),

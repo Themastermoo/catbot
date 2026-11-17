@@ -1697,3 +1697,147 @@ async fn a_bot_publishes_a_page_once_approved_and_it_can_be_taken_down() {
     assert_eq!(s.call("DELETE", &format!("/api/pages/{page_id}"), None).await.0, 200);
     assert_eq!(s.page(true, &format!("/p/{page_id}/")).await.0, 404);
 }
+
+/// A stand-in for Netlify's and Cloudflare's APIs: every call is logged as "METHOD path [body]".
+async fn fake_hosts() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let seen = log.clone();
+    let addr = listen(Router::new().fallback(move |req: axum::extract::Request| {
+        let seen = seen.clone();
+        async move {
+            let (parts, body) = req.into_parts();
+            let path = parts.uri.path().to_string();
+            let good = parts.headers.get("authorization").is_some_and(|v| v == "Bearer good-token");
+            let body = String::from_utf8_lossy(&body.collect().await.unwrap().to_bytes()).to_string();
+            seen.lock().unwrap().push(format!("{} {path} {body}", parts.method));
+            let answer = |status: u16, v: Value| Response::builder().status(status).header("content-type", "application/json").body(Body::from(v.to_string())).unwrap();
+            if !good {
+                return answer(401, json!({ "message": "Access Denied" }));
+            }
+            let method = parts.method.as_str();
+            match (method, path.split('/').collect::<Vec<_>>().as_slice()) {
+                ("GET", ["", "user"]) => answer(200, json!({ "id": "u1" })),
+                ("GET", ["", "user", "tokens", "verify"]) => answer(200, json!({ "success": true })),
+                ("POST", ["", "sites"]) => {
+                    let name = serde_json::from_str::<Value>(&body).unwrap()["name"].as_str().unwrap().to_string();
+                    answer(201, json!({ "id": "site-1", "name": name, "ssl_url": format!("https://{name}.netlify.app") }))
+                }
+                ("GET", ["", "sites", id]) => answer(200, json!({ "id": id, "ssl_url": "https://again.netlify.app" })),
+                ("POST", ["", "sites", _, "deploys"]) => {
+                    let files: Value = serde_json::from_str::<Value>(&body).unwrap()["files"].clone();
+                    let required: Vec<Value> = files.as_object().unwrap().values().cloned().collect();
+                    answer(200, json!({ "id": "deploy-1", "required": required, "state": "uploading" }))
+                }
+                ("PUT", ["", "deploys", _, "files", ..]) => answer(200, json!({})),
+                ("GET", ["", "deploys", _]) => answer(200, json!({ "id": "deploy-1", "state": "ready" })),
+                ("DELETE", ["", "sites", _]) => answer(204, Value::Null),
+                _ => answer(404, json!({ "message": "Not Found" })),
+            }
+        }
+    }))
+    .await;
+    (format!("http://{addr}"), log)
+}
+
+#[tokio::test]
+async fn pages_go_to_netlify_or_cloudflare_as_the_person_picks_on_the_card() {
+    let s = setup().await;
+    let (api, calls) = fake_hosts().await;
+    let wrangler_log = s._dir.path().join("wrangler.log");
+    // SAFETY: only this test reads these.
+    unsafe {
+        std::env::set_var("CATBOT_NETLIFY_API", &api);
+        std::env::set_var("CATBOT_CLOUDFLARE_API", &api);
+        std::env::set_var("CATBOT_WRANGLER", format!("python3 {}", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-wrangler.py")));
+        std::env::set_var("FAKE_WRANGLER_LOG", &wrangler_log);
+    }
+    let wrangled = || std::fs::read_to_string(&wrangler_log).unwrap_or_default().lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect::<Vec<_>>();
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+
+    // Connecting: each key is checked, and never comes back.
+    let (status, refused) = s.call("PUT", "/api/pages/hosts", Some(json!({ "netlify": { "token": "bad-token" } }))).await;
+    assert_eq!(status, 400);
+    assert!(refused["error"].as_str().unwrap_or(&refused.to_string()).contains("didn't accept"), "{refused}");
+    let (_, shown) = s.call("PUT", "/api/pages/hosts", Some(json!({ "netlify": { "token": "good-token" }, "default": "netlify" }))).await;
+    assert_eq!((shown["hosts"]["default"].as_str(), shown["hosts"]["netlify"]["ends"].as_str()), (Some("netlify"), Some("oken")), "{shown}");
+    assert_eq!(s.call("PUT", "/api/pages/hosts", Some(json!({ "cloudflare": { "token": "good-token", "account": "not hex" } }))).await.0, 400);
+    let (_, shown) = s.call("PUT", "/api/pages/hosts", Some(json!({ "cloudflare": { "token": "good-token", "account": "0123456789abcdef0123456789abcdef" } }))).await;
+    assert!(!shown.to_string().contains("good-token"), "{shown}");
+    assert_eq!(shown["hosts"]["cloudflare"]["account"], "0123456789abcdef0123456789abcdef");
+
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let site = s._dir.path().join("home/bots/scout/site");
+    std::fs::create_dir_all(site.join("img")).unwrap();
+    std::fs::write(site.join("index.html"), "<h1>Garden plan</h1>").unwrap();
+    std::fs::write(site.join("img/bed.svg"), "<svg xmlns='http://www.w3.org/2000/svg'/>").unwrap();
+    let (_, bot) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    let thread = bot["bot"]["threadId"].as_str().unwrap().to_string();
+    let ask = async |s: &Setup, events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, text: &str| -> Value {
+        s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": text }))).await;
+        until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+        page["messages"].as_array().unwrap().iter().rev().find(|m| m["kind"] == "team-change").unwrap().clone()
+    };
+    let answer = async |s: &Setup, card: &Value, choice: Option<&str>| -> (u16, Value) {
+        let mut body = json!({ "approve": true });
+        if let Some(choice) = choice {
+            body["choice"] = json!(choice);
+        }
+        s.call("POST", &format!("/api/threads/{thread}/team/{}", card["id"].as_str().unwrap()), Some(body)).await
+    };
+
+    // The card asks where, starting on the default.
+    let card = ask(&s, &mut events, r#"catbot-tool: page_publish {"path": "site", "title": "Garden plan"}"#).await;
+    let choice = &card["teamChange"]["choice"];
+    let ids: Vec<&str> = choice["options"].as_array().unwrap().iter().map(|o| o["id"].as_str().unwrap()).collect();
+    assert_eq!((ids, choice["value"].as_str()), (vec!["catbot", "netlify", "cloudflare"], Some("netlify")), "{card}");
+    assert_eq!(answer(&s, &card, Some("mars")).await.0, 400, "only the card's own choices");
+    let (_, answered) = answer(&s, &card, None).await;
+    assert_eq!(answered["state"], "done", "{answered}");
+    let netlify = calls.lock().unwrap().clone();
+    assert!(netlify.iter().any(|c| c.starts_with("POST /sites {\"name\":\"catbot-garden-plan-")), "{netlify:?}");
+    assert!(netlify.iter().any(|c| c.starts_with("PUT /deploys/deploy-1/files/index.html <h1>Garden plan</h1>")), "{netlify:?}");
+    assert!(netlify.iter().any(|c| c.starts_with("PUT /deploys/deploy-1/files/img/bed.svg")), "{netlify:?}");
+    let (_, listed) = s.call("GET", "/api/pages", None).await;
+    let on_netlify = listed["pages"][0].clone();
+    assert_eq!((on_netlify["host"].as_str(), on_netlify["site"].as_str()), (Some("netlify"), Some("site-1")));
+    assert!(on_netlify["url"].as_str().unwrap().ends_with(".netlify.app/"), "{on_netlify}");
+    assert_eq!(s.page(false, &format!("/p/{}/", on_netlify["id"].as_str().unwrap())).await.0, 404, "Catbot doesn't serve it too");
+
+    // Another page, picked for Cloudflare: wrangler makes its project and uploads a copy.
+    let card = ask(&s, &mut events, r#"catbot-tool: page_publish {"path": "site/index.html", "title": "Just the plan"}"#).await;
+    let (_, answered) = answer(&s, &card, Some("cloudflare")).await;
+    assert_eq!(answered["state"], "done", "{answered}");
+    let runs = wrangled();
+    assert_eq!(runs[0]["args"].as_array().unwrap()[..3], json!(["pages", "project", "create"]).as_array().unwrap()[..]);
+    let project = runs[0]["args"][3].as_str().unwrap().to_string();
+    assert!(project.starts_with("catbot-just-the-plan-"), "{project}");
+    assert_eq!((runs[0]["token"].as_str(), runs[0]["account"].as_str()), (Some("good-token"), Some("0123456789abcdef0123456789abcdef")));
+    assert_eq!(runs[1]["args"].as_array().unwrap()[..2], json!(["pages", "deploy"]).as_array().unwrap()[..]);
+    assert_eq!((runs[1]["files"].clone(), runs[1]["index"].as_str()), (json!(["index.html"]), Some("<h1>Garden plan</h1>")));
+    let (_, listed) = s.call("GET", "/api/pages", None).await;
+    let on_cloudflare = listed["pages"][0].clone();
+    assert_eq!(on_cloudflare["url"], format!("https://{project}-x1.pages.dev/"), "the address Cloudflare gave");
+    assert!(!s._dir.path().join(format!("home/pages/.{}-cloudflare", on_cloudflare["id"].as_str().unwrap())).exists(), "the copy is cleared away");
+
+    // An update stays where it is, and asks nothing about where.
+    let card = ask(&s, &mut events, &format!(r#"catbot-tool: page_publish {{"path": "site", "title": "Garden plan", "update": "{}"}}"#, on_netlify["id"].as_str().unwrap())).await;
+    assert!(card["teamChange"]["choice"].is_null(), "{card}");
+    assert!(card["teamChange"]["lines"][1].as_str().unwrap().starts_with("Where: Netlify, replacing"), "{card}");
+    answer(&s, &card, None).await;
+    assert_eq!(calls.lock().unwrap().iter().filter(|c| c.starts_with("POST /sites ")).count(), 1, "the same site again");
+
+    // Taken down there, then here.
+    assert_eq!(s.call("DELETE", &format!("/api/pages/{}", on_netlify["id"].as_str().unwrap()), None).await.0, 200);
+    assert!(calls.lock().unwrap().iter().any(|c| c.starts_with("DELETE /sites/site-1")));
+    assert_eq!(s.call("DELETE", &format!("/api/pages/{}", on_cloudflare["id"].as_str().unwrap()), None).await.0, 200);
+    assert_eq!(wrangled().last().unwrap()["args"], json!(["pages", "project", "delete", project, "--yes"]));
+    assert_eq!(s.call("GET", "/api/pages", None).await.1["pages"], json!([]));
+
+    // Disconnected: back to this computer only, and no choice on the card.
+    let (_, shown) = s.call("PUT", "/api/pages/hosts", Some(json!({ "netlify": null, "cloudflare": null }))).await;
+    assert_eq!((shown["hosts"]["default"].as_str(), shown["hosts"]["netlify"].is_null()), (Some("catbot"), true));
+}

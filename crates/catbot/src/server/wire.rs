@@ -246,6 +246,7 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                 "askedBy": detail["askedBy"],
                 "heading": detail["heading"],
                 "doneText": detail["doneText"],
+                "choice": detail["choice"],
                 "state": detail["state"],
                 "error": detail["error"],
             },

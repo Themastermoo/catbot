@@ -18,6 +18,17 @@ pub struct Change {
     pub done_text: Option<String>,
     pub state: String,
     pub error: Option<String>,
+    pub choice: Option<Choice>,
+}
+
+/// A choice the person makes as they approve (where a page goes).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub label: String,
+    /// (id, words).
+    pub options: Vec<(String, String)>,
+    /// The one picked, or to start on.
+    pub value: String,
 }
 
 impl Change {
@@ -31,6 +42,11 @@ impl Change {
             done_text: wire["doneText"].as_str().map(str::to_string),
             state: wire["state"].as_str().unwrap_or("asking").to_string(),
             error: wire["error"].as_str().map(str::to_string),
+            choice: wire["choice"]["options"].as_array().map(|options| Choice {
+                label: wire["choice"]["label"].as_str().unwrap_or("Choose").to_string(),
+                options: options.iter().map(|o| (o["id"].as_str().unwrap_or_default().to_string(), o["label"].as_str().unwrap_or_default().to_string())).collect(),
+                value: wire["choice"]["value"].as_str().unwrap_or_default().to_string(),
+            }),
         }
     }
 }
@@ -39,11 +55,18 @@ impl Change {
 pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Element {
     let mut problem = use_signal(|| None::<String>);
     let mut sending = use_signal(|| false);
+    let start = change.choice.as_ref().map(|c| c.value.clone()).unwrap_or_default();
+    let mut picked = use_signal(move || start);
+    let has_choice = change.choice.is_some();
     let send = use_callback(move |approve: bool| {
         let path = format!("/api/threads/{thread}/team/{message}");
         sending.set(true);
+        let mut body = json!({ "approve": approve });
+        if has_choice && approve {
+            body["choice"] = json!(picked());
+        }
         spawn(async move {
-            if let Err(err) = api::post(&path, &json!({ "approve": approve })).await {
+            if let Err(err) = api::post(&path, &body).await {
                 problem.set(Some(err));
             }
             sending.set(false);
@@ -75,6 +98,24 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                         for line in change.lines.iter() {
                             li { class: "list-disc whitespace-pre-wrap break-words", "{line}" }
                         }
+                    }
+                }
+                if let Some(Choice { label, options, value }) = &change.choice {
+                    if asking {
+                        label { class: "flex items-center gap-2 pl-6 text-ink",
+                            span { class: "text-ink-secondary", "{label}:" }
+                            select {
+                                "data-team-choice": true,
+                                class: "rounded-lg border border-hairline/60 bg-raised px-2 py-1 text-ink",
+                                disabled: sending(),
+                                onchange: move |e| picked.set(e.value()),
+                                for (id, words) in options.iter() {
+                                    option { key: "{id}", value: "{id}", selected: picked() == *id, "{words}" }
+                                }
+                            }
+                        }
+                    } else if let Some((_, words)) = options.iter().find(|(id, _)| id == value) {
+                        p { class: "pl-6 text-ink-secondary", "{label}: {words}" }
                     }
                 }
                 if let Some(warning) = &change.warning {
