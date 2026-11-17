@@ -149,7 +149,7 @@ fn size_words(bytes: u64) -> String {
 
 /// Where Catbot's own pages are seen from: the public address through the remote door, or (with
 /// no door) only this computer.
-async fn base_url(app: &App) -> (String, bool) {
+pub(super) async fn base_url(app: &App) -> (String, bool) {
     if app.remote.get().is_some()
         && let Some(public) = super::devices::public_url().await
     {

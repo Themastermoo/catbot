@@ -65,6 +65,12 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
     {
         return super::pages::serve(&app, id, rest).await;
     }
+    // A webhook's address is for the app that calls it, with its secret (`hooks.rs`).
+    if let ["hooks", id, rest @ ..] = segments.as_slice() {
+        let (id, rest): (String, Vec<String>) = (id.to_string(), rest.iter().map(|s| s.to_string()).collect());
+        let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+        return super::hooks::receive(&app, &id, &rest, req).await;
+    }
     let Some(device) = device(&app, &req) else { return unauthorized() };
     match segments.as_slice() {
         ["api", "device"] if method == Method::GET => {

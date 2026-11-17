@@ -26,6 +26,7 @@ pub mod images;
 pub mod page_hosts;
 pub mod pages;
 pub mod events;
+pub mod hooks;
 pub mod hub;
 pub mod memory;
 pub mod remote;
@@ -396,6 +397,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(chief::route(&app, &method, &rest, body))
         }
         ["p", id, rest @ ..] if method == Method::GET => pages::serve(&app, id, rest).await,
+        ["hooks", id, rest @ ..] => hooks::receive(&app, id, rest, req).await,
         ["api", "triggers", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
@@ -407,7 +409,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             } else {
                 None
             };
-            respond(triggers::route(&app, &method, &rest, body))
+            respond(triggers::route(&app, &method, &rest, body).await)
         }
         ["api", "pages", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();

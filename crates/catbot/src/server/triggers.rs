@@ -61,8 +61,10 @@ pub struct Trigger {
     /// What the bot is asked to do each time.
     pub prompt: String,
     pub enabled: bool,
-    /// "schedule" for now; "webhook" and "email" come in 14.3 and 14.4.
+    /// "schedule" or "webhook"; "email" comes in 14.4.
     pub kind: String,
+    /// A webhook's secret: in its address, or as `Authorization: Bearer`. Never shown to a bot.
+    pub secret: String,
     pub schedule: Option<Schedule>,
     /// The trigger's own chat, made at its first run.
     pub thread: Option<String>,
@@ -238,6 +240,7 @@ impl Trigger {
     pub fn when(&self) -> String {
         match (self.kind.as_str(), &self.schedule) {
             ("schedule", Some(s)) => s.words(),
+            ("webhook", _) => "When its address is called".into(),
             _ => "When it's started".into(),
         }
     }
@@ -310,23 +313,48 @@ fn next_at(trigger: &Trigger, after: DateTime<Local>) -> Option<String> {
 pub fn create(app: &App, body: &Value, by: &str) -> Result<Trigger, String> {
     let bot_id = body["botId"].as_str().ok_or("which bot?")?;
     let bot = app.with_store(|store| store.bot_by_id(bot_id)).flatten().ok_or("no such bot")?;
+    let kind = match body["kind"].as_str().unwrap_or("schedule") {
+        "schedule" => "schedule",
+        "webhook" => "webhook",
+        other => return Err(format!("{other:?} isn't a kind of trigger; use schedule or webhook")),
+    };
     let mut trigger = Trigger {
         id: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
         bot_id: bot.id,
         enabled: body["enabled"].as_bool().unwrap_or(true),
-        kind: "schedule".into(),
+        kind: kind.into(),
+        secret: if kind == "webhook" { new_secret() } else { String::new() },
         created_at: now(),
         created_by: by.to_string(),
         ..Trigger::default()
     };
     fill(&mut trigger, body)?;
-    trigger.schedule.as_ref().ok_or("when should it run? (a schedule)")?;
+    if kind == "schedule" {
+        trigger.schedule.as_ref().ok_or("when should it run? (a schedule)")?;
+    }
     trigger.next_at = next_at(&trigger, Local::now());
     let _one = CHANGING.lock().unwrap_or_else(|p| p.into_inner());
     let mut all = list(app);
     all.push(trigger.clone());
     keep(app, &all);
     Ok(trigger)
+}
+
+/// A webhook's secret: 40 random letters and digits.
+pub fn new_secret() -> String {
+    format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple())[..40].to_string()
+}
+
+/// A webhook's address: with its secret in it, and without (for senders that send
+/// `Authorization: Bearer <secret>`). Public when the remote door has a public address.
+pub async fn address(app: &App, trigger: &Trigger) -> Value {
+    let (base, public) = super::pages::base_url(app).await;
+    json!({
+        "url": format!("{base}/hooks/{}/{}", trigger.id, trigger.secret),
+        "bearerUrl": format!("{base}/hooks/{}", trigger.id),
+        "secret": trigger.secret,
+        "public": public,
+    })
 }
 
 /// Takes the name, instructions, schedule and on/off that `body` gives.
@@ -344,6 +372,9 @@ fn fill(trigger: &mut Trigger, body: &Value) -> Result<(), String> {
             return Err("instructions for the bot, up to 20,000 characters".into());
         }
         trigger.prompt = prompt.to_string();
+    }
+    if !body["schedule"].is_null() && trigger.kind != "schedule" {
+        return Err("only a schedule has a schedule".into());
     }
     if !body["schedule"].is_null() {
         let schedule: Schedule = serde_json::from_value(plain_schedule(&body["schedule"])).map_err(|e| format!("that schedule isn't one Catbot knows: {e}"))?;
@@ -425,6 +456,7 @@ pub fn shown(app: &App, trigger: &Trigger, latest: Option<&Run>) -> Value {
         "schedule": trigger.schedule,
         "when": trigger.when(),
         "threadId": trigger.thread,
+        "hasAddress": trigger.kind == "webhook",
         "nextAt": trigger.next_at,
         "createdAt": trigger.created_at,
         "createdBy": trigger.created_by,
@@ -440,9 +472,10 @@ fn all_shown(app: &App) -> Value {
     json!({ "triggers": triggers, "now": now() })
 }
 
-/// `GET /api/triggers`, `POST /api/triggers`, `PUT`/`DELETE /api/triggers/:id`,
-/// `POST /api/triggers/:id/run`, `GET /api/triggers/:id/runs`.
-pub fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>) -> Answer {
+/// `GET /api/triggers`, `POST /api/triggers`, `GET`/`PUT`/`DELETE /api/triggers/:id`,
+/// `POST /api/triggers/:id/run`, `GET /api/triggers/:id/runs`; for a webhook, `GET
+/// /api/triggers/:id/address` and `POST /api/triggers/:id/secret` (a new one).
+pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>) -> Answer {
     let body = body.unwrap_or_default();
     match (method, rest) {
         (&Method::GET, []) => Ok((StatusCode::OK, all_shown(app))),
@@ -467,6 +500,20 @@ pub fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>
             let trigger = list(app).into_iter().find(|t| t.id == *id).ok_or((StatusCode::NOT_FOUND, "no such trigger".to_string()))?;
             let latest = runs(app).into_iter().find(|r| r.trigger_id == trigger.id);
             Ok((StatusCode::OK, json!({ "trigger": shown(app, &trigger, latest.as_ref()) })))
+        }
+        (&Method::GET, [id, "address"]) => {
+            let trigger = list(app).into_iter().find(|t| t.id == *id && t.kind == "webhook").ok_or_else(|| bad("no such webhook"))?;
+            Ok((StatusCode::OK, address(app, &trigger).await))
+        }
+        (&Method::POST, [id, "secret"]) => {
+            let changed = change(app, id, |t| {
+                if t.kind == "webhook" {
+                    t.secret = new_secret();
+                }
+            })
+            .filter(|t| t.kind == "webhook")
+            .ok_or_else(|| bad("no such webhook"))?;
+            Ok((StatusCode::OK, address(app, &changed).await))
         }
         (&Method::GET, [id, "runs"]) => {
             let mine: Vec<Run> = runs(app).into_iter().filter(|r| r.trigger_id == *id).collect();
@@ -536,6 +583,7 @@ pub fn start(app: &Arc<App>, trigger: &Trigger, source: &str, scheduled_for: Opt
     };
     let how = match source {
         "manual" => "run by hand".to_string(),
+        "webhook" => "its address was called".to_string(),
         "schedule" => {
             let when = trigger.when();
             when.chars().next().map(|c| c.to_lowercase().collect::<String>() + &when[c.len_utf8()..]).unwrap_or(when)
@@ -651,13 +699,14 @@ pub fn tools() -> Vec<Value> {
         }),
         json!({
             "name": "trigger",
-            "description": format!("Set up or change one of your triggers. When it comes due, you get its instructions in a chat of the trigger's own, which keeps what you did on earlier runs; write the instructions so they make sense on their own. It takes effect at once, and the person sees a card in this chat with Pause, Undo and Edit. Actions: create (name, instructions, schedule), update (trigger_id and what changes), pause, resume, run_now (trigger_id). {SCHEDULE_HELP}"),
+            "description": format!("Set up or change one of your triggers. When it comes due, you get its instructions in a chat of the trigger's own, which keeps what you did on earlier runs; write the instructions so they make sense on their own. It takes effect at once, and the person sees a card in this chat with Pause, Undo and Edit. Actions: create (name, instructions, and a schedule or when: \"webhook\"), update (trigger_id and what changes), pause, resume, run_now (trigger_id). A webhook runs when another app calls its address; you never see the address or its secret: the person copies it from the card or the Triggers page and pastes it into that app. {SCHEDULE_HELP}"),
             "inputSchema": { "type": "object", "properties": {
                 "action": { "type": "string", "enum": ["create", "update", "pause", "resume", "run_now"] },
                 "trigger_id": { "type": "string" },
                 "name": { "type": "string", "description": "A few words, shown in the Triggers list and as its chat's name." },
                 "instructions": { "type": "string", "description": "What to do each time." },
                 "schedule": { "type": "object", "description": "When it runs; see above." },
+                "when": { "type": "string", "enum": ["schedule", "webhook"], "description": "webhook: it runs when another app calls its address. Leave out for a schedule." },
             }, "required": ["action"] },
         }),
         json!({
@@ -675,6 +724,7 @@ fn for_bot(trigger: &Trigger, latest: Option<&Run>) -> Value {
         "id": trigger.id,
         "name": trigger.name,
         "instructions": prompt,
+        "kind": trigger.kind,
         "enabled": trigger.enabled,
         "when": trigger.when(),
         "schedule": trigger.schedule,
@@ -701,8 +751,9 @@ fn card(app: &App, thread: &str, bot_name: &str, action: &str, trigger: &Trigger
         "triggerId": trigger.id,
         "name": trigger.name,
         "when": trigger.when(),
+        "triggerKind": trigger.kind,
         "before": before.map(|b| json!({ "name": b.name, "prompt": b.prompt, "schedule": b.schedule, "enabled": b.enabled })),
-        "deleted": (action == "deleted").then(|| json!({ "botId": trigger.bot_id, "name": trigger.name, "prompt": trigger.prompt, "schedule": trigger.schedule })),
+        "deleted": (action == "deleted").then(|| json!({ "botId": trigger.bot_id, "name": trigger.name, "prompt": trigger.prompt, "schedule": trigger.schedule, "kind": trigger.kind })),
     });
     super::turns::save_and_send(app, thread, Role::Step, &said, Some(&detail));
 }
@@ -747,8 +798,14 @@ pub fn call(app: &Arc<App>, grant: &super::bot_tools::Grant, name: &str, args: &
                         return Err(format!("you already have {MOST_PER_BOT} triggers; delete one first"));
                     }
                     body["botId"] = json!(bot.id);
+                    if args["when"] == "webhook" {
+                        body["kind"] = json!("webhook");
+                    }
                     let made = create(app, &body, &bot.id)?;
                     card(app, &grant.thread, &bot.name, "created", &made, None);
+                    if made.kind == "webhook" {
+                        return Ok(format!("Set up the webhook “{}”, id {}. The person copies its address from the card in this chat (or the Triggers page) and pastes it into the app that will call it.", made.name, made.id));
+                    }
                     Ok(format!("Set up “{}” ({}), id {}. Next run: {}.", made.name, made.when(), made.id, made.next_at.as_deref().unwrap_or("none")))
                 }
                 "update" => {

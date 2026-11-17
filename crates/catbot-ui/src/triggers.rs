@@ -98,6 +98,8 @@ fn TriggerRow(trigger: Value, on_edit: EventHandler<Value>, on_close: EventHandl
     let mut problem = use_signal(|| None::<String>);
     let mut confirm = use_signal(|| false);
     let mut history = use_signal(|| None::<Vec<Value>>);
+    let mut showing_address = use_signal(|| false);
+    let has_address = trigger["hasAddress"].as_bool().unwrap_or(false);
     let id = trigger["id"].as_str().unwrap_or_default().to_string();
     let name = trigger["name"].as_str().unwrap_or_default().to_string();
     let bot = trigger["botName"].as_str().unwrap_or_default().to_string();
@@ -141,7 +143,7 @@ fn TriggerRow(trigger: Value, on_edit: EventHandler<Value>, on_close: EventHandl
                     }
                     div { class: "text-[12px] text-ink-secondary", "{bot} · {when}" }
                     div { class: "text-[11px] text-ink-tertiary",
-                        if let Some(next) = &next { "Next: {next}" } else if on { "Doesn't run again" } else { "Not running" }
+                        if has_address { if on { "Waiting for its address to be called" } else { "Not listening" } } else if let Some(next) = &next { "Next: {next}" } else if on { "Doesn't run again" } else { "Not running" }
                         if let Some((status, words)) = &last {
                             span { class: if status == "failed" { "text-danger" } else { "" }, " · {words}" }
                         }
@@ -152,6 +154,9 @@ fn TriggerRow(trigger: Value, on_edit: EventHandler<Value>, on_close: EventHandl
                 button { r#type: "button", class: LINK, disabled: busy(), "data-trigger-run": true, onclick: move |_| act.call(("POST", format!("/api/triggers/{run_id}/run"), Some(json!({})))), "Run now" }
                 button { r#type: "button", class: LINK, disabled: busy(), "data-trigger-pause": true, onclick: move |_| act.call(("PUT", format!("/api/triggers/{pause_id}"), Some(json!({ "enabled": !on })))), if on { "Pause" } else { "Resume" } }
                 button { r#type: "button", class: LINK, onclick: move |_| on_edit.call(editable.clone()), "Edit" }
+                if has_address {
+                    button { r#type: "button", class: LINK, "data-trigger-address": true, onclick: move |_| showing_address.set(!showing_address()), if showing_address() { "Hide address" } else { "Address" } }
+                }
                 if let Some(thread) = thread {
                     button { r#type: "button", class: LINK, "data-trigger-chat": true,
                         onclick: move |_| {
@@ -186,6 +191,9 @@ fn TriggerRow(trigger: Value, on_edit: EventHandler<Value>, on_close: EventHandl
             }
             if confirm() {
                 p { class: "text-[11px] text-ink-tertiary", "Its chat stays in {bot}'s chats." }
+            }
+            if showing_address() {
+                Address { id: id.clone() }
             }
             if let Some(runs) = history() {
                 div { class: "flex flex-col gap-1 border-t border-hairline/30 pt-1", "data-trigger-history": true,
@@ -270,7 +278,10 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
     let state = use_context::<Signal<State>>();
     let is_new = trigger.is_null();
     let s = trigger["schedule"].clone();
-    let start_kind = s["type"].as_str().unwrap_or("weekly").to_string();
+    let start_kind = if trigger["kind"] == "webhook" { "webhook".to_string() } else { s["type"].as_str().unwrap_or("weekly").to_string() };
+    // A trigger keeps its kind: a schedule stays a schedule, a webhook a webhook.
+    let fixed_webhook = !trigger.is_null() && trigger["kind"] == "webhook";
+    let fixed_schedule = !trigger.is_null() && trigger["kind"] != "webhook";
     let start_days: Vec<u32> = s["days"].as_array().map(|d| d.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect()).unwrap_or_else(|| vec![1, 2, 3, 4, 5]);
     let first_bot = state.read().bots.iter().find(|b| b.channel.is_none()).map(|b| b.id.clone()).unwrap_or_default();
     let mut bot = use_signal(|| trigger["botId"].as_str().map(str::to_string).unwrap_or(first_bot));
@@ -287,23 +298,44 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
     let mut problem = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
     let id = trigger["id"].as_str().unwrap_or_default().to_string();
+    // A webhook just made: its address, shown before the form closes.
+    let mut made = use_signal(|| None::<String>);
     let save = move |_| {
-        let schedule = When { kind: kind(), at: at(), time: time(), days: days(), every: every(), from: from(), to: to(), start: start.clone() }.schedule();
-        let mut body = json!({ "name": name(), "prompt": prompt(), "schedule": schedule });
+        let mut body = json!({ "name": name(), "prompt": prompt() });
+        if kind() == "webhook" {
+            if is_new {
+                body["kind"] = json!("webhook");
+            }
+        } else {
+            body["schedule"] = When { kind: kind(), at: at(), time: time(), days: days(), every: every(), from: from(), to: to(), start: start.clone() }.schedule();
+        }
         if is_new {
             body["botId"] = json!(bot());
         }
         let (method, path) = if is_new { ("POST", "/api/triggers".to_string()) } else { ("PUT", format!("/api/triggers/{id}")) };
+        let webhook = kind() == "webhook" && is_new;
         busy.set(true);
         problem.set(None);
         spawn(async move {
             match api::call(method, &path, Some(&body)).await {
+                Ok(answer) if webhook => made.set(answer["trigger"]["id"].as_str().map(str::to_string)),
                 Ok(_) => on_done.call(()),
                 Err(err) => problem.set(Some(err)),
             }
             busy.set(false);
         });
     };
+    if let Some(made_id) = made() {
+        return rsx! {
+            div { class: "flex flex-col gap-3",
+                p { class: "text-[13px] text-ink", "Made. Paste this address into the app that will call it:" }
+                Address { id: made_id }
+                div { class: "flex justify-end",
+                    button { r#type: "button", class: PRIMARY, onclick: move |_| on_done.call(()), "Done" }
+                }
+            }
+        };
+    }
     let bots: Vec<(String, String)> = state.read().bots.iter().filter(|b| b.channel.is_none()).map(|b| (b.id.clone(), b.name.clone())).collect();
     let day_toggles = move || {
         rsx! {
@@ -347,8 +379,9 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
             div { class: "flex flex-col gap-2",
                 span { class: "text-[12px] text-ink-secondary", "When" }
                 div { role: "radiogroup", class: "flex gap-1",
-                    for (value, label) in [("weekly", "On days at a time"), ("interval", "Every so often"), ("once", "Once")] {
+                    for (value, label) in [("weekly", "On days at a time"), ("interval", "Every so often"), ("once", "Once"), ("webhook", "When called (webhook)")] {
                         button { key: "{value}", r#type: "button", role: "radio", "aria-checked": "{kind() == value}", "data-trigger-kind": "{value}",
+                            disabled: (fixed_webhook && value != "webhook") || (fixed_schedule && value == "webhook"),
                             class: if kind() == value { "rounded-lg bg-accent px-3 py-1.5 text-[12px] font-medium text-white" } else { "rounded-lg bg-control px-3 py-1.5 text-[12px] text-ink-secondary" },
                             onclick: move |_| kind.set(value.to_string()),
                             "{label}"
@@ -356,6 +389,11 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
                     }
                 }
                 match kind().as_str() {
+                    "webhook" => rsx! {
+                        p { class: "text-[12px] leading-relaxed text-ink-secondary",
+                            "Another app calls its address (a form, GitHub, a home-automation hub) and the bot gets to work with what it sent. You'll get the address once it's made."
+                        }
+                    },
                     "once" => rsx! {
                         input { class: "{SMALL} w-56", r#type: "datetime-local", "data-trigger-at": true, value: "{at}", oninput: move |e| at.set(e.value()) }
                     },
@@ -478,6 +516,9 @@ pub fn TriggerCard(card: Value) -> Element {
                 if undone() {
                     p { class: "text-ink-tertiary", "Undone." }
                 }
+                if card["kind"] == "webhook" && !gone() && current.is_some() {
+                    Address { id: id.clone() }
+                }
                 div { class: "flex flex-wrap gap-1 pt-1",
                     if !gone() && current.is_some() {
                         button { r#type: "button", class: LINK, disabled: busy(), "data-trigger-card-pause": true,
@@ -503,6 +544,86 @@ pub fn TriggerCard(card: Value) -> Element {
         if editing() {
             if let Some(trigger) = current.clone() {
                 TriggersDialog { edit: Some(trigger), on_close: move |_| editing.set(false) }
+            }
+        }
+    }
+}
+
+/// A webhook's address (`server/hooks.rs`), with Copy, and New secret to retire the old one.
+/// The bot that made it never sees it; the person pastes it into the app that will call it.
+#[component]
+fn Address(id: String) -> Element {
+    let mut address = use_signal(|| None::<Value>);
+    let mut asking = use_signal(|| false);
+    let mut copied = use_signal(|| None::<&'static str>);
+    let mut problem = use_signal(|| None::<String>);
+    let look = format!("/api/triggers/{id}/address");
+    use_effect(move || {
+        let path = look.clone();
+        spawn(async move {
+            match api::get(&path).await {
+                Ok(found) => address.set(Some(found)),
+                Err(err) => problem.set(Some(err)),
+            }
+        });
+    });
+    let renew = format!("/api/triggers/{id}/secret");
+    let copy = use_callback(move |(what, text): (&'static str, String)| {
+        let text = serde_json::to_string(&text).unwrap_or_default();
+        document::eval(&format!("navigator.clipboard?.writeText({text});"));
+        copied.set(Some(what));
+    });
+    let Some(a) = address() else {
+        return rsx! {
+            if let Some(err) = problem() {
+                p { role: "alert", class: "text-[12px] text-danger", "{err}" }
+            }
+        };
+    };
+    let url = a["url"].as_str().unwrap_or_default().to_string();
+    let bearer_url = a["bearerUrl"].as_str().unwrap_or_default().to_string();
+    let secret = a["secret"].as_str().unwrap_or_default().to_string();
+    let public = a["public"].as_bool().unwrap_or(false);
+    let (u, s) = (url.clone(), secret.clone());
+    rsx! {
+        div { class: "flex flex-col gap-1.5 rounded-lg bg-inset px-3 py-2", "data-webhook-address": true,
+            div { class: "flex items-center gap-2",
+                input { class: "min-w-0 flex-1 bg-transparent font-mono text-[12px] text-ink focus:outline-none", readonly: true, value: "{url}", "data-webhook-url": true }
+                button { r#type: "button", class: LINK, onclick: move |_| copy.call(("address", u.clone())), if copied() == Some("address") { "Copied" } else { "Copy address" } }
+            }
+            p { class: "text-[11px] leading-relaxed text-ink-tertiary",
+                "Send it with POST. If the app can add a header, use {bearer_url} with "
+                code { "Authorization: Bearer" }
+                " and the secret instead; that keeps the secret out of its logs. "
+                button { r#type: "button", class: "underline hover:text-ink", onclick: move |_| copy.call(("secret", s.clone())), if copied() == Some("secret") { "Copied" } else { "Copy secret" } }
+            }
+            if !public {
+                p { class: "text-[11px] text-warning", "Only this computer can reach it until the remote door has a public address (Devices)." }
+            }
+            div { class: "flex gap-1",
+                if asking() {
+                    span { class: "text-[11px] text-ink-secondary", "The old address stops working." }
+                    button { r#type: "button", class: LINK, "data-webhook-renew": true,
+                        onclick: move |_| {
+                            let path = renew.clone();
+                            spawn(async move {
+                                match api::post(&path, &json!({})).await {
+                                    Ok(found) => address.set(Some(found)),
+                                    Err(err) => problem.set(Some(err)),
+                                }
+                                asking.set(false);
+                                copied.set(None);
+                            });
+                        },
+                        "Make a new secret"
+                    }
+                    button { r#type: "button", class: LINK, onclick: move |_| asking.set(false), "Keep it" }
+                } else {
+                    button { r#type: "button", class: LINK, onclick: move |_| asking.set(true), "New secret…" }
+                }
+            }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "text-[12px] text-danger", "{err}" }
             }
         }
     }

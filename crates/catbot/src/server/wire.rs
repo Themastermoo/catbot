@@ -260,6 +260,7 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                 "id": detail["triggerId"],
                 "name": detail["name"],
                 "when": detail["when"],
+                "kind": detail["triggerKind"],
                 "before": detail["before"],
                 "deleted": detail["deleted"],
             },
