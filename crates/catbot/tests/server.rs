@@ -51,6 +51,7 @@ struct Setup {
     away: String,
     /// The bots' memory vault.
     memory: std::path::PathBuf,
+    app: std::sync::Arc<server::App>,
     _dir: tempfile::TempDir,
 }
 
@@ -81,7 +82,7 @@ async fn setup() -> Setup {
     app.local.set(addr).unwrap();
     let away = listen(server::remote::router(app.clone())).await;
     app.remote.set(away).unwrap();
-    Setup { base: format!("http://{addr}"), away: format!("http://{away}"), memory, _dir: dir }
+    Setup { base: format!("http://{addr}"), away: format!("http://{away}"), memory, app, _dir: dir }
 }
 
 impl Setup {
@@ -1840,4 +1841,90 @@ async fn pages_go_to_netlify_or_cloudflare_as_the_person_picks_on_the_card() {
     // Disconnected: back to this computer only, and no choice on the card.
     let (_, shown) = s.call("PUT", "/api/pages/hosts", Some(json!({ "netlify": null, "cloudflare": null }))).await;
     assert_eq!((shown["hosts"]["default"].as_str(), shown["hosts"]["netlify"].is_null()), (Some("catbot"), true));
+}
+
+#[tokio::test]
+async fn a_schedule_runs_its_bot_in_the_trigger_s_own_chat() {
+    use catbot::server::triggers;
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+
+    // Refused: no bot, a bad schedule, no instructions.
+    let weekly = json!({ "type": "weekly", "time": "09:00", "days": [1, 2, 3, 4, 5] });
+    assert_eq!(s.call("POST", "/api/triggers", Some(json!({ "name": "Inbox", "prompt": "Sum up.", "schedule": weekly }))).await.0, 400);
+    let (status, refused) = s.call("POST", "/api/triggers", Some(json!({ "botId": scout, "name": "Inbox", "prompt": "Sum up.", "schedule": { "type": "interval", "everyMinutes": 1, "start": "2026-11-16T09:00" } }))).await;
+    assert_eq!(status, 400, "{refused}");
+    assert_eq!(s.call("POST", "/api/triggers", Some(json!({ "botId": scout, "name": "Inbox", "schedule": weekly }))).await.0, 400);
+
+    let (status, made) = s.call("POST", "/api/triggers", Some(json!({ "botId": scout, "name": "Morning inbox", "prompt": "Sum up my inbox.", "schedule": weekly }))).await;
+    assert_eq!(status, 201, "{made}");
+    let trigger = made["trigger"].clone();
+    let id = trigger["id"].as_str().unwrap().to_string();
+    assert_eq!((trigger["when"].as_str(), trigger["botName"].as_str(), trigger["enabled"].as_bool()), (Some("Every weekday at 9:00 AM"), Some("Scout"), Some(true)));
+    let next = triggers::parse_local(trigger["nextAt"].as_str().unwrap()).unwrap();
+
+    // Not yet: nothing happens. Its time: the bot runs it in a chat named after it.
+    triggers::tick(&s.app, next - chrono::Duration::minutes(1));
+    assert!(triggers::runs(&s.app).is_empty());
+    triggers::tick(&s.app, next);
+    let note = until(&mut events, "the note", |f| f["kind"] == "message" && f["message"]["fromCatbot"] == "trigger").await;
+    assert!(note["message"]["text"].as_str().unwrap().starts_with("Trigger “Morning inbox” (every weekday at 9:00 AM):\n\nSum up my inbox."), "{note}");
+    until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let thread = note["threadId"].as_str().or(note["message"]["threadId"].as_str()).map(str::to_string);
+    let (_, listed) = s.call("GET", "/api/triggers", None).await;
+    let shown = &listed["triggers"][0];
+    assert_eq!(shown["runs"], 1);
+    let after = triggers::parse_local(shown["nextAt"].as_str().unwrap()).unwrap();
+    assert!(after > next, "its next time is worked out again");
+    let chat = shown["threadId"].as_str().unwrap().to_string();
+    if let Some(thread) = thread {
+        assert_eq!(thread, chat);
+    }
+    let (_, chats) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    assert!(chats.to_string().contains("Morning inbox"), "the chat is named after the trigger: {chats}");
+    // The run finishes in the background.
+    let mut done = None;
+    for _ in 0..50 {
+        let (_, runs) = s.call("GET", &format!("/api/triggers/{id}/runs"), None).await;
+        if runs["runs"][0]["status"] != "working" {
+            done = Some(runs["runs"][0].clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let done = done.expect("the run finished");
+    assert_eq!((done["status"].as_str(), done["source"].as_str(), done["threadId"].as_str()), (Some("done"), Some("schedule"), Some(chat.as_str())), "{done}");
+    assert!(done["output"].as_str().is_some_and(|o| !o.is_empty()));
+
+    // Run by hand: the same chat again.
+    let (_, ran) = s.call("POST", &format!("/api/triggers/{id}/run"), Some(json!({}))).await;
+    assert_eq!((ran["run"]["source"].as_str(), ran["run"]["threadId"].as_str()), (Some("manual"), Some(chat.as_str())), "{ran}");
+    until(&mut events, "done again", |f| runtime(f, "turn.completed")).await;
+
+    // Paused: its time passes with nothing run, and it has no next time.
+    let (_, paused) = s.call("PUT", &format!("/api/triggers/{id}"), Some(json!({ "enabled": false }))).await;
+    assert!(paused["trigger"]["nextAt"].is_null(), "{paused}");
+    triggers::tick(&s.app, after);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(s.call("GET", &format!("/api/triggers/{id}/runs"), None).await.1["runs"].as_array().unwrap().len(), 2);
+
+    // Once: runs at its time (late, if Catbot was off) and then turns itself off.
+    let soon = (chrono::Local::now() + chrono::Duration::minutes(5)).format("%Y-%m-%dT%H:%M").to_string();
+    let (_, once) = s.call("POST", "/api/triggers", Some(json!({ "botId": scout, "name": "Reminder", "prompt": "Remind me.", "schedule": { "type": "once", "at": soon } }))).await;
+    let once_id = once["trigger"]["id"].as_str().unwrap().to_string();
+    triggers::tick(&s.app, chrono::Local::now() + chrono::Duration::hours(3));
+    until(&mut events, "the reminder", |f| f["kind"] == "message" && f["message"]["fromCatbot"] == "trigger" && f["message"]["text"].as_str().unwrap().contains("Remind me.")).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let (_, listed) = s.call("GET", "/api/triggers", None).await;
+    let once = listed["triggers"].as_array().unwrap().iter().find(|t| t["id"] == once_id.as_str()).unwrap().clone();
+    assert_eq!((once["enabled"].as_bool(), once["nextAt"].is_null()), (Some(false), true), "{once}");
+
+    // Deleted: gone from the list; its chat stays.
+    assert_eq!(s.call("DELETE", &format!("/api/triggers/{id}"), None).await.0, 200);
+    assert_eq!(s.call("GET", "/api/triggers", None).await.1["triggers"].as_array().unwrap().len(), 1);
+    assert!(s.call("GET", &format!("/api/bots/{scout}"), None).await.1.to_string().contains("Morning inbox"));
 }

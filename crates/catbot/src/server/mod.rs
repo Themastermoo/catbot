@@ -29,6 +29,7 @@ pub mod events;
 pub mod hub;
 pub mod memory;
 pub mod remote;
+pub mod triggers;
 pub mod turns;
 pub mod wire;
 
@@ -282,6 +283,7 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
 
     tokio::spawn(tidy(app.clone(), archive_after_days()));
     tokio::spawn(chief::keep_watch(app.clone()));
+    tokio::spawn(triggers::keep_time(app.clone()));
     axum::serve(listener, router(app)).await?;
     Ok(())
 }
@@ -394,6 +396,19 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(chief::route(&app, &method, &rest, body))
         }
         ["p", id, rest @ ..] if method == Method::GET => pages::serve(&app, id, rest).await,
+        ["api", "triggers", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::POST || method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(triggers::route(&app, &method, &rest, body))
+        }
         ["api", "pages", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

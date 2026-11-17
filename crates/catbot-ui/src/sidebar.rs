@@ -30,10 +30,22 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     let mut configuring = use_signal(|| false);
     let mut measuring = use_signal(|| false);
     let mut grouping = use_signal(|| false);
+    let mut scheduling = use_signal(|| false);
+    // How many triggers there are, and how many are on: shown on their row.
+    let mut trigger_count = use_signal(|| (0usize, 0usize));
     // Bots whose chats are showing.
     let mut unfolded = use_signal(HashSet::<String>::new);
     let state = use_context::<Signal<State>>();
     let ui = use_context::<Ui>();
+    use_effect(move || {
+        let _ = state.read().triggers_changed;
+        spawn(async move {
+            if let Ok(found) = crate::api::get("/api/triggers").await {
+                let list = found["triggers"].as_array().cloned().unwrap_or_default();
+                trigger_count.set((list.len(), list.iter().filter(|t| t["enabled"] == true).count()));
+            }
+        });
+    });
     let shown: Vec<Bot> = bots.read().iter().filter(|b| b.matches(&query.read())).cloned().collect();
     let empty = bots.read().is_empty();
     // On a phone the list gives way to the open chat.
@@ -140,6 +152,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             if configuring() {
                 crate::notify::SettingsDialog { on_close: move |_| configuring.set(false) }
             }
+            if scheduling() {
+                crate::triggers::TriggersDialog { on_close: move |_| scheduling.set(false) }
+            }
             if remembering() {
                 crate::memory::MemoryDialog { on_close: move |_| remembering.set(false) }
             }
@@ -176,6 +191,20 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                 }
             }
             div { class: "min-h-0 flex-1 overflow-y-auto px-2",
+                button {
+                    r#type: "button",
+                    "data-open-triggers": true,
+                    class: "mb-1 flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-[14px] text-ink hover:bg-raised",
+                    onclick: move |_| scheduling.set(true),
+                    // Lucide `Zap` (ISC).
+                    svg { "aria-hidden": "true", width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", class: "shrink-0 text-ink-secondary",
+                        path { d: "M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" }
+                    }
+                    span { class: "min-w-0 flex-1", "Triggers" }
+                    if trigger_count().0 > 0 {
+                        span { class: "text-[12px] text-ink-tertiary", "{trigger_count().1} on" }
+                    }
+                }
                 div { class: "flex flex-col gap-0.5",
                     if empty {
                         div { class: "px-3 py-6 text-center text-[13px] text-ink-secondary",

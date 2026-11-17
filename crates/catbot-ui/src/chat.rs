@@ -922,12 +922,15 @@ fn Row(
                 "watch" => "Catbot's watch",
                 "check-in" => "Timed check-in",
                 "brief" => "Daily brief",
+                "trigger" => "Trigger",
                 _ => "Catbot",
             };
+            // The Chief's notes are for the Chief; a trigger's are for whichever bot it starts.
+            let whom = if from == "trigger" { "" } else { " · for the Chief" };
             rsx! {
                 div { class: "flex w-full justify-start", "data-from-catbot": "{from}",
                     div { class: "flex w-full max-w-[min(var(--chat-prose-max),var(--chat-card-pct))] flex-col gap-1 rounded-xl border border-dashed border-hairline/60 px-3 py-2.5 text-[13px]", title: "{full_time}",
-                        span { class: "text-[11px] font-semibold uppercase tracking-wide text-ink-tertiary", "{label} · for the Chief · {when}" }
+                        span { class: "text-[11px] font-semibold uppercase tracking-wide text-ink-tertiary", "{label}{whom} · {when}" }
                         div { class: "whitespace-pre-wrap [overflow-wrap:anywhere] text-ink-secondary", "{text}" }
                     }
                 }
