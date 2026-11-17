@@ -1928,3 +1928,77 @@ async fn a_schedule_runs_its_bot_in_the_trigger_s_own_chat() {
     assert_eq!(s.call("GET", "/api/triggers", None).await.1["triggers"].as_array().unwrap().len(), 1);
     assert!(s.call("GET", &format!("/api/bots/{scout}"), None).await.1.to_string().contains("Morning inbox"));
 }
+
+#[tokio::test]
+async fn a_bot_sets_up_its_own_triggers_at_once_and_leaves_a_card() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Lin" }))).await;
+    let lin = made["bot"]["id"].as_str().unwrap().to_string();
+    let ask = async |events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, bot: &str, text: &str| -> String {
+        s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": text }))).await;
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+
+    let said = ask(&mut events, &scout, r#"catbot-tool: trigger {"action": "create", "name": "Morning inbox", "instructions": "Sum up my inbox.", "schedule": {"type": "weekly", "time": "09:00", "days": ["mon", "tue", "wed", "thu", "fri"]}}"#).await;
+    assert!(said.contains("Set up “Morning inbox” (Every weekday at 9:00 AM)"), "{said}");
+    let (_, listed) = s.call("GET", "/api/triggers", None).await;
+    let trigger = listed["triggers"][0].clone();
+    let id = trigger["id"].as_str().unwrap().to_string();
+    assert_eq!((trigger["createdBy"].as_str(), trigger["enabled"].as_bool()), (Some(scout.as_str()), Some(true)), "on at once");
+    let (_, bot) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    let thread = bot["bot"]["threadId"].as_str().unwrap().to_string();
+    let cards = async || -> Vec<Value> {
+        let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+        page["messages"].as_array().unwrap().iter().filter(|m| m["kind"] == "trigger").map(|m| m["trigger"].clone()).collect()
+    };
+    let first = cards().await;
+    assert_eq!((first[0]["said"].as_str(), first[0]["action"].as_str(), first[0]["id"].as_str()), (Some("Scout set up a trigger"), Some("created"), Some(id.as_str())));
+
+    // It sees its triggers, changes one (the card keeps what it was, for Undo), pauses it.
+    let info = ask(&mut events, &scout, "catbot-tool: trigger_info {}").await;
+    assert!(info.contains("Morning inbox") && info.contains("timeZone"), "{info}");
+    ask(&mut events, &scout, &format!(r#"catbot-tool: trigger {{"action": "update", "trigger_id": "{id}", "schedule": {{"type": "interval", "everyMinutes": 120}}}}"#)).await;
+    let changed = cards().await;
+    assert_eq!(changed[1]["action"], "updated");
+    assert_eq!(changed[1]["before"]["schedule"]["type"], "weekly");
+    assert_eq!(changed[1]["when"], "Every 2 hours");
+    ask(&mut events, &scout, &format!(r#"catbot-tool: trigger {{"action": "pause", "trigger_id": "{id}"}}"#)).await;
+    assert_eq!(s.call("GET", &format!("/api/triggers/{id}"), None).await.1["trigger"]["enabled"], false);
+
+    // Another bot can't touch it; a bad action or schedule is refused.
+    let refused = ask(&mut events, &lin, &format!(r#"catbot-tool: delete_trigger {{"trigger_id": "{id}"}}"#)).await;
+    assert!(refused.starts_with("ERROR: ") && refused.contains("no trigger"), "{refused}");
+    let refused = ask(&mut events, &scout, r#"catbot-tool: trigger {"action": "create", "name": "Too often", "instructions": "Hi.", "schedule": {"type": "interval", "everyMinutes": 1}}"#).await;
+    assert!(refused.contains("5 to 1,440"), "{refused}");
+
+    // Run by hand from its chat with the person: the run goes to the trigger's own chat.
+    let ran = ask(&mut events, &scout, &format!(r#"catbot-tool: trigger {{"action": "run_now", "trigger_id": "{id}"}}"#)).await;
+    assert!(ran.contains("Started “Morning inbox”"), "{ran}");
+    until(&mut events, "the run's reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    until(&mut events, "the run done", |f| runtime(f, "turn.completed")).await;
+    let own = s.call("GET", &format!("/api/triggers/{id}"), None).await.1["trigger"]["threadId"].as_str().unwrap().to_string();
+    assert_ne!(own, thread);
+
+    // Deleted, with a card that can bring it back.
+    ask(&mut events, &scout, &format!(r#"catbot-tool: delete_trigger {{"trigger_id": "{id}"}}"#)).await;
+    // The run's own frames may have come in between: wait for the card.
+    let mut last = Value::Null;
+    for _ in 0..40 {
+        last = cards().await.last().unwrap().clone();
+        if last["action"] == "deleted" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(s.call("GET", &format!("/api/triggers/{id}"), None).await.0, 404);
+    assert_eq!((last["action"].as_str(), last["deleted"]["name"].as_str()), (Some("deleted"), Some("Morning inbox")));
+    let d = &last["deleted"];
+    let (status, back) = s.call("POST", "/api/triggers", Some(json!({ "botId": d["botId"], "name": d["name"], "prompt": d["prompt"], "schedule": d["schedule"] }))).await;
+    assert_eq!(status, 201, "{back}");
+}

@@ -33,12 +33,12 @@ fn when_text(at: &str) -> String {
 }
 
 #[component]
-pub fn TriggersDialog(on_close: EventHandler<()>) -> Element {
+pub fn TriggersDialog(on_close: EventHandler<()>, #[props(default)] edit: Option<Value>) -> Element {
     let state = use_context::<Signal<State>>();
     let mut list = use_signal(Vec::<Value>::new);
     let mut problem = use_signal(|| None::<String>);
     // None: the list. Some(Null): a new trigger. Some(trigger): changing that one.
-    let mut editing = use_signal(|| None::<Value>);
+    let mut editing = use_signal(move || edit.clone());
     use_effect(move || {
         let _ = state.read().triggers_changed;
         spawn(async move {
@@ -389,6 +389,120 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
             div { class: "flex justify-end gap-2",
                 button { r#type: "button", class: BUTTON, onclick: move |_| on_done.call(()), "Cancel" }
                 button { r#type: "button", class: PRIMARY, "data-trigger-save": true, disabled: busy(), onclick: save, if is_new { "Make it" } else { "Save" } }
+            }
+        }
+    }
+}
+
+/// What a bot did to one of its triggers, in its chat (stage 14.2): the trigger as it is now,
+/// with Pause or Resume, Undo, and Edit. A bot sets triggers up at once (Moo's choice); this
+/// card is how the person sees it and takes it back.
+#[component]
+pub fn TriggerCard(card: Value) -> Element {
+    let state = use_context::<Signal<State>>();
+    let id = card["id"].as_str().unwrap_or_default().to_string();
+    let action = card["action"].as_str().unwrap_or_default().to_string();
+    let said = card["said"].as_str().unwrap_or("A trigger changed").to_string();
+    let mut now = use_signal(|| None::<Value>);
+    let mut gone = use_signal(|| false);
+    let mut undone = use_signal(|| false);
+    let mut busy = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let mut editing = use_signal(|| false);
+    let look_id = id.clone();
+    use_effect(move || {
+        let _ = state.read().triggers_changed;
+        let path = format!("/api/triggers/{look_id}");
+        spawn(async move {
+            match api::get(&path).await {
+                Ok(found) => {
+                    now.set(Some(found["trigger"].clone()));
+                    gone.set(false);
+                }
+                Err(_) => gone.set(true),
+            }
+        });
+    });
+    let current = now();
+    let name = current.as_ref().and_then(|t| t["name"].as_str()).or(card["name"].as_str()).unwrap_or_default().to_string();
+    let when = current.as_ref().and_then(|t| t["when"].as_str()).or(card["when"].as_str()).unwrap_or_default().to_string();
+    let on = current.as_ref().is_some_and(|t| t["enabled"] == true);
+    let next = current.as_ref().and_then(|t| t["nextAt"].as_str()).map(when_text);
+    let status = if gone() {
+        "Deleted".to_string()
+    } else if !on {
+        "Paused".to_string()
+    } else {
+        next.map(|n| format!("Next: {n}")).unwrap_or_else(|| "Doesn't run again".into())
+    };
+    let act = use_callback(move |(method, path, body, undoing): (&'static str, String, Option<Value>, bool)| {
+        busy.set(true);
+        problem.set(None);
+        spawn(async move {
+            match api::call(method, &path, body.as_ref()).await {
+                Ok(_) => {
+                    if undoing {
+                        undone.set(true);
+                    }
+                }
+                Err(err) => problem.set(Some(err)),
+            }
+            busy.set(false);
+        });
+    });
+    // What Undo does: take a new trigger away, put a changed one back as it was, or bring a
+    // deleted one back.
+    let undo = match action.as_str() {
+        "created" => Some(("DELETE", format!("/api/triggers/{id}"), None)),
+        "deleted" => {
+            let d = &card["deleted"];
+            Some(("POST", "/api/triggers".to_string(), Some(json!({ "botId": d["botId"], "name": d["name"], "prompt": d["prompt"], "schedule": d["schedule"] }))))
+        }
+        _ if card["before"].is_object() => Some(("PUT", format!("/api/triggers/{id}"), Some(card["before"].clone()))),
+        _ => None,
+    };
+    let can_undo = undo.is_some() && !undone() && (action == "deleted" || !gone());
+    let pause_path = format!("/api/triggers/{id}");
+    rsx! {
+        div { class: "flex w-full justify-start", "data-trigger-card": "{id}",
+            div { class: "flex w-full max-w-[min(var(--chat-prose-max),var(--chat-card-pct))] flex-col gap-1 rounded-xl border border-hairline/50 bg-card px-3 py-2.5 text-[13px]",
+                div { class: "flex items-center gap-2 text-[12px] text-ink-secondary",
+                    // Lucide `Zap` (ISC).
+                    svg { "aria-hidden": "true", width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        path { d: "M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" }
+                    }
+                    "{said}"
+                }
+                div { class: "font-semibold text-ink", "{name}" }
+                div { class: "text-ink-secondary", "{when} · {status}" }
+                if undone() {
+                    p { class: "text-ink-tertiary", "Undone." }
+                }
+                div { class: "flex flex-wrap gap-1 pt-1",
+                    if !gone() && current.is_some() {
+                        button { r#type: "button", class: LINK, disabled: busy(), "data-trigger-card-pause": true,
+                            onclick: move |_| act.call(("PUT", pause_path.clone(), Some(json!({ "enabled": !on })), false)),
+                            if on { "Pause" } else { "Resume" }
+                        }
+                        button { r#type: "button", class: LINK, "data-trigger-card-edit": true, onclick: move |_| editing.set(true), "Edit" }
+                    }
+                    if can_undo {
+                        if let Some((method, path, body)) = undo.clone() {
+                            button { r#type: "button", class: LINK, disabled: busy(), "data-trigger-card-undo": true,
+                                onclick: move |_| act.call((method, path.clone(), body.clone(), true)),
+                                "Undo"
+                            }
+                        }
+                    }
+                }
+                if let Some(err) = problem() {
+                    p { role: "alert", class: "text-[12px] text-danger", "{err}" }
+                }
+            }
+        }
+        if editing() {
+            if let Some(trigger) = current.clone() {
+                TriggersDialog { edit: Some(trigger), on_close: move |_| editing.set(false) }
             }
         }
     }

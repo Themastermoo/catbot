@@ -53,6 +53,8 @@ pub enum Body {
     /// A picture being asked for and drawn (`pictures.rs`).
     Picture(Box<crate::pictures::Card>),
     TeamChange(Box<crate::team::Change>),
+    /// What a bot did to one of its triggers (`triggers.rs`).
+    Trigger(Box<Value>),
     /// Something Catbot wrote for the Chief of Staff: a problem to look at, or a check-in.
     FromCatbot { from: String, text: String },
     /// What a turn changed in the bot's folder, and whether it was undone.
@@ -96,6 +98,7 @@ impl Msg {
             }
             ("image", _) => Body::Picture(Box::new(crate::pictures::Card::from_wire(&wire["image"]))),
             ("team-change", _) => Body::TeamChange(Box::new(crate::team::Change::from_wire(&wire["teamChange"]))),
+            ("trigger", _) => Body::Trigger(Box::new(wire["trigger"].clone())),
             ("changes", _) => {
                 let changes = &wire["changes"];
                 Body::Changes {
@@ -981,6 +984,9 @@ fn Row(
         },
         Body::TeamChange(change) => rsx! {
             crate::team::TeamChangeCard { thread: thread.clone(), message: message.id.clone(), change: (**change).clone() }
+        },
+        Body::Trigger(card) => rsx! {
+            crate::triggers::TriggerCard { card: (**card).clone() }
         },
         Body::Changes { summary, files, undone } => rsx! {
             crate::changes::ChangesRow { thread: thread.clone(), message: message.id.clone(), summary: summary.clone(), files: files.clone(), undone: *undone, working }

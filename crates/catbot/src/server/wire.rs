@@ -251,6 +251,19 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                 "error": detail["error"],
             },
         }),
+        Role::Step if detail["kind"] == "trigger" => json!({
+            "role": "bot",
+            "kind": "trigger",
+            "trigger": {
+                "said": m.body,
+                "action": detail["action"],
+                "id": detail["triggerId"],
+                "name": detail["name"],
+                "when": detail["when"],
+                "before": detail["before"],
+                "deleted": detail["deleted"],
+            },
+        }),
         Role::Step if detail["kind"] == "changes" => json!({
             "role": "bot",
             "kind": "changes",

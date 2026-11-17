@@ -346,7 +346,7 @@ fn fill(trigger: &mut Trigger, body: &Value) -> Result<(), String> {
         trigger.prompt = prompt.to_string();
     }
     if !body["schedule"].is_null() {
-        let schedule: Schedule = serde_json::from_value(body["schedule"].clone()).map_err(|e| format!("that schedule isn't one Catbot knows: {e}"))?;
+        let schedule: Schedule = serde_json::from_value(plain_schedule(&body["schedule"])).map_err(|e| format!("that schedule isn't one Catbot knows: {e}"))?;
         schedule.check()?;
         trigger.schedule = Some(schedule);
     }
@@ -360,6 +360,27 @@ fn fill(trigger: &mut Trigger, body: &Value) -> Result<(), String> {
         return Err("instructions for the bot".into());
     }
     Ok(())
+}
+
+/// A schedule as people and bots write it, made plain: day names become numbers, and an
+/// interval with no start counts from now.
+fn plain_schedule(given: &Value) -> Value {
+    let mut s = given.clone();
+    if let Some(days) = s["days"].as_array() {
+        const NAMES: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+        let plain: Vec<Value> = days
+            .iter()
+            .map(|d| match d.as_str() {
+                Some(name) => NAMES.iter().position(|n| name.to_lowercase().starts_with(n)).map(|i| json!(i + 1)).unwrap_or(d.clone()),
+                None => d.clone(),
+            })
+            .collect();
+        s["days"] = json!(plain);
+    }
+    if s["type"] == "interval" && s["start"].is_null() {
+        s["start"] = json!(Local::now().format("%Y-%m-%dT%H:%M").to_string());
+    }
+    s
 }
 
 pub fn update(app: &App, id: &str, body: &Value) -> Result<Trigger, String> {
@@ -442,6 +463,11 @@ pub fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>
             let run = start(app, &trigger, "manual", None, None).map_err(bad)?;
             Ok((StatusCode::OK, json!({ "run": run })))
         }
+        (&Method::GET, [id]) => {
+            let trigger = list(app).into_iter().find(|t| t.id == *id).ok_or((StatusCode::NOT_FOUND, "no such trigger".to_string()))?;
+            let latest = runs(app).into_iter().find(|r| r.trigger_id == trigger.id);
+            Ok((StatusCode::OK, json!({ "trigger": shown(app, &trigger, latest.as_ref()) })))
+        }
         (&Method::GET, [id, "runs"]) => {
             let mine: Vec<Run> = runs(app).into_iter().filter(|r| r.trigger_id == *id).collect();
             Ok((StatusCode::OK, json!({ "runs": mine })))
@@ -472,6 +498,10 @@ pub fn start(app: &Arc<App>, trigger: &Trigger, source: &str, scheduled_for: Opt
         None => {
             let made = app
                 .with_store(|store| {
+                    // The bot keeps opening to the chat it opens to now, not to this newer one.
+                    if let Some(current) = store.current_conversation(&bot.id)? {
+                        store.open_conversation(&current)?;
+                    }
                     let c = store.start_conversation(&bot.id, None)?;
                     store.set_title(&c.id, &trigger.name, true)?;
                     Ok(c)
@@ -598,9 +628,161 @@ pub fn tick(app: &Arc<App>, now: DateTime<Local>) {
     }
 }
 
-/// For the bots: what triggers they have (14.2 uses this in their note).
+/// For the bots: what triggers they have.
 pub fn of_bot(app: &App, bot_id: &str) -> Vec<Trigger> {
     list(app).into_iter().filter(|t| t.bot_id == bot_id).collect()
+}
+
+/// At most this many triggers for one bot.
+const MOST_PER_BOT: usize = 50;
+
+const SCHEDULE_HELP: &str = "A schedule is one of: {\"type\":\"weekly\",\"time\":\"09:00\",\"days\":[1,2,3,4,5]} (days 1 = Monday … 7 = Sunday; names like \"mon\" work too); {\"type\":\"interval\",\"everyMinutes\":60} (5 to 1440 minutes; optional \"days\", \"from\":\"09:00\" and \"to\":\"17:00\", and \"start\" to count from); {\"type\":\"once\",\"at\":\"2026-11-18T09:00\"}. Times are on this computer's clock.";
+
+/// The bots' trigger tools (stage 14.2): Moo chose that a bot sets a trigger up at once, like
+/// MausBot. The chat gets a card with what it did, and Pause, Undo and Edit.
+pub fn tools() -> Vec<Value> {
+    vec![
+        json!({
+            "name": "trigger_info",
+            "description": "Your triggers (\"when something happens, you do something\"): each one's id, name, instructions, when it runs, whether it's on, when it runs next and how its last run went. Give trigger_id for one trigger with its recent runs. Also says the time now and this computer's time zone.",
+            "inputSchema": { "type": "object", "properties": {
+                "trigger_id": { "type": "string", "description": "One trigger, with its recent runs." },
+            } },
+        }),
+        json!({
+            "name": "trigger",
+            "description": format!("Set up or change one of your triggers. When it comes due, you get its instructions in a chat of the trigger's own, which keeps what you did on earlier runs; write the instructions so they make sense on their own. It takes effect at once, and the person sees a card in this chat with Pause, Undo and Edit. Actions: create (name, instructions, schedule), update (trigger_id and what changes), pause, resume, run_now (trigger_id). {SCHEDULE_HELP}"),
+            "inputSchema": { "type": "object", "properties": {
+                "action": { "type": "string", "enum": ["create", "update", "pause", "resume", "run_now"] },
+                "trigger_id": { "type": "string" },
+                "name": { "type": "string", "description": "A few words, shown in the Triggers list and as its chat's name." },
+                "instructions": { "type": "string", "description": "What to do each time." },
+                "schedule": { "type": "object", "description": "When it runs; see above." },
+            }, "required": ["action"] },
+        }),
+        json!({
+            "name": "delete_trigger",
+            "description": "Delete one of your triggers. Its chat stays.",
+            "inputSchema": { "type": "object", "properties": { "trigger_id": { "type": "string" } }, "required": ["trigger_id"] },
+        }),
+    ]
+}
+
+/// A trigger as a bot is shown it.
+fn for_bot(trigger: &Trigger, latest: Option<&Run>) -> Value {
+    let prompt: String = trigger.prompt.chars().take(2000).collect();
+    json!({
+        "id": trigger.id,
+        "name": trigger.name,
+        "instructions": prompt,
+        "enabled": trigger.enabled,
+        "when": trigger.when(),
+        "schedule": trigger.schedule,
+        "nextAt": trigger.next_at,
+        "runs": trigger.runs,
+        "skipped": trigger.skipped,
+        "latestRun": latest.map(|r| json!({ "status": r.status, "startedAt": r.started_at, "output": r.output.as_deref().map(|o| o.chars().take(300).collect::<String>()), "error": r.error })),
+    })
+}
+
+/// Leaves a card in the chat the bot is working in: what it did to which trigger. `before` is
+/// the trigger as it was, so Undo can put it back.
+fn card(app: &App, thread: &str, bot_name: &str, action: &str, trigger: &Trigger, before: Option<&Trigger>) {
+    let said = match action {
+        "created" => format!("{bot_name} set up a trigger"),
+        "updated" => format!("{bot_name} changed a trigger"),
+        "paused" => format!("{bot_name} paused a trigger"),
+        "resumed" => format!("{bot_name} turned a trigger back on"),
+        _ => format!("{bot_name} deleted a trigger"),
+    };
+    let detail = json!({
+        "kind": "trigger",
+        "action": action,
+        "triggerId": trigger.id,
+        "name": trigger.name,
+        "when": trigger.when(),
+        "before": before.map(|b| json!({ "name": b.name, "prompt": b.prompt, "schedule": b.schedule, "enabled": b.enabled })),
+        "deleted": (action == "deleted").then(|| json!({ "botId": trigger.bot_id, "name": trigger.name, "prompt": trigger.prompt, "schedule": trigger.schedule })),
+    });
+    super::turns::save_and_send(app, thread, Role::Step, &said, Some(&detail));
+}
+
+/// One of the bots' trigger tools. A bot sees and changes only its own triggers.
+pub fn call(app: &Arc<App>, grant: &super::bot_tools::Grant, name: &str, args: &Value) -> Result<String, String> {
+    let bot = app.with_store(|store| store.bot_by_id(&grant.bot_id)).flatten().ok_or("the bot is gone")?;
+    let mine = of_bot(app, &bot.id);
+    let all_runs = runs(app);
+    let find = |id: Option<&str>| -> Result<Trigger, String> {
+        let id = id.ok_or("which trigger? (trigger_id)")?;
+        mine.iter().find(|t| t.id == id).cloned().ok_or_else(|| format!("you have no trigger {id}; trigger_info lists yours"))
+    };
+    match name {
+        "trigger_info" => {
+            let header = json!({ "now": now(), "timeZone": Local::now().format("UTC%:z").to_string() });
+            let mut out = header;
+            match args["trigger_id"].as_str() {
+                Some(_) => {
+                    let one = find(args["trigger_id"].as_str())?;
+                    let recent: Vec<&Run> = all_runs.iter().filter(|r| r.trigger_id == one.id).take(10).collect();
+                    out["trigger"] = for_bot(&one, recent.first().copied());
+                    out["recentRuns"] = json!(recent.iter().map(|r| json!({ "status": r.status, "source": r.source, "startedAt": r.started_at, "output": r.output.as_deref().map(|o| o.chars().take(300).collect::<String>()), "error": r.error })).collect::<Vec<_>>());
+                }
+                None => {
+                    out["triggers"] = json!(mine.iter().map(|t| for_bot(t, all_runs.iter().find(|r| r.trigger_id == t.id))).collect::<Vec<_>>());
+                }
+            }
+            Ok(serde_json::to_string_pretty(&out).unwrap_or_default())
+        }
+        "trigger" => {
+            let action = args["action"].as_str().unwrap_or_default();
+            let mut body = json!({});
+            for (from, to) in [("name", "name"), ("instructions", "prompt"), ("schedule", "schedule")] {
+                if !args[from].is_null() {
+                    body[to] = args[from].clone();
+                }
+            }
+            match action {
+                "create" => {
+                    if mine.len() >= MOST_PER_BOT {
+                        return Err(format!("you already have {MOST_PER_BOT} triggers; delete one first"));
+                    }
+                    body["botId"] = json!(bot.id);
+                    let made = create(app, &body, &bot.id)?;
+                    card(app, &grant.thread, &bot.name, "created", &made, None);
+                    Ok(format!("Set up “{}” ({}), id {}. Next run: {}.", made.name, made.when(), made.id, made.next_at.as_deref().unwrap_or("none")))
+                }
+                "update" => {
+                    let before = find(args["trigger_id"].as_str())?;
+                    let changed = update(app, &before.id, &body)?;
+                    card(app, &grant.thread, &bot.name, "updated", &changed, Some(&before));
+                    Ok(format!("Changed “{}” ({}). Next run: {}.", changed.name, changed.when(), changed.next_at.as_deref().unwrap_or("none")))
+                }
+                "pause" | "resume" => {
+                    let before = find(args["trigger_id"].as_str())?;
+                    let changed = update(app, &before.id, &json!({ "enabled": action == "resume" }))?;
+                    card(app, &grant.thread, &bot.name, if action == "pause" { "paused" } else { "resumed" }, &changed, Some(&before));
+                    Ok(format!("“{}” is {}.", changed.name, if changed.enabled { "on" } else { "paused" }))
+                }
+                "run_now" => {
+                    let one = find(args["trigger_id"].as_str())?;
+                    // A run can't start itself again: that would never end.
+                    if one.thread.as_deref() == Some(grant.thread.as_str()) {
+                        return Err("this is that trigger's own chat; it can't run itself from here".into());
+                    }
+                    let run = start(app, &one, "manual", None, None)?;
+                    Ok(format!("Started “{}”: its run is {} in its own chat.", one.name, run.status))
+                }
+                other => Err(format!("{other:?} isn't an action; use create, update, pause, resume or run_now")),
+            }
+        }
+        "delete_trigger" => {
+            let one = find(args["trigger_id"].as_str())?;
+            delete(app, &one.id)?;
+            card(app, &grant.thread, &bot.name, "deleted", &one, None);
+            Ok(format!("Deleted “{}”. Its chat stays.", one.name))
+        }
+        other => Err(format!("unknown tool {other}")),
+    }
 }
 
 #[cfg(test)]
