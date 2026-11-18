@@ -1,5 +1,6 @@
 //! Settings › Computers (stage 17.1): which bots have a computer of their own, whether each is
-//! on, and a live view of its screen that can be watched or taken over.
+//! on, and a live view of its screen that can be watched or taken over. Stage 17.2: a computer
+//! can be at Boat instead (boat.dev), with Boat's key kept here.
 
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -10,21 +11,22 @@ use crate::live::State;
 const HEADING: &str = "text-[13px] font-semibold uppercase tracking-wide text-ink-tertiary";
 const BUTTON: &str = "rounded-lg bg-control px-2.5 py-1 text-[12px] font-medium text-ink hover:bg-raised disabled:opacity-50";
 
-/// Where a bot's live view is, or None where it can't be shown (the phone, away from home:
-/// the screen is carried only through the home door).
-pub fn view_url(bot_id: &str, use_it: bool) -> Option<String> {
-    let only = if use_it { 0 } else { 1 };
-    let path = format!("/computer/view/vnc.html?autoconnect=1&reconnect=1&resize=scale&show_dot=1&view_only={only}&path=computer/{bot_id}/websockify");
+/// Where a live view Catbot gave is opened from here: Catbot's own view is on this server (the
+/// desktop app adds its address); away from home it isn't reachable, so None.
+pub fn view_url(url: &str) -> Option<String> {
+    if !url.starts_with('/') {
+        return Some(url.to_string());
+    }
     #[cfg(target_arch = "wasm32")]
     {
-        Some(path)
+        Some(url.to_string())
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
         if crate::link::active().is_some() {
             return None;
         }
-        Some(format!("{}{path}", api::server()))
+        Some(format!("{}{url}", api::server()))
     }
 }
 
@@ -44,7 +46,11 @@ pub fn ComputersSettings() -> Element {
     let mut found = use_signal(|| Value::Null);
     let mut problem = use_signal(|| None::<String>);
     let mut confirm = use_signal(|| None::<(String, &'static str)>);
-    let mut watching = use_signal(|| None::<(String, String)>);
+    let mut watching = use_signal(|| None::<(String, String, bool)>);
+    let mut boat_key = use_signal(String::new);
+    let mut connecting = use_signal(|| false);
+    // Bumped when a move is called off, so the Where menu shows where it still is.
+    let mut kept = use_signal(|| 0u32);
     use_effect(move || {
         let _ = state.read().computers_changed;
         spawn(async move {
@@ -72,12 +78,29 @@ pub fn ComputersSettings() -> Element {
     let image_problem = list["imageProblem"].as_str().map(str::to_string);
     let idle = list["idleMinutes"].as_u64().unwrap_or(30);
     let entries: Vec<Value> = list["bots"].as_array().cloned().unwrap_or_default();
+    let boat_on = list["boat"]["connected"] == true;
+    let boat_ends = list["boat"]["ends"].as_str().unwrap_or_default().to_string();
+    let here = list["engine"].is_string();
+    let connect = use_callback(move |key: Option<String>| {
+        connecting.set(true);
+        problem.set(None);
+        spawn(async move {
+            match api::call("PUT", "/api/computers/boat", Some(&json!({ "key": key }))).await {
+                Ok(_) => boat_key.set(String::new()),
+                Err(err) => problem.set(Some(err)),
+            }
+            if let Ok(list) = api::get("/api/computers").await {
+                found.set(list);
+            }
+            connecting.set(false);
+        });
+    });
     let bots: Vec<(String, String)> = state.read().bots.iter().map(|b| (b.id.clone(), b.name.clone())).collect();
     rsx! {
         section { class: "flex flex-col gap-3", "data-computers": true,
             h2 { class: HEADING, "Computers" }
             p { class: "text-[13px] leading-relaxed text-ink-secondary",
-                "A bot with a computer has a small Linux desktop with a browser of its own, in a container on this computer. Nothing of yours is in it, and what it does inside it doesn't ask; sending, posting and using your apps still do. You can watch it work, or take over."
+                "A bot with a computer has a small Linux desktop with a browser of its own: in a container on this computer, or at Boat. Nothing of yours is in it, and what it does inside it doesn't ask; sending, posting and using your apps still do. You can watch it work, or take over."
             }
             match engine {
                 None => rsx! {
@@ -106,6 +129,10 @@ pub fn ComputersSettings() -> Element {
                     let (words, tone) = state_words(&now);
                     let watchers = entry["watching"].as_u64().unwrap_or(0);
                     let fault = entry["problem"].as_str().map(str::to_string);
+                    let kind = entry["kind"].as_str().unwrap_or("container").to_string();
+                    let at_boat = kind == "boat";
+                    let can_run = has && (at_boat || here);
+                    let b6 = bot_id.clone();
                     let asking = confirm().filter(|(id, _)| *id == bot_id).map(|(_, what)| what);
                     let (b1, b2, b3, b4, b5) = (bot_id.clone(), bot_id.clone(), bot_id.clone(), bot_id.clone(), bot_id.clone());
                     let (n1, n2) = (name.clone(), name.clone());
@@ -121,24 +148,38 @@ pub fn ComputersSettings() -> Element {
                                 }
                                 crate::settings::Switch {
                                     checked: has,
-                                    disabled: engine_missing(&list),
+                                    disabled: !has && !here && !boat_on,
                                     label: format!("{n1} has a computer"),
                                     on_toggle: move |_| {
                                         if has {
                                             confirm.set(Some((b1.clone(), "remove")));
                                         } else {
-                                            act.call(("PUT", format!("/api/computers/{b1}"), Some(json!({ "on": true }))));
+                                            let kind = if here { "container" } else { "boat" };
+                                            act.call(("PUT", format!("/api/computers/{b1}"), Some(json!({ "on": true, "kind": kind }))));
                                         }
                                     },
                                 }
                             }
                             if has {
                                 div { class: "flex flex-wrap items-center gap-2",
+                                    select {
+                                        key: "{bot_id}-{kept}",
+                                        "data-computer-kind": true,
+                                        "aria-label": "Where {name}'s computer runs",
+                                        class: "rounded-lg border border-hairline/60 bg-raised px-2 py-1 text-[12px] text-ink",
+                                        disabled: !(now == "on" || now == "off"),
+                                        onchange: move |e| {
+                                            let to = if e.value() == "boat" { "move-boat" } else { "move-container" };
+                                            confirm.set(Some((b6.clone(), to)));
+                                        },
+                                        option { value: "container", selected: !at_boat, disabled: !here, "On this computer" }
+                                        option { value: "boat", selected: at_boat, disabled: !boat_on, "At Boat (cloud)" }
+                                    }
                                     if now == "on" {
-                                        button { r#type: "button", class: BUTTON, "data-computer-watch": true, onclick: move |_| watching.set(Some((b2.clone(), n2.clone()))), "Watch" }
+                                        button { r#type: "button", class: BUTTON, "data-computer-watch": true, onclick: move |_| watching.set(Some((b2.clone(), n2.clone(), at_boat))), "Watch" }
                                         button { r#type: "button", class: BUTTON, "data-computer-stop": true, onclick: move |_| act.call(("POST", format!("/api/computers/{b3}/stop"), None)), "Stop" }
                                     } else if now == "off" {
-                                        button { r#type: "button", class: BUTTON, "data-computer-start": true, disabled: engine_missing(&list), onclick: move |_| act.call(("POST", format!("/api/computers/{b3}/start"), None)), "Start" }
+                                        button { r#type: "button", class: BUTTON, "data-computer-start": true, disabled: !can_run, onclick: move |_| act.call(("POST", format!("/api/computers/{b3}/start"), None)), "Start" }
                                     }
                                     if now == "on" || now == "off" {
                                         button { r#type: "button", class: "rounded-lg px-2 py-1 text-[12px] text-ink-secondary hover:bg-raised hover:text-danger", onclick: move |_| confirm.set(Some((b4.clone(), "reset"))), "Reset…" }
@@ -148,22 +189,40 @@ pub fn ComputersSettings() -> Element {
                             if let Some(what) = asking {
                                 div { class: "flex flex-wrap items-center gap-2 rounded-lg bg-inset px-2 py-1.5", "data-computer-confirm": "{what}",
                                     span { class: "min-w-0 flex-1 text-[12px] text-ink",
-                                        if what == "reset" { "Throw this computer away and start fresh? Everything on it goes." } else { "Take this bot's computer away? Everything on it goes." }
+                                        match what {
+                                            "reset" => "Throw this computer away and start fresh? Everything on it goes.",
+                                            "move-boat" => "Move this bot's computer to Boat? Its computer here and everything on it goes; Boat bills while it's on.",
+                                            "move-container" => "Move this bot's computer here? Its computer at Boat and everything on it goes.",
+                                            _ => "Take this bot's computer away? Everything on it goes.",
+                                        }
                                     }
                                     button {
                                         r#type: "button",
                                         class: "rounded-lg bg-danger px-2.5 py-1 text-[12px] font-medium text-white",
                                         "data-computer-confirm-yes": true,
                                         onclick: move |_| {
-                                            if what == "reset" {
-                                                act.call(("POST", format!("/api/computers/{b5}/reset"), None));
-                                            } else {
-                                                act.call(("PUT", format!("/api/computers/{b5}"), Some(json!({ "on": false }))));
+                                            match what {
+                                                "reset" => act.call(("POST", format!("/api/computers/{b5}/reset"), None)),
+                                                "move-boat" => act.call(("PUT", format!("/api/computers/{b5}"), Some(json!({ "on": true, "kind": "boat" })))),
+                                                "move-container" => act.call(("PUT", format!("/api/computers/{b5}"), Some(json!({ "on": true, "kind": "container" })))),
+                                                _ => act.call(("PUT", format!("/api/computers/{b5}"), Some(json!({ "on": false })))),
                                             }
                                         },
-                                        if what == "reset" { "Reset" } else { "Take it away" }
+                                        match what {
+                                            "reset" => "Reset",
+                                            "move-boat" | "move-container" => "Move it",
+                                            _ => "Take it away",
+                                        }
                                     }
-                                    button { r#type: "button", class: "rounded-lg px-2 py-1 text-[12px] text-ink-secondary hover:bg-raised", onclick: move |_| confirm.set(None), "Keep" }
+                                    button {
+                                        r#type: "button",
+                                        class: "rounded-lg px-2 py-1 text-[12px] text-ink-secondary hover:bg-raised",
+                                        onclick: move |_| {
+                                            confirm.set(None);
+                                            kept += 1;
+                                        },
+                                        "Keep"
+                                    }
                                 }
                             }
                             if let Some(err) = fault.filter(|_| has) {
@@ -176,22 +235,72 @@ pub fn ComputersSettings() -> Element {
             if let Some(err) = problem() {
                 p { role: "alert", class: "text-[12px] text-danger", "{err}" }
             }
+            div { class: "flex flex-col gap-2 rounded-lg border border-hairline/40 px-3 py-2", "data-boat": true,
+                div { class: "flex items-center gap-2",
+                    span { class: "flex-1 text-[14px] font-medium text-ink", "Boat (cloud computers)" }
+                    if boat_on {
+                        span { class: "text-[12px] text-ink-tertiary", "Connected · key …{boat_ends}" }
+                        button { r#type: "button", class: BUTTON, disabled: connecting(), onclick: move |_| connect.call(None), "Disconnect" }
+                    }
+                }
+                p { class: "text-[12px] leading-relaxed text-ink-secondary",
+                    "A bot's computer can be at boat.dev instead: on while this computer is off, and nothing runs here. Boat bills per second while one is on ($20 a month plan) and nothing while it's stopped. Each gets none of your Boat account's secrets."
+                }
+                if !boat_on {
+                    div { class: "flex gap-2",
+                        input {
+                            class: "w-full rounded-lg bg-inset px-3 py-2 text-[13px] text-ink focus:outline-none focus:ring-1 focus:ring-accent",
+                            r#type: "password",
+                            placeholder: "Boat API key (boat_…)",
+                            "data-boat-key": true,
+                            value: "{boat_key}",
+                            oninput: move |e| boat_key.set(e.value()),
+                        }
+                        button {
+                            r#type: "button",
+                            class: "rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-50",
+                            "data-boat-connect": true,
+                            disabled: connecting() || boat_key().trim().is_empty(),
+                            onclick: move |_| connect.call(Some(boat_key())),
+                            "Connect"
+                        }
+                    }
+                }
+            }
         }
-        if let Some((bot_id, name)) = watching() {
-            ComputerView { bot_id, name, on_close: move |_| watching.set(None) }
+        if let Some((bot_id, name, at_boat)) = watching() {
+            ComputerView { bot_id, name, at_boat, on_close: move |_| watching.set(None) }
         }
     }
 }
 
-fn engine_missing(list: &Value) -> bool {
-    list["engine"].is_null()
-}
-
-/// A bot's screen, live: watched by default, or used ("Let me use it").
+/// A bot's screen, live: watched by default, or used ("Let me use it"). Catbot gives the
+/// address: its own view for a computer here, Boat's for one there.
 #[component]
-pub fn ComputerView(bot_id: String, name: String, on_close: EventHandler<()>) -> Element {
+pub fn ComputerView(bot_id: String, name: String, at_boat: bool, on_close: EventHandler<()>) -> Element {
     let mut use_it = use_signal(|| false);
-    let url = view_url(&bot_id, use_it());
+    let mut url = use_signal(|| None::<Result<Option<String>, String>>);
+    let id = bot_id.clone();
+    use_effect(move || {
+        let how = if use_it() { "use" } else { "watch" };
+        let id = id.clone();
+        url.set(None);
+        spawn(async move {
+            let found = api::get(&format!("/api/computers/{id}/view/{how}")).await;
+            url.set(Some(found.map(|f| f["url"].as_str().and_then(view_url))));
+        });
+    });
+    // While it's open the computer isn't idle (Boat's view can't be counted from here).
+    let id = bot_id.clone();
+    use_future(move || {
+        let id = id.clone();
+        async move {
+            loop {
+                crate::events::pause(60_000).await;
+                let _ = api::call("POST", &format!("/api/computers/{id}/watching"), None).await;
+            }
+        }
+    });
     rsx! {
         div {
             class: "fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4",
@@ -204,6 +313,11 @@ pub fn ComputerView(bot_id: String, name: String, on_close: EventHandler<()>) ->
                 onclick: move |e| e.stop_propagation(),
                 div { class: "flex items-center gap-3",
                     span { class: "min-w-0 flex-1 truncate text-[15px] font-semibold text-ink", "{name}'s computer" }
+                    if let Some(Ok(Some(link))) = url() {
+                        if at_boat {
+                            a { class: "text-[12px] text-accent underline", href: "{link}", target: "_blank", rel: "noopener", "Open in a new tab" }
+                        }
+                    }
                     label { class: "flex items-center gap-2 text-[13px] text-ink-secondary",
                         crate::settings::Switch { checked: use_it(), disabled: false, label: "Let me use it".to_string(), on_toggle: move |_| use_it.toggle() }
                         "Let me use it"
@@ -216,17 +330,23 @@ pub fn ComputerView(bot_id: String, name: String, on_close: EventHandler<()>) ->
                         "×"
                     }
                 }
-                match url {
-                    Some(url) => rsx! {
+                match url() {
+                    None => rsx! {
+                        div { class: "flex aspect-[16/10] w-full items-center justify-center rounded-lg border border-hairline/40 bg-black text-[13px] text-white/70", "Connecting…" }
+                    },
+                    Some(Ok(Some(link))) => rsx! {
                         iframe {
-                            key: "{url}",
+                            key: "{link}",
                             title: "{name}'s screen",
-                            src: "{url}",
+                            src: "{link}",
                             class: "aspect-[16/10] w-full rounded-lg border border-hairline/40 bg-black",
                         }
                     },
-                    None => rsx! {
+                    Some(Ok(None)) => rsx! {
                         p { class: "text-[13px] text-ink-secondary", "The live view is at home only: open Catbot on the computer it runs on." }
+                    },
+                    Some(Err(err)) => rsx! {
+                        p { role: "alert", class: "text-[13px] text-danger", "{err}" }
                     },
                 }
                 p { class: "text-[12px] text-ink-tertiary",

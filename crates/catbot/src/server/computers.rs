@@ -11,6 +11,9 @@
 //! computer nobody has used or watched for a while is stopped (`CATBOT_COMPUTER_IDLE_MINUTES`,
 //! 30 unless set; 0 never).
 //!
+//! A bot's computer is either kind; stage 17.2 adds Boat (`boat.rs`). Each step below works for
+//! both: starting, stopping, the tools and the live view.
+//!
 //! The person watches (or takes over) through noVNC. Its files come from the image, copied out
 //! once when it's built, and Catbot serves them itself at `/computer/view/`: nothing a bot does
 //! inside its box can change the page that runs at Catbot's address. Only the screen's
@@ -49,9 +52,22 @@ const TOOLS: [&str; 3] = ["computer_run", "computer_screen", "computer_open"];
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Entry {
-    /// "container" (stage 17.2 adds "boat").
+    /// "container" or "boat".
     pub kind: String,
     pub since: String,
+    /// Its sandbox at Boat, once it has one.
+    pub sandbox: String,
+}
+
+impl Entry {
+    fn boat(&self) -> bool {
+        self.kind == "boat"
+    }
+
+    /// Its screen's size.
+    pub fn size(&self) -> (i64, i64) {
+        if self.boat() { (super::boat::WIDTH, super::boat::HEIGHT) } else { (WIDTH, HEIGHT) }
+    }
 }
 
 pub fn entries(app: &App) -> BTreeMap<String, Entry> {
@@ -69,6 +85,27 @@ fn changed(app: &App) {
 
 pub fn has(app: &App, bot_id: &str) -> bool {
     entries(app).contains_key(bot_id)
+}
+
+fn entry(app: &App, bot_id: &str) -> Option<Entry> {
+    entries(app).remove(bot_id)
+}
+
+fn set_sandbox(app: &App, bot_id: &str, id: &str) {
+    let mut all = entries(app);
+    if let Some(e) = all.get_mut(bot_id).filter(|e| e.sandbox != id) {
+        e.sandbox = id.to_string();
+        keep(app, &all);
+    }
+}
+
+/// Whether a bot's computer is on.
+async fn is_on(app: &App, bot_id: &str) -> bool {
+    match entry(app, bot_id) {
+        Some(e) if e.boat() => !e.sandbox.is_empty() && super::boat::state(app, &e.sandbox).await.ok().flatten().is_some_and(|s| super::boat::is_running(&s)),
+        Some(_) => running(&container(bot_id)).await == Some(true),
+        None => false,
+    }
 }
 
 /// What Catbot knows of the computers while it runs.
@@ -270,7 +307,7 @@ async fn build(app: &App) -> Result<(), String> {
 // ---- starting and stopping -----------------------------------------------------------------
 
 /// Starts a bot's computer, making it first if need be; waits until its screen answers.
-pub async fn start(app: &Arc<App>, bot_id: &str) -> Result<u16, String> {
+pub async fn start(app: &Arc<App>, bot_id: &str) -> Result<(), String> {
     // One start at a time per bot: a second waits for the first.
     loop {
         let busy = app.computers.with_box(bot_id, |live| live.busy);
@@ -281,15 +318,15 @@ pub async fn start(app: &Arc<App>, bot_id: &str) -> Result<u16, String> {
                 while app.computers.with_box(bot_id, |live| live.busy.is_some()) {
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
-                return match app.computers.with_box(bot_id, |live| (live.port, live.problem.clone())) {
-                    (Some(port), None) => Ok(port),
-                    (_, Some(problem)) => Err(problem),
-                    _ => Err("it didn't start".into()),
+                return match app.computers.with_box(bot_id, |live| live.problem.clone()) {
+                    None => Ok(()),
+                    Some(problem) => Err(problem),
                 };
             }
         }
     }
-    let setting_up = !image_ready(app).await;
+    let boat = entry(app, bot_id).is_some_and(|e| e.boat());
+    let setting_up = !boat && !image_ready(app).await;
     app.computers.with_box(bot_id, |live| {
         live.busy = Some(if setting_up { "setting up" } else { "starting" });
         live.problem = None;
@@ -300,7 +337,7 @@ pub async fn start(app: &Arc<App>, bot_id: &str) -> Result<u16, String> {
         live.busy = None;
         match &started {
             Ok(port) => {
-                live.port = Some(*port);
+                live.port = *port;
                 live.last_used = Some(Instant::now());
             }
             Err(problem) => {
@@ -310,13 +347,22 @@ pub async fn start(app: &Arc<App>, bot_id: &str) -> Result<u16, String> {
         }
     });
     changed(app);
-    started
+    started.map(|_| ())
 }
 
-async fn bring_up(app: &Arc<App>, bot_id: &str) -> Result<u16, String> {
-    if !has(app, bot_id) {
-        return Err("this bot has no computer".into());
+/// Brings a computer up: a container's screen port, or None for Boat's.
+async fn bring_up(app: &Arc<App>, bot_id: &str) -> Result<Option<u16>, String> {
+    let e = entry(app, bot_id).ok_or("this bot has no computer")?;
+    if e.boat() {
+        let name = app.with_store(|store| store.bot_by_id(bot_id)).flatten().map(|b| b.name).unwrap_or_else(|| "a bot".into());
+        let id = super::boat::bring_up(app, &e.sandbox, &name).await?;
+        set_sandbox(app, bot_id, &id);
+        return Ok(None);
     }
+    bring_up_container(app, bot_id).await.map(Some)
+}
+
+async fn bring_up_container(app: &Arc<App>, bot_id: &str) -> Result<u16, String> {
     ensure_image(app).await?;
     let name = container(bot_id);
     match running(&name).await {
@@ -345,10 +391,15 @@ async fn bring_up(app: &Arc<App>, bot_id: &str) -> Result<u16, String> {
 pub async fn stop(app: &Arc<App>, bot_id: &str) -> Result<(), String> {
     app.computers.with_box(bot_id, |live| live.busy = Some("stopping"));
     changed(app);
-    let name = container(bot_id);
-    let stopped = match running(&name).await {
-        Some(true) => must(&["stop", "-t", "5", &name], Duration::from_secs(60)).await.map(|_| ()),
-        _ => Ok(()),
+    let stopped = match entry(app, bot_id) {
+        Some(e) if e.boat() => super::boat::stop(app, &e.sandbox).await,
+        _ => {
+            let name = container(bot_id);
+            match running(&name).await {
+                Some(true) => must(&["stop", "-t", "5", &name], Duration::from_secs(60)).await.map(|_| ()),
+                _ => Ok(()),
+            }
+        }
     };
     app.computers.with_box(bot_id, |live| {
         live.busy = None;
@@ -363,12 +414,36 @@ pub async fn stop(app: &Arc<App>, bot_id: &str) -> Result<(), String> {
 async fn reset(app: &Arc<App>, bot_id: &str) -> Result<(), String> {
     app.computers.with_box(bot_id, |live| live.busy = Some("stopping"));
     changed(app);
-    let removed = must(&["rm", "-f", &container(bot_id)], Duration::from_secs(60)).await.map(|_| ());
+    let removed = throw_away(app, bot_id).await;
     app.computers.with(|inner| {
         inner.boxes.remove(bot_id);
     });
     changed(app);
     removed
+}
+
+/// A deleted bot's computer: thrown away, and no longer listed.
+pub async fn forget(app: &Arc<App>, bot_id: &str) {
+    if let Err(err) = throw_away(app, bot_id).await {
+        eprintln!("catbot: a deleted bot's computer couldn't be thrown away: {err}");
+    }
+    let mut all = entries(app);
+    all.remove(bot_id);
+    app.computers.with(|inner| inner.boxes.remove(bot_id));
+    keep(app, &all);
+}
+
+/// Deletes a bot's computer wherever it is: its container, or its sandbox at Boat.
+async fn throw_away(app: &App, bot_id: &str) -> Result<(), String> {
+    match entry(app, bot_id) {
+        Some(e) if e.boat() => {
+            super::boat::delete(app, &e.sandbox).await?;
+            set_sandbox(app, bot_id, "");
+            Ok(())
+        }
+        _ if engine().is_some() => must(&["rm", "-f", &container(bot_id)], Duration::from_secs(60)).await.map(|_| ()),
+        _ => Ok(()),
+    }
 }
 
 /// The minutes a computer may sit unused before it's stopped; 0 never.
@@ -385,15 +460,15 @@ pub async fn keep_tidy(app: Arc<App>) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     loop {
         tick.tick().await;
-        if engine().is_none() {
-            continue;
-        }
-        for (bot_id, _) in entries(&app) {
+        for (bot_id, e) in entries(&app) {
+            if !e.boat() && engine().is_none() {
+                continue;
+            }
             let (busy, viewers, last_used) = app.computers.with_box(&bot_id, |live| (live.busy, live.viewers, live.last_used));
             if busy.is_some() || viewers > 0 {
                 continue;
             }
-            if running(&container(&bot_id)).await != Some(true) {
+            if !is_on(&app, &bot_id).await {
                 continue;
             }
             match last_used {
@@ -410,28 +485,38 @@ pub async fn keep_tidy(app: Arc<App>) {
 
 // ---- the bot's tools -----------------------------------------------------------------------
 
-const ABOUT: &str = "your own computer: a Debian Linux desktop (1280×800 screen, Chromium, user `bot` with sudo). It's yours alone: none of the person's files are on it, and nothing you do on it needs asking. The person can watch it live.";
+/// How a bot's computer is described to it.
+fn about(e: &Entry) -> String {
+    let (w, h) = e.size();
+    let what = if e.boat() {
+        format!("an Ubuntu Linux desktop in the cloud ({w}×{h} screen, Chrome, user `user` with sudo)")
+    } else {
+        format!("a Debian Linux desktop ({w}×{h} screen, Chromium, user `bot` with sudo)")
+    };
+    format!("your own computer: {what}. It's yours alone: none of the person's files are on it, and nothing you do on it needs asking. The person can watch it live.")
+}
 
 pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
-    if !has(app, bot_id) {
-        return Vec::new();
-    }
+    let Some(e) = entry(app, bot_id) else { return Vec::new() };
+    let about = about(&e);
+    let (w, h) = e.size();
+    let (home, most) = if e.boat() { ("/home/user", super::boat::MOST_SECONDS) } else { ("/home/bot", 1800) };
     vec![
         json!({
             "name": "computer_run",
-            "description": format!("Run a shell command (bash) on {ABOUT} It starts in /home/bot; what you make there stays between runs. Output is cut to its last {MOST_OUTPUT} characters."),
+            "description": format!("Run a shell command (bash) on {about} It starts in {home}; what you make there stays between runs. Output is cut to its last {MOST_OUTPUT} characters."),
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "command": { "type": "string", "description": "The command, run with bash -lc" },
-                    "timeout_seconds": { "type": "integer", "description": "Stop it after this many seconds (default 120, at most 1800)" },
+                    "timeout_seconds": { "type": "integer", "description": format!("Stop it after this many seconds (default 120, at most {most})") },
                 },
                 "required": ["command"],
             },
         }),
         json!({
             "name": "computer_screen",
-            "description": format!("See and use the screen of {ABOUT} Take a screenshot first, then click, type, press keys or scroll; screenshot again to see what happened. x runs 0–{} left to right, y 0–{} top to bottom.", WIDTH - 1, HEIGHT - 1),
+            "description": format!("See and use the screen of {about} Take a screenshot first, then click, type, press keys or scroll; screenshot again to see what happened. x runs 0–{} left to right, y 0–{} top to bottom.", w - 1, h - 1),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -450,7 +535,7 @@ pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
         }),
         json!({
             "name": "computer_open",
-            "description": format!("Open a web address in the browser on {ABOUT}"),
+            "description": format!("Open a web address in the browser on {about}"),
             "inputSchema": {
                 "type": "object",
                 "properties": { "url": { "type": "string", "description": "An http or https address" } },
@@ -478,24 +563,37 @@ pub async fn call(app: &Arc<App>, grant: &Grant, name: &str, args: &Value) -> Va
 
 async fn use_computer(app: &Arc<App>, grant: &Grant, name: &str, args: &Value) -> Result<(String, Option<Vec<u8>>), String> {
     let bot_id = &grant.bot_id;
-    if engine().is_none() {
-        return Err("There's no Podman or Docker on the person's computer, so your computer can't run. They can install Podman (sudo apt install podman) and try again.".into());
-    }
+    let e = entry(app, bot_id).ok_or("You have no computer.")?;
     // Checked before anything starts: a wrong call doesn't wake the computer.
-    let work = plan(name, args)?;
-    if !image_ready(app).await {
-        let app = app.clone();
-        let bot_id = bot_id.clone();
-        tokio::spawn(async move {
-            let _ = start(&app, &bot_id).await;
-        });
-        return Err("Your computer is being set up for the first time; that takes a few minutes. Try again shortly.".into());
+    let most = if e.boat() { super::boat::MOST_SECONDS } else { 1800 };
+    let work = plan(name, args, e.size(), most)?;
+    if e.boat() {
+        if super::boat::key(app).is_none() {
+            return Err("Your computer is at Boat, and Boat isn't connected any more. The person can add its key in Settings › Computers.".into());
+        }
+    } else {
+        if engine().is_none() {
+            return Err("There's no Podman or Docker on the person's computer, so your computer can't run. They can install Podman (sudo apt install podman) and try again.".into());
+        }
+        if !image_ready(app).await {
+            let app = app.clone();
+            let bot_id = bot_id.clone();
+            tokio::spawn(async move {
+                let _ = start(&app, &bot_id).await;
+            });
+            return Err("Your computer is being set up for the first time; that takes a few minutes. Try again shortly.".into());
+        }
     }
-    let on = running(&container(bot_id)).await == Some(true) && app.computers.with_box(bot_id, |live| live.port.is_some() && live.busy.is_none());
-    if !on {
+    let ready = app.computers.with_box(bot_id, |live| live.busy.is_none() && (e.boat() || live.port.is_some()));
+    if !(ready && is_on(app, bot_id).await) {
         start(app, bot_id).await.map_err(|e| format!("Your computer didn't start: {e}"))?;
     }
     app.computers.with_box(bot_id, |live| live.last_used = Some(Instant::now()));
+    let e = entry(app, bot_id).ok_or("You have no computer.")?;
+    if e.boat() { on_boat(app, &e.sandbox, work).await } else { in_container(bot_id, work).await }
+}
+
+async fn in_container(bot_id: &str, work: Work) -> Result<(String, Option<Vec<u8>>), String> {
     let name = container(bot_id);
     match work {
         Work::Shell { command, seconds } => {
@@ -529,6 +627,35 @@ async fn use_computer(app: &Arc<App>, grant: &Grant, name: &str, args: &Value) -
     }
 }
 
+async fn on_boat(app: &App, id: &str, work: Work) -> Result<(String, Option<Vec<u8>>), String> {
+    use super::boat::{self, quote};
+    match work {
+        Work::Shell { command, seconds } => {
+            let done = boat::run(app, id, &command, seconds).await?;
+            let code = if done.timed_out { Some(124) } else { done.code };
+            let ran = Ran { code, out: done.out.into_bytes(), err: done.err };
+            Ok((shell_report(&ran, seconds), None))
+        }
+        Work::Screen { args, said } => {
+            let words: Vec<String> = args.iter().map(|a| quote(a)).collect();
+            let done = boat::run(app, id, &format!("DISPLAY=:0 xdotool {}", words.join(" ")), 60).await?;
+            if done.code != Some(0) {
+                return Err(format!("That didn't work: {}", last_lines(&done.err, 6)));
+            }
+            Ok((said, None))
+        }
+        Work::Screenshot => {
+            let jpeg = boat::screenshot(app, id).await.map_err(|e| format!("The screenshot didn't work: {e}"))?;
+            Ok((format!("The screen ({}×{}).", boat::WIDTH, boat::HEIGHT), Some(jpeg)))
+        }
+        Work::Open(url) => {
+            let command = format!("DISPLAY=:0 google-chrome-stable --no-first-run --no-default-browser-check {} >/dev/null 2>&1", quote(&url));
+            boat::start_command(app, id, &command).await.map_err(|e| format!("The browser didn't open it: {e}"))?;
+            Ok((format!("Opened {url} in the browser. Take a screenshot to see it."), None))
+        }
+    }
+}
+
 /// What a tool call does, checked.
 #[derive(Debug, PartialEq)]
 pub enum Work {
@@ -539,14 +666,15 @@ pub enum Work {
     Open(String),
 }
 
-pub fn plan(name: &str, args: &Value) -> Result<Work, String> {
+/// `size` is the screen's, `most` the longest a command may run.
+pub fn plan(name: &str, args: &Value, size: (i64, i64), most: u64) -> Result<Work, String> {
     match name {
         "computer_run" => {
             let command = args["command"].as_str().unwrap_or_default().trim().to_string();
             if command.is_empty() {
                 return Err("Say what command to run.".into());
             }
-            let seconds = args["timeout_seconds"].as_u64().unwrap_or(120).clamp(1, 1800);
+            let seconds = args["timeout_seconds"].as_u64().unwrap_or(120).clamp(1, most);
             Ok(Work::Shell { command, seconds })
         }
         "computer_open" => {
@@ -556,27 +684,27 @@ pub fn plan(name: &str, args: &Value) -> Result<Work, String> {
             }
             Ok(Work::Open(url))
         }
-        "computer_screen" => screen(args),
+        "computer_screen" => screen(args, size),
         _ => Err(format!("unknown tool {name}")),
     }
 }
 
-fn point(args: &Value, x: &str, y: &str) -> Result<(i64, i64), String> {
+fn point(args: &Value, x: &str, y: &str, (w, h): (i64, i64)) -> Result<(i64, i64), String> {
     match (args[x].as_i64(), args[y].as_i64()) {
-        (Some(px), Some(py)) if (0..WIDTH).contains(&px) && (0..HEIGHT).contains(&py) => Ok((px, py)),
-        (Some(_), Some(_)) => Err(format!("({x}, {y}) is off the screen: it's {WIDTH}×{HEIGHT}.")),
+        (Some(px), Some(py)) if (0..w).contains(&px) && (0..h).contains(&py) => Ok((px, py)),
+        (Some(_), Some(_)) => Err(format!("({x}, {y}) is off the screen: it's {w}×{h}.")),
         _ => Err(format!("Say where: {x} and {y}.")),
     }
 }
 
-fn screen(args: &Value) -> Result<Work, String> {
+fn screen(args: &Value, size: (i64, i64)) -> Result<Work, String> {
     let action = args["action"].as_str().unwrap_or_default();
     let s = |v: &[&str]| v.iter().map(|a| a.to_string()).collect::<Vec<_>>();
     let at = |x: i64, y: i64| vec!["mousemove".to_string(), "--sync".into(), x.to_string(), y.to_string()];
     Ok(match action {
         "screenshot" => Work::Screenshot,
         "click" | "double_click" | "right_click" | "move" => {
-            let (x, y) = point(args, "x", "y")?;
+            let (x, y) = point(args, "x", "y", size)?;
             let mut a = at(x, y);
             let said = match action {
                 "click" => {
@@ -596,8 +724,8 @@ fn screen(args: &Value) -> Result<Work, String> {
             Work::Screen { args: a, said }
         }
         "drag" => {
-            let (x, y) = point(args, "x", "y")?;
-            let (tx, ty) = point(args, "to_x", "to_y")?;
+            let (x, y) = point(args, "x", "y", size)?;
+            let (tx, ty) = point(args, "to_x", "to_y", size)?;
             let mut a = at(x, y);
             a.extend(s(&["mousedown", "1"]));
             a.extend(at(tx, ty));
@@ -625,7 +753,7 @@ fn screen(args: &Value) -> Result<Work, String> {
             Work::Screen { args: a, said }
         }
         "scroll" => {
-            let (x, y) = point(args, "x", "y")?;
+            let (x, y) = point(args, "x", "y", size)?;
             let direction = args["direction"].as_str().unwrap_or("down");
             let button = match direction {
                 "up" => "4",
@@ -683,14 +811,29 @@ async fn shown(app: &App, bot_id: &str, entry: &Entry) -> Value {
     let live = app.computers.with_box(bot_id, |live| live.clone());
     let state = match live.busy {
         Some(busy) => busy,
-        None if running(&container(bot_id)).await == Some(true) => "on",
+        None if is_on(app, bot_id).await => "on",
         None => "off",
     };
     json!({ "botId": bot_id, "kind": entry.kind, "since": entry.since, "state": state, "problem": live.problem, "watching": live.viewers })
 }
 
-/// `/api/computers`: `GET` all; `PUT /:bot {on}` gives a bot a computer or takes it away;
-/// `POST /:bot/start|stop|reset`.
+/// Where a bot's screen is watched: Catbot's own view for a container, Boat's for Boat.
+async fn view(app: &Arc<App>, bot_id: &str, use_it: bool) -> Result<String, String> {
+    let e = entry(app, bot_id).ok_or("this bot has no computer")?;
+    if !is_on(app, bot_id).await {
+        return Err("the computer is off".into());
+    }
+    app.computers.with_box(bot_id, |live| live.last_used = Some(Instant::now()));
+    if e.boat() {
+        return super::boat::desktop_url(app, &e.sandbox, use_it).await;
+    }
+    let only = if use_it { 0 } else { 1 };
+    Ok(format!("/computer/view/vnc.html?autoconnect=1&reconnect=1&resize=scale&show_dot=1&view_only={only}&path=computer/{bot_id}/websockify"))
+}
+
+/// `/api/computers`: `GET` all; `PUT /boat {key}` connects Boat (`null` disconnects);
+/// `PUT /:bot {on, kind?}` gives a bot a computer (here or at Boat), moves it, or takes it away;
+/// `POST /:bot/start|stop|reset|watching`; `GET /:bot/view/watch|use` the live view's address.
 pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>) -> Answer {
     let body = body.unwrap_or_default();
     match (method, rest) {
@@ -711,34 +854,64 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<
             for (bot_id, entry) in entries(app) {
                 bots.push(shown(app, &bot_id, &entry).await);
             }
-            Ok((StatusCode::OK, json!({ "engine": words.as_deref().map(engine_name), "image": image, "imageProblem": problem, "idleMinutes": idle_minutes(), "bots": bots })))
+            let boat = super::boat::shown(app);
+            Ok((StatusCode::OK, json!({ "engine": words.as_deref().map(engine_name), "image": image, "imageProblem": problem, "idleMinutes": idle_minutes(), "boat": boat, "bots": bots })))
+        }
+        (&Method::PUT, ["boat"]) => {
+            super::boat::connect(app, body["key"].as_str()).await.map_err(bad)?;
+            changed(app);
+            Ok((StatusCode::OK, json!({ "boat": super::boat::shown(app) })))
         }
         (&Method::PUT, [bot_id]) => {
             if app.with_store(|store| store.bot_by_id(bot_id)).flatten().is_none() {
                 return Err((StatusCode::NOT_FOUND, "no such bot".into()));
             }
-            let mut all = entries(app);
+            let had = entry(app, bot_id);
             if body["on"] == true {
-                all.entry(bot_id.to_string()).or_insert_with(|| Entry { kind: "container".into(), since: chrono::Utc::now().to_rfc3339() });
-                keep(app, &all);
-            } else if all.remove(*bot_id).is_some() {
-                // Taken away: the box and everything on it go.
-                if engine().is_some() {
-                    let _ = run(&["rm", "-f", &container(bot_id)], Duration::from_secs(60)).await;
+                let kind = match body["kind"].as_str() {
+                    Some(kind @ ("container" | "boat")) => kind.to_string(),
+                    Some(_) => return Err(bad("a computer is a container here or at Boat")),
+                    None => had.as_ref().map(|e| e.kind.clone()).unwrap_or_else(|| if engine().is_none() && super::boat::key(app).is_some() { "boat".into() } else { "container".into() }),
+                };
+                if kind == "boat" && super::boat::key(app).is_none() {
+                    return Err(bad("connect Boat first"));
                 }
+                if kind == "container" && engine().is_none() {
+                    return Err(bad("there's no Podman or Docker on this computer"));
+                }
+                // Moved: the old computer goes, and the new one starts fresh.
+                if had.as_ref().is_some_and(|e| e.kind != kind) {
+                    throw_away(app, bot_id).await.map_err(bad)?;
+                    app.computers.with(|inner| inner.boxes.remove(*bot_id));
+                }
+                let mut all = entries(app);
+                let e = all.entry(bot_id.to_string()).or_insert_with(|| Entry { since: chrono::Utc::now().to_rfc3339(), ..Entry::default() });
+                if e.kind != kind {
+                    e.kind = kind;
+                    e.sandbox.clear();
+                }
+                keep(app, &all);
+            } else if had.is_some() {
+                // Taken away: the computer and everything on it go.
+                throw_away(app, bot_id).await.map_err(bad)?;
+                let mut all = entries(app);
+                all.remove(*bot_id);
                 app.computers.with(|inner| inner.boxes.remove(*bot_id));
                 keep(app, &all);
             }
-            let entry = all.get(*bot_id).cloned();
-            let shown = match entry {
-                Some(entry) => shown(app, bot_id, &entry).await,
+            let shown = match entry(app, bot_id) {
+                Some(e) => shown(app, bot_id, &e).await,
                 None => Value::Null,
             };
             Ok((StatusCode::OK, json!({ "computer": shown })))
         }
+        (&Method::GET, [bot_id, "view", how]) => {
+            let url = view(app, bot_id, *how == "use").await.map_err(bad)?;
+            Ok((StatusCode::OK, json!({ "url": url })))
+        }
         (&Method::POST, [bot_id, action]) => {
-            let entry = entries(app).get(*bot_id).cloned().ok_or_else(|| bad("this bot has no computer"))?;
-            if engine().is_none() {
+            let e = entry(app, bot_id).ok_or_else(|| bad("this bot has no computer"))?;
+            if !e.boat() && engine().is_none() {
                 return Err(bad("there's no Podman or Docker on this computer"));
             }
             match *action {
@@ -752,9 +925,12 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<
                 }
                 "stop" => stop(app, bot_id).await.map_err(bad)?,
                 "reset" => reset(app, bot_id).await.map_err(bad)?,
+                // The person is watching (Boat's view can't be counted): not idle.
+                "watching" => app.computers.with_box(bot_id, |live| live.last_used = Some(Instant::now())),
                 _ => return Err((StatusCode::NOT_FOUND, "no such computer route".into())),
             }
-            Ok((StatusCode::OK, json!({ "computer": shown(app, bot_id, &entry).await })))
+            let e = entry(app, bot_id).unwrap_or(e);
+            Ok((StatusCode::OK, json!({ "computer": shown(app, bot_id, &e).await })))
         }
         _ => Err((StatusCode::NOT_FOUND, "no such computer route".into())),
     }
@@ -862,6 +1038,10 @@ pub async fn view_socket(app: &Arc<App>, bot_id: &str, mut req: Request) -> Resp
 mod tests {
     use super::*;
 
+    fn plan_c(name: &str, args: &Value) -> Result<Work, String> {
+        plan(name, args, (WIDTH, HEIGHT), 1800)
+    }
+
     #[test]
     fn names_and_ports() {
         assert_eq!(container("0b1A-x/../y"), "catbot-computer-0b1a-xy");
@@ -874,28 +1054,28 @@ mod tests {
 
     #[test]
     fn screen_actions() {
-        let click = plan("computer_screen", &json!({ "action": "click", "x": 10, "y": 20 })).unwrap();
+        let click = plan_c("computer_screen", &json!({ "action": "click", "x": 10, "y": 20 })).unwrap();
         assert_eq!(click, Work::Screen { args: ["mousemove", "--sync", "10", "20", "click", "1"].map(String::from).to_vec(), said: "Clicked at (10, 20).".into() });
-        assert!(plan("computer_screen", &json!({ "action": "click", "x": 1280, "y": 20 })).unwrap_err().contains("off the screen"));
-        assert!(plan("computer_screen", &json!({ "action": "click" })).unwrap_err().contains("Say where"));
-        let Work::Screen { args, .. } = plan("computer_screen", &json!({ "action": "type", "text": "-rf --hi" })).unwrap() else { panic!() };
+        assert!(plan_c("computer_screen", &json!({ "action": "click", "x": 1280, "y": 20 })).unwrap_err().contains("off the screen"));
+        assert!(plan_c("computer_screen", &json!({ "action": "click" })).unwrap_err().contains("Say where"));
+        let Work::Screen { args, .. } = plan_c("computer_screen", &json!({ "action": "type", "text": "-rf --hi" })).unwrap() else { panic!() };
         assert_eq!(args, ["type", "--delay", "12", "--", "-rf --hi"]);
-        let Work::Screen { args, .. } = plan("computer_screen", &json!({ "action": "key", "keys": "ctrl+l Return" })).unwrap() else { panic!() };
+        let Work::Screen { args, .. } = plan_c("computer_screen", &json!({ "action": "key", "keys": "ctrl+l Return" })).unwrap() else { panic!() };
         assert_eq!(args, ["key", "--delay", "60", "--", "ctrl+l", "Return"]);
-        assert!(plan("computer_screen", &json!({ "action": "key", "keys": "ctrl+l;rm" })).is_err());
-        let Work::Screen { args, .. } = plan("computer_screen", &json!({ "action": "scroll", "x": 5, "y": 5, "direction": "up", "amount": 99 })).unwrap() else { panic!() };
+        assert!(plan_c("computer_screen", &json!({ "action": "key", "keys": "ctrl+l;rm" })).is_err());
+        let Work::Screen { args, .. } = plan_c("computer_screen", &json!({ "action": "scroll", "x": 5, "y": 5, "direction": "up", "amount": 99 })).unwrap() else { panic!() };
         assert_eq!(args[4..], ["click", "--repeat", "30", "--delay", "40", "4"].map(String::from));
-        assert_eq!(plan("computer_screen", &json!({ "action": "screenshot" })).unwrap(), Work::Screenshot);
-        assert!(plan("computer_screen", &json!({ "action": "dance" })).is_err());
+        assert_eq!(plan_c("computer_screen", &json!({ "action": "screenshot" })).unwrap(), Work::Screenshot);
+        assert!(plan_c("computer_screen", &json!({ "action": "dance" })).is_err());
     }
 
     #[test]
     fn commands_and_addresses() {
-        assert_eq!(plan("computer_run", &json!({ "command": " ls ", "timeout_seconds": 99999 })).unwrap(), Work::Shell { command: "ls".into(), seconds: 1800 });
-        assert!(plan("computer_run", &json!({})).is_err());
-        assert_eq!(plan("computer_open", &json!({ "url": "https://example.com" })).unwrap(), Work::Open("https://example.com".into()));
-        assert!(plan("computer_open", &json!({ "url": "file:///etc/passwd" })).is_err());
-        assert!(plan("computer_open", &json!({ "url": "https://a b" })).is_err());
+        assert_eq!(plan_c("computer_run", &json!({ "command": " ls ", "timeout_seconds": 99999 })).unwrap(), Work::Shell { command: "ls".into(), seconds: 1800 });
+        assert!(plan_c("computer_run", &json!({})).is_err());
+        assert_eq!(plan_c("computer_open", &json!({ "url": "https://example.com" })).unwrap(), Work::Open("https://example.com".into()));
+        assert!(plan_c("computer_open", &json!({ "url": "file:///etc/passwd" })).is_err());
+        assert!(plan_c("computer_open", &json!({ "url": "https://a b" })).is_err());
     }
 
     #[test]

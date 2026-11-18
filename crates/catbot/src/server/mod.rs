@@ -11,6 +11,7 @@ pub mod attachments;
 pub mod backups;
 pub mod bot_tools;
 pub mod changes;
+pub mod boat;
 pub mod composio;
 pub mod computers;
 pub mod channels;
@@ -686,6 +687,11 @@ pub(super) fn remove_bot(app: &Arc<App>, bot: &Bot) -> Answer {
     }
     let bot = app.try_store(|store| store.delete_bot(&bot.name)).map_err(fail)?;
     app.hub.send(json!({ "kind": "bot.deleted", "botId": bot.id }));
+    // Its computer goes with it, wherever it is.
+    if computers::has(app, &bot.id) {
+        let (app, id) = (app.clone(), bot.id.clone());
+        tokio::spawn(async move { computers::forget(&app, &id).await });
+    }
     eprintln!("catbot: deleted {} (its folder stays at {})", bot.name, bot.folder.display());
     Ok((StatusCode::OK, json!({ "ok": true })))
 }

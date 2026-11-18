@@ -2238,6 +2238,10 @@ async fn connected_mcp_apps_give_ticked_bots_tools_and_writes_ask_first() {
 
 /// A stand-in for Composio's API: two Gmail tools, sign-ins that finish at once, and a log of
 /// every call as "METHOD path body".
+/// The Composio tests each point CATBOT_COMPOSIO_API (one setting for the whole process) at a
+/// stand-in of their own, so they take turns.
+static COMPOSIO_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 async fn fake_composio() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
     let accounts = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
@@ -2297,6 +2301,7 @@ async fn fake_composio() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>
 
 #[tokio::test]
 async fn composio_apps_connect_in_the_browser_and_their_writes_ask_first() {
+    let _turn = COMPOSIO_TURN.lock().await;
     let s = setup().await;
     let (api, calls) = fake_composio().await;
     // SAFETY: only this test reads it.
@@ -2370,6 +2375,7 @@ async fn composio_apps_connect_in_the_browser_and_their_writes_ask_first() {
 
 #[tokio::test]
 async fn an_app_event_from_composio_starts_its_bot() {
+    let _turn = COMPOSIO_TURN.lock().await;
     use catbot::server::triggers;
     let s = setup().await;
     let (api, calls) = fake_composio().await;
@@ -2552,4 +2558,170 @@ async fn computers() {
     assert_eq!(gone["computer"], Value::Null);
     assert_eq!(state_of(&s).await["bots"], json!([]));
     assert!(reply(&s, &mut events, r#"catbot-tool: computer_screen {"action": "screenshot"}"#).await.contains("no tool computer_screen"));
+}
+
+/// A stand-in for Boat's API: sandboxes that come up on the next look, commands that say what
+/// they ran, and a log of every call (method, path, the confirm header, body).
+async fn fake_boat() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    let log = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let boxes = std::sync::Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::<String, String>::new()));
+    let views = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let (seen, held) = (log.clone(), boxes.clone());
+    let addr = listen(Router::new().fallback(move |req: axum::extract::Request| {
+        let (seen, held, views) = (seen.clone(), held.clone(), views.clone());
+        async move {
+            let (parts, body) = req.into_parts();
+            let path = parts.uri.path().to_string();
+            let body = String::from_utf8_lossy(&body.collect().await.unwrap().to_bytes()).to_string();
+            let confirm = parts.headers.get("x-ascii-confirm-delete").map(|v| v.to_str().unwrap().to_string()).unwrap_or_default();
+            seen.lock().unwrap().push(format!("{} {path} [{confirm}] {body}", parts.method));
+            let answer = |status: u16, v: Value| Response::builder().status(status).header("content-type", "application/json").body(Body::from(v.to_string())).unwrap();
+            if parts.headers.get("authorization").is_none_or(|k| k != "Bearer boat_good1234") {
+                return answer(401, json!({ "ok": false, "type": "sandbox.error", "status": 401, "code": "unauthorized", "message": "Invalid API key" }));
+            }
+            let mut boxes = held.lock().unwrap();
+            let segs: Vec<&str> = path.trim_start_matches('/').split('/').collect();
+            match (parts.method.as_str(), segs.as_slice()) {
+                ("GET", ["sandboxes"]) => answer(200, json!({ "ok": true, "type": "sandbox.list", "sandboxes": [] })),
+                ("POST", ["sandboxes"]) => {
+                    let made = seen.lock().unwrap().iter().filter(|c| c.starts_with("POST /sandboxes [] ")).count();
+                    let id = format!("bx_{:0>8}", made + 1);
+                    boxes.insert(id.clone(), "provisioning".into());
+                    answer(202, json!({ "ok": true, "type": "sandbox.created", "status": "provisioning", "sandbox": { "id": id, "state": "provisioning" } }))
+                }
+                ("GET", ["sandboxes", id]) => match boxes.get_mut(*id) {
+                    Some(state) => {
+                        // Up on the next look.
+                        let now = state.clone();
+                        if now == "provisioning" {
+                            *state = "ready".into();
+                        }
+                        answer(200, json!({ "ok": true, "type": "sandbox.info", "sandbox": { "id": id, "state": now } }))
+                    }
+                    None => answer(404, json!({ "ok": false, "code": "not_found", "message": "No such sandbox" })),
+                },
+                ("POST", ["sandboxes", id, "stop"]) => {
+                    boxes.insert(id.to_string(), "archived".into());
+                    answer(202, json!({ "ok": true, "type": "sandbox.stopping", "status": "archiving" }))
+                }
+                ("POST", ["sandboxes", id, "resume"]) => {
+                    boxes.insert(id.to_string(), "provisioning".into());
+                    answer(202, json!({ "ok": true, "type": "sandbox.resuming", "status": "resuming" }))
+                }
+                ("DELETE", ["sandboxes", id]) if confirm == *id => {
+                    boxes.remove(*id);
+                    answer(202, json!({ "ok": true, "type": "sandbox.deleting", "operation": { "status": "pending" } }))
+                }
+                ("POST", ["sandboxes", id, "commands"]) => {
+                    if boxes.get(*id).map(String::as_str) != Some("ready") {
+                        return answer(409, json!({ "ok": false, "code": "sandbox_not_ready", "message": "Sandbox is not ready" }));
+                    }
+                    let ask: Value = serde_json::from_str(&body).unwrap();
+                    let command = ask["command"].as_str().unwrap();
+                    if ask["detached"] == true {
+                        return answer(200, json!({ "ok": true, "type": "command.started", "processId": 1 }));
+                    }
+                    let out = if command.contains("base64 -w0") { "/9j/4AAQZmFrZQ==".to_string() } else { format!("ran: {command}") };
+                    answer(200, json!({ "ok": true, "type": "command.finished", "exitCode": 0, "stdout": out, "stderr": "", "timedOut": false }))
+                }
+                ("POST", ["sandboxes", _, "desktop"]) => {
+                    // Getting ready the first time it's asked.
+                    if views.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                        answer(200, json!({ "ok": true, "type": "desktop.provisioning", "provisioning": true }))
+                    } else {
+                        answer(200, json!({ "ok": true, "type": "desktop.url", "desktopUrl": "https://view.boat.test/vnc.html?_token=t1", "mode": "vnc" }))
+                    }
+                }
+                _ => answer(404, json!({ "ok": false, "code": "not_found", "message": format!("no route {path}") })),
+            }
+        }
+    }))
+    .await;
+    (format!("http://{addr}"), log)
+}
+
+/// Stage 17.2: a bot's computer at Boat, with a stand-in for Boat's API.
+#[tokio::test]
+async fn boat_computers() {
+    let s = setup().await;
+    let (api, calls) = fake_boat().await;
+    unsafe { std::env::set_var("CATBOT_BOAT_API", &api) };
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Lin" }))).await;
+    let lin = made["bot"]["id"].as_str().unwrap().to_string();
+    let reply = async |s: &Setup, events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, text: &str| -> String {
+        s.call("POST", &format!("/api/bots/{lin}/messages"), Some(json!({ "text": text }))).await;
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+    let logged = |what: &str| calls.lock().unwrap().iter().filter(|c| c.contains(what)).cloned().collect::<Vec<_>>();
+
+    // Connecting: the key is checked, and only its last four come back.
+    let list = s.call("GET", "/api/computers", None).await.1;
+    assert_eq!(list["boat"], json!({ "connected": false }));
+    assert_eq!(s.call("PUT", &format!("/api/computers/{lin}"), Some(json!({ "on": true, "kind": "boat" }))).await.0, 400, "not before Boat is connected");
+    let (status, wrong) = s.call("PUT", "/api/computers/boat", Some(json!({ "key": "sk-nope" }))).await;
+    assert!(status == 400 && wrong["error"].as_str().unwrap().contains("starts with boat_"), "{wrong}");
+    let (status, refused) = s.call("PUT", "/api/computers/boat", Some(json!({ "key": "boat_bad" }))).await;
+    assert!(status == 400 && refused["error"].as_str().unwrap().contains("Invalid API key"), "{refused}");
+    let (_, joined) = s.call("PUT", "/api/computers/boat", Some(json!({ "key": "boat_good1234" }))).await;
+    assert_eq!(joined["boat"], json!({ "connected": true, "ends": "1234" }));
+    assert!(!s.call("GET", "/api/computers", None).await.1.to_string().contains("boat_good"), "the key never comes back");
+
+    // Given a computer at Boat: the first use makes the sandbox, with none of the account's secrets.
+    let (_, given) = s.call("PUT", &format!("/api/computers/{lin}"), Some(json!({ "on": true, "kind": "boat" }))).await;
+    assert_eq!((given["computer"]["kind"].as_str(), given["computer"]["state"].as_str()), (Some("boat"), Some("off")), "{given}");
+    assert_eq!(reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "echo hi"}"#).await, "exit 0\n--- output ---\nran: echo hi");
+    let created = logged("POST /sandboxes [] ");
+    assert_eq!(created.len(), 1);
+    let asked: Value = serde_json::from_str(created[0].split("[] ").nth(1).unwrap()).unwrap();
+    assert_eq!((asked["name"].as_str(), asked["noEnv"].as_bool()), (Some("Catbot: Lin"), Some(true)), "{asked}");
+    assert_eq!(s.call("GET", "/api/computers", None).await.1["bots"][0]["state"], "on");
+
+    // Its screen is bigger, the words are quoted for the shell, and screenshots are pictures.
+    let shot = reply(&s, &mut events, r#"catbot-tool: computer_screen {"action": "screenshot"}"#).await;
+    assert!(shot.starts_with("The screen (1920×1080). [image image/jpeg"), "{shot}");
+    assert_eq!(reply(&s, &mut events, r#"catbot-tool: computer_screen {"action": "click", "x": 1900, "y": 1000}"#).await, "Clicked at (1900, 1000).");
+    assert_eq!(logged("DISPLAY=:0 xdotool 'mousemove' '--sync' '1900' '1000' 'click' '1'").len(), 1, "{:?}", calls.lock().unwrap());
+    reply(&s, &mut events, r#"catbot-tool: computer_screen {"action": "type", "text": "it's"}"#).await;
+    assert_eq!(logged(r#"'it'\\''s'"#).len(), 1, "{:?}", logged("type"));
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_open {"url": "https://example.com"}"#).await.starts_with("Opened https://example.com"));
+    assert!(logged("google-chrome-stable").iter().any(|c| c.contains("\"detached\":true")));
+
+    // The live view is Boat's own, watching only unless asked.
+    let (_, watch) = s.call("GET", &format!("/api/computers/{lin}/view/watch"), None).await;
+    assert_eq!(watch["url"], "https://view.boat.test/vnc.html?_token=t1&view_only=1&resize=scale", "{watch}");
+    let (_, using) = s.call("GET", &format!("/api/computers/{lin}/view/use"), None).await;
+    assert!(using["url"].as_str().unwrap().contains("view_only=0"));
+
+    // Stopped, it's resumed when the bot next uses it.
+    let (_, stopped) = s.call("POST", &format!("/api/computers/{lin}/stop"), None).await;
+    assert_eq!(stopped["computer"]["state"], "off", "{stopped}");
+    assert_eq!(s.call("GET", &format!("/api/computers/{lin}/view/watch"), None).await.0, 400, "no view while it's off");
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "ls"}"#).await.contains("ran: ls"));
+    assert_eq!(logged("/resume").len(), 1);
+    assert_eq!(logged("POST /sandboxes [] ").len(), 1, "the same sandbox, not a new one");
+
+    // Reset deletes it at Boat; the next use makes a fresh one.
+    s.call("POST", &format!("/api/computers/{lin}/reset"), None).await;
+    assert_eq!(logged("DELETE /sandboxes/bx_00000002 [bx_00000002]").len(), 1, "{:?}", calls.lock().unwrap());
+    reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "pwd"}"#).await;
+    assert_eq!(logged("POST /sandboxes [] ").len(), 2);
+
+    // Deleting the bot deletes its computer too.
+    s.call("DELETE", &format!("/api/bots/{lin}"), None).await;
+    for _ in 0..50 {
+        if !logged("DELETE /sandboxes/bx_00000003").is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(logged("DELETE /sandboxes/bx_00000003 [bx_00000003]").len(), 1);
+    assert_eq!(s.call("GET", "/api/computers", None).await.1["bots"], json!([]));
+
+    // Disconnected: the key is forgotten.
+    let (_, gone) = s.call("PUT", "/api/computers/boat", Some(json!({ "key": null }))).await;
+    assert_eq!(gone["boat"], json!({ "connected": false }));
 }

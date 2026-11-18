@@ -248,6 +248,10 @@ your apps still ask. Watch opens a live view (watching only, unless you switch o
 it"); it's served at home only. Each computer keeps its files when stopped; Reset throws it
 away. One nobody uses or watches for 30 minutes is stopped (`CATBOT_COMPUTER_IDLE_MINUTES`,
 `0` never). Keep `catbot serve` on 127.0.0.1 (the default): the boxes can't reach it there.
+A bot's computer can be at [Boat](https://boat.dev) instead (a cloud computer, on while this
+one is off): connect a Boat API key in the same tab, then pick "At Boat" for the bot. Boat bills
+per second while it's on; a stop saves its disk and the next use resumes it. It gets none of the
+Boat account's secrets, and the key never leaves Catbot except to Boat.
 
 ## Talking to Claude through Catbot
 
