@@ -215,10 +215,11 @@ async fn run(
         result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
     }
 
-    // Claude turned the turn away at its usage limit before doing anything: a backup takes it.
+    // Claude (or Codex) turned the turn away at its usage limit before doing anything: a backup takes it.
     let mut ran_on = bot.clone();
     let said: String = result.errors.iter().cloned().chain(result.outcome.as_ref().and_then(|o| o.result.clone())).collect::<Vec<_>>().join(" ");
-    if bot.engine == engines::CLAUDE && !result.stopped && result.reply.trim().is_empty() && result.steps.is_empty() && super::backups::says_limit(&said) {
+    let nothing_done = result.steps.iter().all(|s| matches!(s, Step::Error { .. }));
+    if (bot.engine == engines::CLAUDE || bot.engine == engines::CODEX) && !result.stopped && result.reply.trim().is_empty() && nothing_done && super::backups::says_limit(&said) {
         let until = super::backups::lifts_at(&said).unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(1));
         app.limited_until.lock().expect("limited lock").insert(bot.engine.clone(), until);
         super::usage::forget(app);

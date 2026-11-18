@@ -204,14 +204,17 @@ pub fn blocked(app: &App, bot: &Bot, engine: &str) -> Option<(String, Option<Dat
     {
         return Some((format!("{name} turned the last turn away at its usage limit"), Some(until)));
     }
-    if engine == engines::CLAUDE
+    // A plan that says it's full (Claude's, or Codex's on ChatGPT).
+    if (engine == engines::CLAUDE || engine == engines::CODEX)
         && let Some(plan) = app.plan_usage.lock().expect("plan usage lock").as_ref().map(|(_, v)| v.clone())
+        && let Some(row) = plan["plans"].as_array().into_iter().flatten().find(|p| p["engine"] == engine)
     {
-        for window in plan["plans"][0]["windows"].as_array().into_iter().flatten() {
+        let who = if engine == engines::CLAUDE { "Claude" } else { "Codex" };
+        for window in row["windows"].as_array().into_iter().flatten() {
             if window["usedPercent"].as_f64().is_some_and(|u| u >= 100.0) {
                 let resets = window["resetsAt"].as_str().and_then(|r| DateTime::parse_from_rfc3339(r).ok()).map(|t| t.with_timezone(&Utc));
                 if resets.is_none_or(|r| r > now) {
-                    return Some((format!("Claude's plan is at its limit ({})", window["label"].as_str().unwrap_or("usage").to_lowercase()), resets));
+                    return Some((format!("{who}'s plan is at its limit ({})", window["label"].as_str().unwrap_or("usage").to_lowercase()), resets));
                 }
             }
         }

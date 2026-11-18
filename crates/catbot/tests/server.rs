@@ -2895,4 +2895,18 @@ async fn a_bot_on_codex_signs_in_streams_asks_and_resumes() {
     let shown = s.app.with_store(|store| store.messages(&thread, 5)).unwrap();
     let errors = shown.iter().filter(|m| format!("{m:?}").contains("401")).count();
     assert_eq!(errors, 1, "the error is shown once");
+
+    // 12.4.2: Codex's plan windows on the Usage page, asked of Codex itself.
+    let (_, plans) = s.call("GET", "/api/usage/plans?fresh=1", None).await;
+    let row = plans["plans"].as_array().unwrap().iter().find(|p| p["engine"] == "codex").cloned().unwrap_or_default();
+    assert_eq!((row["ok"].as_bool(), row["plan"].as_str(), row["windows"][0]["label"].as_str(), row["windows"][0]["usedPercent"].as_f64()), (Some(true), Some("plus"), Some("Current session"), Some(42.0)), "{plans}");
+    assert_eq!(row["windows"][1]["label"], "This week");
+
+    // At Codex's usage limit, a backup answers instead.
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "backups": [{ "engine": "claude", "model": "" }] }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "over quota", "threadId": thread }))).await;
+    let note = until(&mut events, "backup note", |f| f["kind"] == "message" && f["message"]["kind"] == "activity" && f["message"]["tool"]["name"].as_str().is_some_and(|n| n.contains("backup"))).await;
+    let said = note["message"]["tool"]["name"].as_str().unwrap();
+    assert!(said.contains("Codex (ChatGPT) turned the last turn away at its usage limit") && said.contains("Claude (a backup) is answering"), "{said}");
+    until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
 }

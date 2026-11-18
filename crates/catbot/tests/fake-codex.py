@@ -4,7 +4,8 @@ app-server protocol: one JSON-RPC message a line on stdin and stdout.
 
 Logs to FAKE_CODEX_LOG: first {"home", "cwd"}, then every message Catbot sends. A sign-in by code
 writes auth.json into CODEX_HOME. A turn's text picks what happens: "run" asks to run a command,
-"edit" asks to change notes.md, "fail" fails as signed out; anything else is echoed.
+"edit" asks to change notes.md, "fail" fails as signed out, "quota" is
+turned away at the plan's usage limit; anything else is echoed.
 """
 import json, os, sys, time
 
@@ -58,6 +59,10 @@ def turn(params, tid):
             if part:
                 note("item/agentMessage/delta", dict(base, itemId=item, delta=part))
         note("item/completed", dict(base, item={"type": "agentMessage", "id": item, "text": words}))
+    if "quota" in text:
+        said = "You've hit your usage limit. Upgrade to Pro (https://chatgpt.com/explore/pro) or try again at 5:23 PM."
+        note("error", dict(base, error={"message": said, "codexErrorInfo": "usageLimitExceeded"}, willRetry=False))
+        return send_turn("failed", {"message": said, "codexErrorInfo": "usageLimitExceeded"})
     if "fail" in text:
         # Like codex-cli 0.170: an error notice, then the failed turn with the same error.
         note("error", dict(base, error={"message": "unexpected status 401 Unauthorized"}, willRetry=False))
@@ -116,6 +121,11 @@ while True:
         time.sleep(0.3)
         json.dump({"auth_mode": "chatgpt", "tokens": {"id_token": "x"}}, open(os.path.join(home, "auth.json"), "w"))
         note("account/login/completed", {"loginId": "L1", "success": True})
+    elif method == "account/rateLimits/read":
+        now = int(time.time())
+        send({"id": mid, "result": {"rateLimits": {"planType": "plus",
+            "primary": {"usedPercent": 42, "windowDurationMins": 300, "resetsAt": now + 3600},
+            "secondary": {"usedPercent": 10, "windowDurationMins": 10080, "resetsAt": now + 86400}}}})
     elif method == "model/list":
         send({"id": mid, "result": {"data": [{"id": "gpt-5.5-codex", "displayName": "GPT-5.5 Codex", "hidden": False}, {"id": "secret", "displayName": "Hidden", "hidden": True}], "nextCursor": None}})
     elif method in ("thread/start", "thread/resume"):

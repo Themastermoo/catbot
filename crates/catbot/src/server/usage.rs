@@ -1,5 +1,5 @@
 //! Usage: what each turn used, the breakdown of it, and the plan limits of the AIs that have
-//! them (Claude's five-hour and weekly windows).
+//! them (Claude's five-hour and weekly windows, and Codex's on a ChatGPT plan, 12.4.2).
 //!
 //! - `GET /api/usage?period=this-month|last-month|30d&by=bot|model|engine|day`: the breakdown.
 //! - `GET /api/usage/plans`: each plan's windows, as Claude's own usage page shows them. Read the
@@ -222,6 +222,10 @@ pub async fn plans(app: &App) -> Value {
     if uses_claude && billing(engines::CLAUDE) == "plan" {
         plans.push(claude_plan().await);
     }
+    let uses_codex = app.with_store(|store| store.bots()).unwrap_or_default().iter().any(|b| b.engine == engines::CODEX);
+    if uses_codex && let Some(program) = engines::find(engines::CODEX).and_then(engines::agent_program) {
+        plans.push(codex_plan(&program).await);
+    }
     let value = json!({ "plans": plans, "fetchedAt": Utc::now().to_rfc3339() });
     *app.plan_usage.lock().expect("plan usage lock") = Some((std::time::Instant::now(), value.clone()));
     value
@@ -264,6 +268,59 @@ async fn claude_plan() -> Value {
         return with(json!({ "ok": false, "error": format!("Anthropic answered {status} without usage.") }));
     };
     with(parse_claude(&body))
+}
+
+/// Codex's windows on the ChatGPT plan, asked of Codex itself (`account/rateLimits/read`).
+async fn codex_plan(program: &std::path::Path) -> Value {
+    let row = |extra: Value| {
+        let mut row = json!({ "engine": engines::CODEX, "name": "Codex (ChatGPT)" });
+        if let (Value::Object(row), Value::Object(extra)) = (&mut row, extra) {
+            row.extend(extra);
+        }
+        row
+    };
+    if !crate::codex::signed_in() {
+        return row(json!({ "ok": false, "error": "Codex isn't signed in: sign in with ChatGPT in a Codex bot's settings." }));
+    }
+    let read = async {
+        let talk = crate::codex::Talk::open(program, &crate::codex::person_home()).await?;
+        talk.call("account/rateLimits/read", json!({})).await
+    };
+    match tokio::time::timeout(Duration::from_secs(30), read).await {
+        Ok(Ok(body)) => row(parse_codex(&body, Utc::now())),
+        Ok(Err(problem)) => row(json!({ "ok": false, "error": format!("Codex didn't say its usage ({problem}).") })),
+        Err(_) => row(json!({ "ok": false, "error": "Codex took too long to say its usage." })),
+    }
+}
+
+/// Codex's answer as Catbot's plan row: a window of five hours or so is the session, one of a
+/// week the week; any other is shown by its length.
+pub fn parse_codex(body: &Value, now: DateTime<Utc>) -> Value {
+    let snapshot = &body["rateLimits"];
+    let mut windows = Vec::new();
+    let mut headline = None;
+    for w in [&snapshot["primary"], &snapshot["secondary"]] {
+        let Some(used) = w["usedPercent"].as_f64() else { continue };
+        let minutes = w["windowDurationMins"].as_i64().unwrap_or(0);
+        // Seconds, though a value in milliseconds is understood too.
+        let resets = w["resetsAt"].as_i64().map(|t| if t > 100_000_000_000 { t / 1000 } else { t }).and_then(|t| DateTime::from_timestamp(t, 0)).map(|t| t.to_rfc3339());
+        let mut line = json!({ "usedPercent": used.clamp(0.0, 100.0), "resetsAt": resets });
+        let (label, kind) = match minutes {
+            1..=480 => ("Current session".to_string(), "session"),
+            m if m >= 6 * 24 * 60 => ("This week".to_string(), "week"),
+            0 => ("Usage".to_string(), "other"),
+            m if m % (24 * 60) == 0 => (format!("Every {} days", m / (24 * 60)), "other"),
+            m => (format!("Every {} hours", m / 60), "other"),
+        };
+        line["label"] = json!(label);
+        line["kind"] = json!(kind);
+        if kind == "week" || headline.is_none() {
+            headline = Some(forecast(&line, (minutes.max(60) as f64) / 60.0, now));
+        }
+        windows.push(line);
+    }
+    windows.sort_by_key(|w| if w["kind"] == "session" { 0 } else { 1 });
+    json!({ "ok": !windows.is_empty(), "plan": snapshot["planType"], "windows": windows, "extra": [], "headline": headline })
 }
 
 /// Anthropic's usage answer as Catbot's plan row: `five_hour` is the session, `seven_day` the
@@ -375,6 +432,24 @@ mod tests {
         assert_eq!(plan["headline"]["onTrack"], true);
         let fast = forecast(&json!({ "usedPercent": 61.0, "resetsAt": (now + chrono::Duration::days(5)).to_rfc3339() }), 168.0, now);
         assert_eq!(fast["onTrack"], false);
+    }
+
+    #[test]
+    fn codexs_answer_becomes_windows() {
+        let now = Utc::now();
+        let body = json!({ "rateLimits": {
+            "planType": "plus",
+            "primary": { "usedPercent": 42, "windowDurationMins": 300, "resetsAt": now.timestamp() + 3600 },
+            "secondary": { "usedPercent": 100, "windowDurationMins": 10080, "resetsAt": (now.timestamp() + 86400) * 1000 },
+        } });
+        let plan = parse_codex(&body, now);
+        assert_eq!((plan["ok"].as_bool(), plan["plan"].as_str()), (Some(true), Some("plus")));
+        assert_eq!((plan["windows"][0]["label"].as_str(), plan["windows"][0]["usedPercent"].as_f64()), (Some("Current session"), Some(42.0)));
+        assert_eq!(plan["windows"][1]["label"], "This week");
+        let resets = DateTime::parse_from_rfc3339(plan["windows"][1]["resetsAt"].as_str().unwrap()).unwrap();
+        assert!((resets.timestamp() - (now.timestamp() + 86400)).abs() < 2, "milliseconds read as seconds");
+        assert_eq!(plan["headline"]["onTrack"], false);
+        assert_eq!(parse_codex(&json!({ "rateLimits": {} }), now)["ok"], false);
     }
 
     #[test]
