@@ -454,9 +454,14 @@ fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::P
 /// on, and what a new session needs to know.
 fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex: Option<std::path::PathBuf>, tools: Option<&super::bot_tools::Open>) -> Result<Running, String> {
     let engine = engines::find(&bot.engine).ok_or("no such agent")?;
-    let program = engines::agent_program(engine).ok_or_else(|| {
-        format!("{} isn't installed on this computer. Install it with `{}`, then sign in with `{}`.", engine.name, engine.install, engine.sign_in)
+    let program = engines::agent_program(engine).ok_or_else(|| match engine.download {
+        Some(_) => format!("{} isn't installed yet: install it from this bot's settings.", engine.name),
+        None => format!("{} isn't installed on this computer. Install it with `{}`, then sign in with `{}`.", engine.name, engine.install, engine.sign_in),
     })?;
+    if engines::agent_signed_in(engine) == Some(false) {
+        return Err(format!("{} isn't signed in: {}.", engine.name, engine.sign_in));
+    }
+    let env = engines::agent_env(engine, &program);
     let messages = app.with_store(|store| store.messages(thread, 60)).unwrap_or_default();
     let mut history = with_cue(lines(app, thread, messages, bot), app, thread, bot);
     let text = match history.last() {
@@ -472,7 +477,7 @@ fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
     };
     let model = bot.model.clone().unwrap_or_default();
     let mcp = tools.and_then(|t| super::bot_tools::acp_server(app, t)).into_iter().collect();
-    crate::acp::start(crate::acp::AcpTurn { engine, program, model, session, instructions, earlier: history, text, workspace, mcp }).map_err(|e| e.to_string())
+    crate::acp::start(crate::acp::AcpTurn { engine, program, model, session, instructions, earlier: history, text, workspace, mcp, env }).map_err(|e| e.to_string())
 }
 
 /// Starts a turn on Codex: the program, Catbot's Codex home with the person's sign-in linked in,

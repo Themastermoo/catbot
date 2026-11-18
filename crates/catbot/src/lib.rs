@@ -1,6 +1,7 @@
 //! Catbot: a self-hosted team of AI bots in a chat app, served by a Rust server on a home box.
 
 pub mod acp;
+pub mod agents;
 pub mod api;
 pub mod approval;
 pub mod ask;

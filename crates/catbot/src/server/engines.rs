@@ -9,6 +9,10 @@
 //! - Codex (12.4.1): `GET /api/engines/codex/account` says who it's signed in as;
 //!   `POST /api/engines/codex/sign-in` `{ how: "code" | "browser" }` signs in with ChatGPT (the
 //!   person's own Codex too) and `DELETE` gives up on it. Signing in is at home only.
+//! - Agents Catbot downloads (12.4.3: Antigravity): `POST /api/engines/:id/install` fetches it
+//!   (the list shows how far it's got); `POST /api/engines/:id/sign-in` gives the link to its
+//!   sign-in page, `POST /api/engines/:id/sign-in/callback { url }` passes on the address a
+//!   browser on another device ended at, and `DELETE /api/engines/:id/sign-in` gives up. At home.
 
 use std::sync::Arc;
 
@@ -60,6 +64,75 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
             Ok((StatusCode::OK, json!({ "signIn": null })))
         }
         (_, ["codex", "sign-in"]) => Err((StatusCode::NOT_FOUND, "Codex signs in at home".into())),
+        (&Method::POST, [id, "install"]) if at_home => {
+            let engine = find(id)?;
+            if engine.download.is_none() || engines::asset(engine).is_none() {
+                return Err(bad(format!("{} can't be installed from here", engine.name)));
+            }
+            if work(app, engine.id)["installing"] == true {
+                return Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })));
+            }
+            set_work(app, engine.id, json!({ "installing": true, "got": 0 }), None);
+            let app2 = app.clone();
+            let task = tokio::spawn(async move {
+                let progress = |got: u64, total: Option<u64>| {
+                    let mut all = app2.agent_work.lock().expect("agent work lock");
+                    if let Some((state, _)) = all.get_mut(engine.id) {
+                        *state = json!({ "installing": true, "got": got, "total": total });
+                    }
+                    drop(all);
+                    app2.hub.send(json!({ "kind": "engines" }));
+                };
+                let done = crate::agents::install(engine, progress).await;
+                let state = match &done {
+                    Ok(_) => Value::Null,
+                    Err(problem) => json!({ "problem": problem }),
+                };
+                eprintln!("catbot: {} {}", engine.name, if done.is_ok() { "installed" } else { "didn't install" });
+                app2.agent_work.lock().expect("agent work lock").insert(engine.id.to_string(), (state, None));
+                app2.hub.send(json!({ "kind": "engines" }));
+            });
+            set_work(app, engine.id, json!({ "installing": true, "got": 0 }), Some(task));
+            Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })))
+        }
+        (&Method::POST, [id, "sign-in"]) if at_home => {
+            let engine = find(id)?;
+            let method = engines::agent_sign_in(engine).ok_or_else(|| bad(format!("{} signs in on its own: {}", engine.name, engine.sign_in)))?;
+            let program = engines::agent_program(engine).ok_or_else(|| bad(format!("Install {} first.", engine.name)))?;
+            let env = engines::agent_env(engine, &program);
+            let folder = engines::agents_dir().map(|d| d.join(engine.id)).ok_or_else(|| fail("no folder"))?;
+            let done = app.clone();
+            let (url, task) = crate::acp::sign_in(engine, program, env, folder, method, move |outcome| {
+                let state = match outcome {
+                    Ok(()) => Value::Null,
+                    Err(problem) => json!({ "problem": format!("The sign-in didn't finish: {problem}") }),
+                };
+                done.agent_work.lock().expect("agent work lock").insert(engine.id.to_string(), (state, None));
+                done.hub.send(json!({ "kind": "engines" }));
+            })
+            .await
+            .map_err(bad)?;
+            match url {
+                Some(url) => set_work(app, engine.id, json!({ "signingIn": true, "url": url }), Some(task)),
+                None => set_work(app, engine.id, Value::Null, None),
+            }
+            app.hub.send(json!({ "kind": "engines" }));
+            Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })))
+        }
+        (&Method::POST, [id, "sign-in", "callback"]) if at_home => {
+            let engine = find(id)?;
+            let body: Value = json_body(req).await?;
+            let link = work(app, engine.id)["url"].as_str().map(str::to_string).ok_or_else(|| bad("No sign-in is under way."))?;
+            crate::acp::deliver_callback(&link, body["url"].as_str().unwrap_or_default()).await.map_err(bad)?;
+            Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })))
+        }
+        (&Method::DELETE, [id, "sign-in"]) if at_home => {
+            let engine = find(id)?;
+            set_work(app, engine.id, Value::Null, None);
+            app.hub.send(json!({ "kind": "engines" }));
+            Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })))
+        }
+        (_, [_, "install" | "sign-in", ..]) => Err((StatusCode::NOT_FOUND, "that's done at home".into())),
         (&Method::GET, ["codex", "models"]) => {
             let fallback = json!([]);
             let Some(program) = engines::find(engines::CODEX).and_then(engines::agent_program) else {
@@ -119,6 +192,19 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
     }
 }
 
+/// What's under way for an agent (a download, a sign-in), or null.
+fn work(app: &App, id: &str) -> Value {
+    app.agent_work.lock().expect("agent work lock").get(id).map(|(state, _)| state.clone()).unwrap_or(Value::Null)
+}
+
+/// Says what's under way, stopping whatever was before.
+fn set_work(app: &App, id: &str, state: Value, task: Option<tokio::task::JoinHandle<()>>) {
+    let mut all = app.agent_work.lock().expect("agent work lock");
+    if let Some((_, Some(old))) = all.insert(id.to_string(), (state, task)) {
+        old.abort();
+    }
+}
+
 fn find(id: &str) -> Result<&'static Engine, (StatusCode, String)> {
     engines::find(id).ok_or_else(|| (StatusCode::NOT_FOUND, format!("no engine called {id}")))
 }
@@ -132,11 +218,11 @@ fn describe(app: &App, engine: &Engine) -> Value {
     let saved = app.with_store(|store| store.engine_key(engine.id)).flatten();
     let access = engines::access(engine, saved.as_ref());
     let installed = matches!(engine.kind, Kind::Agent | Kind::Codex).then(|| engines::agent_program(engine).is_some());
-    let signed_in = (engine.kind == Kind::Codex).then(crate::codex::signed_in);
+    let signed_in = if engine.kind == Kind::Codex { Some(crate::codex::signed_in()) } else { engines::agent_signed_in(engine) };
     let ready = match engine.kind {
         Kind::Claude => true,
         Kind::Api => access.is_some(),
-        Kind::Agent => installed == Some(true),
+        Kind::Agent => installed == Some(true) && signed_in != Some(false),
         Kind::Codex => installed == Some(true) && signed_in == Some(true),
     };
     json!({
@@ -153,6 +239,9 @@ fn describe(app: &App, engine: &Engine) -> Value {
         "defaultModel": engine.default_model,
         "installed": installed,
         "signedIn": signed_in,
+        "download": engine.download.filter(|_| engines::asset(engine).is_some()).map(|d| json!({ "version": d.version, "size": d.size })),
+        "signsInHere": engines::agent_sign_in(engine).is_some(),
+        "work": work(app, engine.id),
         "install": engine.install,
         "signIn": engine.sign_in,
     })

@@ -64,6 +64,52 @@ pub struct Engine {
     /// Sign-in methods to ask an agent for, in order, when it offers them.
     #[serde(skip)]
     pub auth: &'static [&'static str],
+    /// A program Catbot downloads itself (from the ACP registry's entry), when there's no
+    /// installer to run.
+    #[serde(skip)]
+    pub download: Option<&'static Download>,
+}
+
+/// A program Catbot downloads and keeps in its own folder (`<catbot home>/agents/<id>/<version>`).
+#[derive(Debug)]
+pub struct Download {
+    pub version: &'static str,
+    /// Roughly the room it takes, for the Install button.
+    pub size: &'static str,
+    pub assets: &'static [Asset],
+}
+
+/// One platform's file: where from, its SHA-256, and the program in it.
+#[derive(Debug)]
+pub struct Asset {
+    /// As the ACP registry names them: `linux-x86_64`, `windows-aarch64`, `darwin-aarch64`…
+    pub platform: &'static str,
+    pub url: &'static str,
+    pub sha256: &'static str,
+    /// The program, inside the archive (or the file itself when it isn't one).
+    pub cmd: &'static str,
+    pub zip: bool,
+}
+
+/// Google Antigravity's ACP server, as the ACP registry lists it
+/// (agentclientprotocol/registry, antigravity-acp/agent.json, read 2026-11-18).
+pub const ANTIGRAVITY_DOWNLOAD: Download = Download {
+    version: "1.5.0",
+    size: "about 1 GB",
+    assets: &[
+        Asset { platform: "linux-x86_64", url: "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.5.0-linux-x86_64.zip", sha256: "36f373e8948edf1727b39c7d62b5722d6a4474bdfd72b04ad3d6def571808c9f", cmd: "agy_acp_server.par", zip: true },
+        Asset { platform: "linux-aarch64", url: "https://dl.google.com/agy-extensions/releases/linux/agy-acp-server-1.5.0-linux-arm64.zip", sha256: "1e184f439477b54138e94440056b26a78c0a8075a8fd2ffda637ec31267c6459", cmd: "agy_acp_server.par", zip: true },
+        Asset { platform: "windows-x86_64", url: "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.5.0-windows-x86_64.zip", sha256: "6163f6b59b381bae419652dbae167bc8cda0ef29d665c0ba8af3d8c7fddd8867", cmd: "agy_acp_server.exe", zip: true },
+        Asset { platform: "windows-aarch64", url: "https://dl.google.com/agy-extensions/releases/windows/agy-acp-server-1.5.0-windows-arm64.zip", sha256: "340092b8af6dafc71eb15f4a8ec54b4d1f0bce16d1fa4d163b562c50b905f8f4", cmd: "agy_acp_server.exe", zip: true },
+        Asset { platform: "darwin-aarch64", url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.5.0-darwin-arm64.zip", sha256: "c82ecb4ef476bfc35cbe5b2745cdddef873b99c9f5bd7fd11e5ca1fc1667a3fc", cmd: "agy_acp_server.par", zip: true },
+        Asset { platform: "darwin-x86_64", url: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.5.0-darwin-x86_64.zip", sha256: "86a94e33b25d4a38ff30526ad844546860aa9ed98698498d9e87d30eb794426e", cmd: "agy_acp_server.par", zip: true },
+    ],
+};
+
+/// The engines that sign in through their own Google (or other) page: Catbot shows the link,
+/// and the method to ask for.
+pub fn agent_sign_in(engine: &Engine) -> Option<&'static str> {
+    (engine.id == "antigravity").then_some("oauth-personal")
 }
 
 fn no_args(_: PermissionMode, _: &str) -> Vec<String> {
@@ -85,6 +131,7 @@ const BLANK: Engine = Engine {
     install: "",
     sign_in: "",
     auth: &[],
+    download: None,
 };
 
 const fn api(
@@ -151,6 +198,10 @@ fn cursor_args(mode: PermissionMode, model: &str) -> Vec<String> {
         _ => Vec::new(),
     };
     [approval, model_flag("--model", model), plain(&["acp"])].concat()
+}
+
+fn antigravity_args(_: PermissionMode, _: &str) -> Vec<String> {
+    if cfg!(target_os = "linux") { plain(&["--uid="]) } else { Vec::new() }
 }
 
 fn acp_word(_: PermissionMode, _: &str) -> Vec<String> {
@@ -294,6 +345,20 @@ pub const ALL: &[Engine] = &[
     agent("kiro", "Kiro", "kiro-cli", kiro_args, "curl -fsSL https://cli.kiro.dev/install | bash", "kiro-cli login", "https://kiro.dev/docs/getting-started/installation/", &["aws-builder-id", "aws-iam-identity-center", "kiro-login"]),
     agent("hermes", "Hermes", "hermes", acp_word, "curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash", "hermes setup", "https://hermes-agent.nousresearch.com/docs/", &[]),
     agent("deepseek-harness", "DeepSeek Harness", "dsh", deepseek_args, "npm install -g @deepseek-ai/dsh", "dsh", "https://github.com/deepseek-ai/deepseek-harness", &[]),
+    // Google Antigravity: Catbot downloads its ACP server and signs it in with Google itself.
+    // Before release 1.5.1 it offers its own Gemini models to every client and others only to
+    // editors it knows, so Catbot (which doesn't pretend to be one) gets the Gemini ones.
+    Engine {
+        id: "antigravity",
+        name: "Antigravity (Google)",
+        kind: Kind::Agent,
+        args: antigravity_args,
+        install: "Install it from this bot's settings",
+        sign_in: "Sign in with Google in this bot's settings",
+        key_page: "https://antigravity.google/docs/ide/extensions",
+        download: Some(&ANTIGRAVITY_DOWNLOAD),
+        ..BLANK
+    },
     agent("omp", "OMP", "omp", acp_word, "npm install -g @oh-my-pi/pi-coding-agent", "omp login", "https://omp.sh", &["agent"]),
     agent("command-code", "Command Code", "command-code", acp_word, "npm install -g command-code", "cmd login", "https://commandcode.ai/docs/acp", &[]),
 ];
@@ -306,7 +371,94 @@ pub fn agent_program(engine: &Engine) -> Option<std::path::PathBuf> {
         let path = std::path::PathBuf::from(path);
         return path.is_file().then_some(path);
     }
-    find_program(engine.program)
+    find_program(engine.program).or_else(|| downloaded(engine))
+}
+
+static AGENTS_DIR: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+
+/// Where Catbot keeps the programs it downloads: `<catbot home>/agents`.
+pub fn set_agents_dir(dir: std::path::PathBuf) {
+    *AGENTS_DIR.lock().expect("agents dir lock") = Some(dir);
+}
+
+/// `CATBOT_AGENTS_DIR` if set, else `<catbot home>/agents`.
+pub fn agents_dir() -> Option<std::path::PathBuf> {
+    if let Some(dir) = std::env::var_os("CATBOT_AGENTS_DIR").filter(|d| !d.is_empty()) {
+        return Some(dir.into());
+    }
+    AGENTS_DIR.lock().expect("agents dir lock").clone()
+}
+
+/// This computer, as the ACP registry names platforms.
+pub fn platform() -> String {
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    format!("{os}-{}", std::env::consts::ARCH)
+}
+
+/// This computer's file for a downloadable engine.
+pub fn asset(engine: &Engine) -> Option<&'static Asset> {
+    let platform = platform();
+    engine.download?.assets.iter().find(|a| a.platform == platform)
+}
+
+/// Where a downloaded engine's version lives.
+pub fn download_folder(engine: &Engine) -> Option<std::path::PathBuf> {
+    Some(agents_dir()?.join(engine.id).join(engine.download?.version))
+}
+
+/// A downloaded engine's program, if it's there.
+pub fn downloaded(engine: &Engine) -> Option<std::path::PathBuf> {
+    let program = download_folder(engine)?.join(asset(engine)?.cmd);
+    program.is_file().then_some(program)
+}
+
+/// What an engine's program needs in its environment.
+pub fn agent_env(engine: &Engine, program: &std::path::Path) -> Vec<(String, String)> {
+    match engine.id {
+        "antigravity" => {
+            let Some(profile) = agents_dir().map(|d| d.join("antigravity").join("profile")) else { return Vec::new() };
+            let acp = profile.join("antigravity-acp");
+            let _ = std::fs::create_dir_all(&acp);
+            let settings = acp.join("settings.json");
+            if !settings.is_file() {
+                let _ = std::fs::write(&settings, "{\"auth\":{\"type\":\"oauth-personal\"}}\n");
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&profile, std::fs::Permissions::from_mode(0o700));
+            }
+            let harness = if cfg!(windows) { "localharness_external.exe" } else { "localharness_external" };
+            let mut env = vec![
+                ("GEMINI_HOME".to_string(), profile.display().to_string()),
+                ("AGY_ACP_FORCE_FILE_STORAGE".to_string(), "1".to_string()),
+                ("PYTHONUNBUFFERED".to_string(), "1".to_string()),
+            ];
+            if let Some(dir) = program.parent() {
+                env.push(("ANTIGRAVITY_HARNESS_PATH".to_string(), dir.join(harness).display().to_string()));
+            }
+            // On Windows it unpacks itself into TEMP each start: one folder of its own.
+            if cfg!(windows) {
+                let temp = profile.parent().map(|p| p.join("tmp")).unwrap_or_else(std::env::temp_dir);
+                let _ = std::fs::create_dir_all(&temp);
+                env.push(("TEMP".to_string(), temp.display().to_string()));
+                env.push(("TMP".to_string(), temp.display().to_string()));
+            }
+            env
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Whether an engine that signs in through Catbot is signed in: None when Catbot can't tell.
+pub fn agent_signed_in(engine: &Engine) -> Option<bool> {
+    match engine.id {
+        "antigravity" => Some(agents_dir().is_some_and(|d| d.join("antigravity/profile/antigravity-acp/acp_token.json").metadata().is_ok_and(|m| m.is_file() && m.len() > 0))),
+        _ => None,
+    }
 }
 
 /// Where an agent's program is: on the PATH, or in the folders installers usually use.

@@ -237,6 +237,13 @@ read-only, so every change and command asks; on "Auto-accept edits" it writes in
 folders and asks for commands; "Full access" asks nothing. Bots on Codex get Catbot's own tools
 too. `CATBOT_AGENT_CODEX` points Catbot at a `codex` it can't find.
 
+Bots can run on **Antigravity (Google)** too. Catbot downloads Google's Antigravity ACP server
+itself (about 1 GB, from the address and checksum in the ACP registry; "Install" in the bot's
+settings) into `<catbot home>/agents`, and signs it in with your Google account ("Sign in with
+Google" opens Google's page; if you finish on a phone, paste the address its browser ends on).
+It keeps its own Google profile there. This release offers Catbot its Gemini models: Google
+gives its others only to editors it lists, and Catbot doesn't pretend to be one.
+
 **Memory vault.** Each computer running Catbot keeps a folder of linked Markdown notes the bots
 write as they work: `~/CatbotMemory` (`$CATBOT_MEMORY` to move it, `off` to turn it off).
 `Bots/` holds a note per bot (Catbot seeds it when the bot is made and moves it when the bot is

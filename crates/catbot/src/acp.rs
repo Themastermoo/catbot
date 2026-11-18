@@ -56,6 +56,8 @@ pub struct AcpTurn {
     pub workspace: Workspace,
     /// MCP servers the agent may use (Catbot's own tools), in ACP's form.
     pub mcp: Vec<Value>,
+    /// What the program needs in its environment (`engines::agent_env`).
+    pub env: Vec<(String, String)>,
 }
 
 /// Starts the program and the turn; its events arrive on the returned `Running`.
@@ -64,6 +66,7 @@ pub fn start(turn: AcpTurn) -> std::io::Result<Running> {
     let mut command = Command::new(&turn.program);
     command
         .args(&args)
+        .envs(turn.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
         .current_dir(&turn.workspace.folder)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -452,6 +455,120 @@ fn file_of(params: &Value, workspace: &Workspace) -> Result<PathBuf, String> {
     workspace.resolve(path)
 }
 
+/// The line an agent prints with its sign-in link (Antigravity's words).
+const LINK_PREFIX: &str = "Open the following link to authenticate the ACP server: ";
+
+/// Signs an agent in through its own page (Antigravity: Google). Starts the program, asks it to
+/// `authenticate` with `method`, and gives back the link it prints (None when it was already
+/// signed in and finished at once); `finished` hears how it ended. The program stays up, waiting
+/// for the page to send the person back to it, for ten minutes at most.
+pub async fn sign_in(
+    engine: &'static Engine,
+    program: PathBuf,
+    env: Vec<(String, String)>,
+    folder: PathBuf,
+    method: &'static str,
+    finished: impl FnOnce(Result<(), String>) + Send + 'static,
+) -> Result<(Option<String>, tokio::task::JoinHandle<()>), String> {
+    let _ = std::fs::create_dir_all(&folder);
+    let mut command = Command::new(&program);
+    command
+        .args((engine.args)(PermissionMode::Default, ""))
+        .envs(env)
+        .current_dir(&folder)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(0x0800_0000);
+    let mut child = command.spawn().map_err(|e| format!("couldn't start {}: {e}", engine.name))?;
+    let link = Link { stdin: Arc::new(tokio::sync::Mutex::new(child.stdin.take().expect("stdin is piped"))), waiting: Arc::default(), next: Arc::default() };
+    // Its answers; anything it asks is refused (nothing to do mid-sign-in).
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let reading = link.clone();
+    let reader = tokio::spawn(async move {
+        let mut lines = BufReader::new(stdout).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Ok(message) = serde_json::from_str::<Value>(line.trim()) else { continue };
+            match (message["method"].as_str(), message.get("id")) {
+                (None, Some(id)) => {
+                    let Some(id) = id.as_u64() else { continue };
+                    if let Some(waiter) = reading.waiting.lock().expect("waiting lock").remove(&id) {
+                        let result = match message.get("error") {
+                            Some(error) => Err(error["message"].as_str().unwrap_or("it refused").to_string()),
+                            None => Ok(message["result"].clone()),
+                        };
+                        let _ = waiter.send(result);
+                    }
+                }
+                (Some(_), Some(id)) => reading.refuse(id, -32601, "not now").await,
+                _ => {}
+            }
+        }
+        reading.waiting.lock().expect("waiting lock").clear();
+    });
+    // The link, from its output. Never shown otherwise: the lines after can carry a code.
+    let (link_tx, link_rx) = oneshot::channel::<String>();
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let watcher = tokio::spawn(async move {
+        let mut link_tx = Some(link_tx);
+        let mut lines = BufReader::new(stderr).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            if let Some(url) = line.trim().strip_prefix(LINK_PREFIX).map(str::trim).filter(|u| u.starts_with("https://"))
+                && let Some(tx) = link_tx.take()
+            {
+                let _ = tx.send(url.to_string());
+            }
+        }
+    });
+    link.call(
+        "initialize",
+        json!({ "protocolVersion": 1, "clientInfo": { "name": "catbot", "version": env!("CARGO_PKG_VERSION") }, "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false } }),
+        Some(START_TIME),
+    )
+    .await?;
+    let (done_tx, done_rx) = oneshot::channel::<Result<(), String>>();
+    let asking = link.clone();
+    let task = tokio::spawn(async move {
+        let answer = asking.call("authenticate", json!({ "methodId": method }), Some(Duration::from_secs(600))).await.map(|_| ());
+        let _ = done_tx.send(answer.clone());
+        finished(answer);
+        let _ = child.start_kill();
+        reader.abort();
+        watcher.abort();
+    });
+    tokio::select! {
+        url = link_rx => Ok((url.ok(), task)),
+        done = done_rx => match done {
+            Ok(Ok(())) => Ok((None, task)),
+            Ok(Err(problem)) => Err(problem),
+            Err(_) => Err("it stopped".into()),
+        },
+        _ = tokio::time::sleep(Duration::from_secs(60)) => {
+            task.abort();
+            Err(format!("{} didn't give a sign-in link", engine.name))
+        }
+    }
+}
+
+/// Sends the page's "back to the agent" address on, when the browser that finished the sign-in
+/// was on another device: only to the local address the sign-in link itself named.
+pub async fn deliver_callback(auth_url: &str, pasted: &str) -> Result<(), String> {
+    let auth = reqwest::Url::parse(auth_url).map_err(|_| "the sign-in link doesn't read".to_string())?;
+    let back = auth.query_pairs().find(|(k, _)| k == "redirect_uri").map(|(_, v)| v.into_owned()).ok_or("the sign-in link names no address to come back to")?;
+    let back = reqwest::Url::parse(&back).map_err(|_| "the sign-in link's address doesn't read".to_string())?;
+    let pasted = reqwest::Url::parse(pasted.trim()).map_err(|_| "Paste the whole address from the browser's address bar.".to_string())?;
+    let local = matches!(back.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")) && back.scheme() == "http";
+    let same = pasted.scheme() == back.scheme() && pasted.host_str() == back.host_str() && pasted.port_or_known_default() == back.port_or_known_default() && pasted.path() == back.path();
+    if !local || !same {
+        return Err("That isn't the address the sign-in came back to.".into());
+    }
+    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
+    let answer = client.get(pasted).send().await.map_err(|_| "The sign-in had already finished or stopped. Start it again.".to_string())?;
+    if answer.status().is_success() || answer.status().is_redirection() { Ok(()) } else { Err(format!("The sign-in didn't take it ({}).", answer.status())) }
+}
+
 /// A failure, with how to put it right.
 fn explain(engine: &Engine, problem: &str, stderr: &str) -> String {
     let said = stderr.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("").trim();
@@ -470,6 +587,15 @@ fn explain(engine: &Engine, problem: &str, stderr: &str) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_pasted_address_goes_only_where_the_link_said() {
+        let link = "https://accounts.google.com/o/oauth2/auth?client_id=x&redirect_uri=http%3A%2F%2Flocalhost%3A9%2Foauth2callback&state=s";
+        assert!(deliver_callback(link, "https://evil.example/oauth2callback?code=c").await.unwrap_err().contains("isn't the address"));
+        assert!(deliver_callback(link, "http://localhost:9/other?code=c").await.unwrap_err().contains("isn't the address"));
+        let away = "https://accounts.google.com/o/oauth2/auth?redirect_uri=https%3A%2F%2Fexample.com%2Fcb";
+        assert!(deliver_callback(away, "https://example.com/cb?code=c").await.unwrap_err().contains("isn't the address"));
+    }
+
     #[test]
     fn a_new_session_gets_instructions_and_the_conversation() {
         let turn = AcpTurn {
@@ -482,6 +608,7 @@ mod tests {
             text: "And beans?".into(),
             workspace: Workspace { folder: PathBuf::from("/tmp"), roots: vec![PathBuf::from("/tmp")], mode: PermissionMode::Default, catbot: None },
             mcp: Vec::new(),
+            env: Vec::new(),
         };
         let prompt = first_prompt(&turn);
         assert!(prompt.starts_with("<catbot_instructions>\nYou are Scout."));

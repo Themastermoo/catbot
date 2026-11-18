@@ -98,6 +98,7 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
                         let name = str_of(&e, "name");
                         let shown = match (e["ready"] == true, e["kind"].as_str()) {
                             (true, _) => name,
+                            (false, Some("agent")) if e["installed"] == true => format!("{name} (not signed in)"),
                             (false, Some("agent")) => format!("{name} (not installed)"),
                             (false, Some("codex")) if e["installed"] != true => format!("{name} (not installed)"),
                             (false, Some("codex")) => format!("{name} (not signed in)"),
@@ -150,9 +151,13 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
     }
 }
 
-/// An agent program: installed or not, and how to install it and sign it in.
+/// An agent program: installed or not, and how to install it and sign it in. Some Catbot
+/// downloads itself (Antigravity) and signs in through their own page.
 #[component]
 fn AgentBox(engine: Value) -> Element {
+    if !engine["download"].is_null() || engine["signsInHere"] == true {
+        return rsx! { ManagedAgentBox { engine } };
+    }
     let name = str_of(&engine, "name");
     let install = str_of(&engine, "install");
     let sign_in = str_of(&engine, "signIn");
@@ -173,6 +178,106 @@ fn AgentBox(engine: Value) -> Element {
             p { class: "mt-1.5 text-[12px] text-ink-tertiary",
                 "More: "
                 a { href: "{page}", target: "_blank", rel: "noreferrer", class: "text-accent underline", "{page}" }
+            }
+        }
+    }
+}
+
+/// An agent Catbot installs and signs in itself: an Install button with its progress, then a
+/// sign-in through the agent's own page (Google, for Antigravity). When the browser that
+/// finished the sign-in is on another device, the address it ended at is pasted here.
+#[component]
+fn ManagedAgentBox(engine: Value) -> Element {
+    let mut busy = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let mut pasted = use_signal(String::new);
+    let id = str_of(&engine, "id");
+    let name = str_of(&engine, "name");
+    let installed = engine["installed"] == true;
+    let signed_in = engine["signedIn"] == true;
+    let work = engine["work"].clone();
+    let size = str_of(&engine["download"], "size");
+    let version = str_of(&engine["download"], "version");
+    let at_home = crate::link::active().is_none();
+    let act = use_callback(move |(method, path, body): (&'static str, String, Option<Value>)| {
+        busy.set(true);
+        problem.set(None);
+        spawn(async move {
+            if let Err(err) = api::call(method, &path, body.as_ref()).await {
+                problem.set(Some(err));
+            } else if path.ends_with("callback") {
+                pasted.set(String::new());
+            }
+            busy.set(false);
+        });
+    });
+    let mb = |bytes: &Value| bytes.as_u64().map(|b| format!("{} MB", b / 1_000_000)).unwrap_or_default();
+    let (i1, i2, i3, i4) = (id.clone(), id.clone(), id.clone(), id.clone());
+    rsx! {
+        div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-agent": "{id}",
+            if work["installing"] == true {
+                p { "data-agent-installing": true,
+                    "Downloading {name}… {mb(&work[\"got\"])}"
+                    if !work["total"].is_null() { " of {mb(&work[\"total\"])}" }
+                }
+            } else if !installed {
+                p { "{name} isn't installed. Catbot can download it ({size}, version {version}) and keep it in its own folder." }
+                if at_home {
+                    button {
+                        r#type: "button",
+                        "data-agent-install": true,
+                        disabled: busy(),
+                        class: "mt-2 rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-50",
+                        onclick: move |_| act.call(("POST", format!("/api/engines/{i1}/install"), None)),
+                        "Install {name}"
+                    }
+                } else {
+                    p { class: "mt-1 text-ink-secondary", "It's installed from Catbot on the computer at home." }
+                }
+            } else if signed_in {
+                p { "data-agent-signed-in": true, "{name} is installed and signed in." }
+            } else if work["signingIn"] == true {
+                p { "Sign in on the page this opens, then come back:" }
+                a { href: "{work[\"url\"].as_str().unwrap_or_default()}", target: "_blank", rel: "noreferrer", class: "mt-1 block text-accent underline", "data-agent-sign-in-link": true, "Open the sign-in page" }
+                p { class: "mt-2 text-[12px] text-ink-tertiary", "Finished on another device (a phone)? Its browser ends on a page that won't open. Paste that page's address here:" }
+                div { class: "mt-1 flex gap-2",
+                    input {
+                        class: "w-full rounded-lg bg-inset px-2 py-1 text-[12px] text-ink focus:outline-none focus:ring-1 focus:ring-accent",
+                        placeholder: "http://127.0.0.1:…/?code=…",
+                        "data-agent-callback": true,
+                        value: "{pasted}",
+                        oninput: move |e| pasted.set(e.value()),
+                    }
+                    button {
+                        r#type: "button",
+                        class: SMALL_BUTTON,
+                        disabled: busy() || pasted().trim().is_empty(),
+                        onclick: move |_| act.call(("POST", format!("/api/engines/{i2}/sign-in/callback"), Some(json!({ "url": pasted().trim() })))),
+                        "Send"
+                    }
+                }
+                div { class: "mt-2 flex items-center gap-2",
+                    span { class: "flex-1 text-[12px] text-ink-tertiary", "Waiting for the sign-in…" }
+                    button { r#type: "button", class: SMALL_BUTTON, onclick: move |_| act.call(("DELETE", format!("/api/engines/{i3}/sign-in"), None)), "Cancel" }
+                }
+            } else if at_home {
+                p { "{name} is installed. Sign it in once with your Google account:" }
+                button {
+                    r#type: "button",
+                    "data-agent-sign-in": true,
+                    disabled: busy(),
+                    class: "mt-2 rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-50",
+                    onclick: move |_| act.call(("POST", format!("/api/engines/{i4}/sign-in"), None)),
+                    if busy() { "Starting…" } else { "Sign in with Google" }
+                }
+            } else {
+                p { class: "text-ink-secondary", "{name} isn't signed in. Sign it in from Catbot on the computer at home." }
+            }
+            if id == "antigravity" {
+                p { class: "mt-1.5 text-[12px] text-ink-tertiary", "Catbot gets Antigravity's Gemini models: this release offers its others only to editors Google lists." }
+            }
+            if let Some(err) = work["problem"].as_str().map(str::to_string).or(problem()) {
+                p { role: "alert", class: "mt-1 text-[12px] text-danger", "{err}" }
             }
         }
     }

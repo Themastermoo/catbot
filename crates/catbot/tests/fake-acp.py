@@ -5,15 +5,37 @@ session/prompt behaviour by the message's last line:
                      Catbot's fs/write_text_file, and says what happened
   anything else   -> thinks briefly, then answers "Echo: <line> (new|resumed)"; "new" when the
                      prompt carried Catbot's instructions (a new session)
+
+As Antigravity (FAKE_ACP_GOOGLE set): offers "oauth-personal"; authenticate prints a sign-in link
+on stderr, as the real one does, whose redirect_uri is a listener here; a GET to it with a code
+writes $GEMINI_HOME/antigravity-acp/acp_token.json and answers authenticate.
 """
-import json, os, sys
+import json, os, sys, socket, urllib.parse
 
 def send(obj):
     sys.stdout.write(json.dumps(obj) + "\n"); sys.stdout.flush()
 
 if os.environ.get("FAKE_ACP_LOG"):
     with open(os.environ["FAKE_ACP_LOG"], "a") as log:
-        log.write(json.dumps({"args": sys.argv[1:], "cwd": os.getcwd()}) + "\n")
+        log.write(json.dumps({"args": sys.argv[1:], "cwd": os.getcwd(), "env": {k: v for k, v in os.environ.items() if k in ("GEMINI_HOME", "ANTIGRAVITY_HARNESS_PATH", "AGY_ACP_FORCE_FILE_STORAGE", "MUSE_EXPERIMENTAL_ACP")}}) + "\n")
+
+def google_sign_in(rid):
+    listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(1)
+    port = listener.getsockname()[1]
+    back = urllib.parse.quote(f"http://localhost:{port}/oauth2callback", safe="")
+    sys.stderr.write(f"Open the following link to authenticate the ACP server: https://accounts.google.com/o/oauth2/v2/auth?client_id=x&redirect_uri={back}&state=s1\n")
+    sys.stderr.flush()
+    conn, _ = listener.accept()
+    request = conn.recv(4096).decode()
+    ok = "code=" in request.split("\r\n")[0]
+    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"); conn.close()
+    if ok:
+        folder = os.path.join(os.environ["GEMINI_HOME"], "antigravity-acp")
+        os.makedirs(folder, exist_ok=True)
+        open(os.path.join(folder, "acp_token.json"), "w").write('{"refresh_token": "fake"}')
+        send({"jsonrpc": "2.0", "id": rid, "result": {}})
+    else:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "access_denied"}})
 
 next_id = [1000]
 def ask(method, params):
@@ -36,7 +58,10 @@ for line in sys.stdin:
     msg = json.loads(line)
     method, rid, params = msg.get("method"), msg.get("id"), msg.get("params", {})
     if method == "initialize":
-        send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "authMethods": []}})
+        methods = [{"id": "oauth-personal", "name": "Google"}] if os.environ.get("FAKE_ACP_GOOGLE") else []
+        send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "authMethods": methods}})
+    elif method == "authenticate":
+        google_sign_in(rid)
     elif method == "session/new":
         send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fake-session-1"}})
     elif method == "session/load":

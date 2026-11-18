@@ -115,6 +115,8 @@ pub struct App {
     pub computers: computers::Computers,
     /// A Codex sign-in under way (`codex.rs`).
     pub codex_sign_in: crate::codex::SignIn,
+    /// Downloads and sign-ins under way for other agents, by engine: what to show, and the task.
+    pub agent_work: std::sync::Mutex<std::collections::HashMap<String, AgentWork>>,
 }
 
 impl App {
@@ -127,6 +129,7 @@ impl App {
         helper: Option<Vec<String>>,
         ui: Option<PathBuf>,
     ) -> Arc<Self> {
+        crate::engines::set_agents_dir(store.home().join("agents"));
         Arc::new(Self {
             store: Mutex::new(store),
             hub: hub::Hub::default(),
@@ -147,6 +150,7 @@ impl App {
             tool_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
             computers: computers::Computers::default(),
             codex_sign_in: crate::codex::SignIn::default(),
+            agent_work: std::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -329,6 +333,9 @@ async fn tidy(app: Arc<App>, days: u32) {
 }
 
 /// The whole server as a router, for `serve` and for tests.
+/// What's under way for an agent, and the task doing it.
+pub type AgentWork = (Value, Option<tokio::task::JoinHandle<()>>);
+
 pub fn router(app: Arc<App>) -> Router {
     Router::new().fallback(dispatch).with_state(app)
 }

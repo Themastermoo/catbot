@@ -2910,3 +2910,91 @@ async fn a_bot_on_codex_signs_in_streams_asks_and_resumes() {
     assert!(said.contains("Codex (ChatGPT) turned the last turn away at its usage limit") && said.contains("Claude (a backup) is answering"), "{said}");
     until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
 }
+
+/// Stage 12.4.3: Antigravity, downloaded by Catbot, signed in with Google, and answering.
+#[tokio::test]
+async fn antigravity_installs_signs_in_with_google_and_answers() {
+    use sha2::Digest;
+    use std::io::Write;
+    // The download: a zip with a stand-in server (the ACP stand-in, as Google's) and its harness.
+    let bin = tempfile::tempdir().unwrap();
+    let log = bin.path().join("agy.log");
+    let script = format!("#!/bin/sh\nFAKE_ACP_GOOGLE=1 FAKE_ACP_LOG={} exec python3 {} \"$@\"\n", log.display(), concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-acp.py"));
+    let mut packed = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut packed);
+        let runnable = zip::write::SimpleFileOptions::default().unix_permissions(0o755);
+        zip.start_file("agy_acp_server.par", runnable).unwrap();
+        zip.write_all(script.as_bytes()).unwrap();
+        zip.start_file("localharness_external", runnable).unwrap();
+        zip.write_all(b"#!/bin/sh\n").unwrap();
+        zip.finish().unwrap();
+    }
+    let bytes = packed.into_inner();
+    let sha = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let addr = listen(Router::new().route("/agy.zip", axum::routing::get(move || async move { bytes.clone() }))).await;
+    let s = setup().await;
+    let agents = s._dir.path().join("home/agents");
+    // SAFETY: only this test reads these.
+    unsafe {
+        std::env::set_var("CATBOT_DOWNLOAD_ANTIGRAVITY", format!("http://{addr}/agy.zip {sha}"));
+        std::env::set_var("CATBOT_AGENTS_DIR", &agents);
+    }
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let agy = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "antigravity").unwrap().clone();
+    let listed = agy(&s.call("GET", "/api/engines", None).await.1);
+    assert_eq!((listed["installed"].as_bool(), listed["download"]["version"].as_str(), listed["signsInHere"].as_bool(), listed["ready"].as_bool()), (Some(false), Some("1.5.0"), Some(true), Some(false)), "{listed}");
+
+    // Installing: fetched, checked, unpacked into Catbot's folder.
+    s.call("POST", "/api/engines/antigravity/install", None).await;
+    let mut listed = Value::Null;
+    for _ in 0..100 {
+        listed = agy(&s.call("GET", "/api/engines", None).await.1);
+        if listed["installed"] == true && listed["work"].is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!((listed["installed"].as_bool(), listed["signedIn"].as_bool(), listed["ready"].as_bool()), (Some(true), Some(false), Some(false)), "{listed}");
+    assert!(agents.join("antigravity/1.5.0/agy_acp_server.par").is_file());
+
+    // Not signed in yet: the bot says how.
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Gem" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "antigravity", "model": "" }, "approvalMode": "edits" }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
+    let error = until(&mut events, "error", |f| runtime(f, "runtime.error")).await;
+    assert!(error["event"]["message"].as_str().unwrap().contains("Sign in with Google"), "{error}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Signing in with Google: the link, then the browser's address passed back from another device.
+    let (_, started) = s.call("POST", "/api/engines/antigravity/sign-in", None).await;
+    let link = started["engine"]["work"]["url"].as_str().unwrap().to_string();
+    assert!(link.starts_with("https://accounts.google.com/"), "{started}");
+    let back = link.split("redirect_uri=").nth(1).unwrap().split('&').next().unwrap().replace("%3A", ":").replace("%2F", "/");
+    let (status, _) = s.call("POST", "/api/engines/antigravity/sign-in/callback", Some(json!({ "url": "https://evil.example/oauth2callback?code=x" }))).await;
+    assert_eq!(status, 400, "only the address the link named");
+    let (status, passed) = s.call("POST", "/api/engines/antigravity/sign-in/callback", Some(json!({ "url": format!("{back}?code=abc&state=s1") }))).await;
+    assert_eq!(status, 200, "{passed}");
+    for _ in 0..100 {
+        listed = agy(&s.call("GET", "/api/engines", None).await.1);
+        if listed["signedIn"] == true && listed["work"].is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!((listed["signedIn"].as_bool(), listed["ready"].as_bool()), (Some(true), Some(true)), "{listed}");
+
+    // A turn: its own profile, the harness beside it, and Linux's --uid=.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Echo: hello (new)");
+    let started: Vec<Value> = std::fs::read_to_string(&log).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let turn = started.last().unwrap();
+    assert_eq!(turn["args"], json!(["--uid="]));
+    assert_eq!(turn["env"]["GEMINI_HOME"].as_str(), Some(agents.join("antigravity/profile").to_str().unwrap()));
+    assert_eq!(turn["env"]["ANTIGRAVITY_HARNESS_PATH"].as_str(), Some(agents.join("antigravity/1.5.0/localharness_external").to_str().unwrap()));
+    assert!(turn["cwd"].as_str().unwrap().ends_with("bots/gem"));
+}
