@@ -5,6 +5,7 @@
 //! characters). Picking another AI is a change to the bot like any other; its models come from
 //! the API itself once it has a key (`GET /api/engines/:id/models`). Keys are typed here and
 //! saved at home only: on the phone, or the Windows app talking to home, the box says so.
+//! Codex (12.4.1) signs in with ChatGPT here instead, shared with the person's own Codex.
 
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -69,7 +70,8 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
     };
     let default_model = str_of(&engine, "defaultModel");
     let agent = engine["kind"] == "agent";
-    let default_label = if engine_id == "claude" || agent {
+    let codex = engine["kind"] == "codex";
+    let default_label = if engine_id == "claude" || agent || codex {
         "Default".to_string()
     } else if default_model.is_empty() {
         "Pick a model".to_string()
@@ -97,6 +99,8 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
                         let shown = match (e["ready"] == true, e["kind"].as_str()) {
                             (true, _) => name,
                             (false, Some("agent")) => format!("{name} (not installed)"),
+                            (false, Some("codex")) if e["installed"] != true => format!("{name} (not installed)"),
+                            (false, Some("codex")) => format!("{name} (not signed in)"),
                             (false, _) => format!("{name} (needs a key)"),
                         };
                         rsx! { option { key: "{id}", value: "{id}", selected: id == picked, "{shown}" } }
@@ -139,6 +143,9 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
         if engine["kind"] == "api" {
             KeyBox { engine: engine.clone() }
         }
+        if codex {
+            CodexBox { engine: engine.clone() }
+        }
         }
     }
 }
@@ -166,6 +173,105 @@ fn AgentBox(engine: Value) -> Element {
             p { class: "mt-1.5 text-[12px] text-ink-tertiary",
                 "More: "
                 a { href: "{page}", target: "_blank", rel: "noreferrer", class: "text-accent underline", "{page}" }
+            }
+        }
+    }
+}
+
+/// Codex: installed or not, and signed in to ChatGPT or not, with the way to sign in. The sign-in
+/// is the person's own Codex's too, so it's shared both ways.
+#[component]
+fn CodexBox(engine: Value) -> Element {
+    let state = use_context::<Signal<State>>();
+    let mut found = use_signal(|| Value::Null);
+    let mut busy = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    use_effect(move || {
+        let _ = state.read().engines_changed;
+        spawn(async move {
+            match api::get("/api/engines/codex/account").await {
+                Ok(answer) => found.set(answer),
+                Err(err) => problem.set(Some(err)),
+            }
+        });
+    });
+    let start = use_callback(move |how: &'static str| {
+        busy.set(true);
+        problem.set(None);
+        spawn(async move {
+            match api::call("POST", "/api/engines/codex/sign-in", Some(&json!({ "how": how }))).await {
+                Ok(answer) => {
+                    let mut now = found.peek().clone();
+                    now["signIn"] = answer["signIn"].clone();
+                    found.set(now);
+                }
+                Err(err) => problem.set(Some(err)),
+            }
+            busy.set(false);
+        });
+    });
+    let cancel = move |_| {
+        spawn(async move {
+            let _ = api::call("DELETE", "/api/engines/codex/sign-in", None).await;
+        });
+    };
+    let at_home = crate::link::active().is_none();
+    let install = str_of(&engine, "install");
+    let info = found();
+    let installed = engine["installed"] == true;
+    let account = info["account"].clone();
+    let signed_in = account["signedIn"] == true;
+    let waiting = info["signIn"]["pending"] == true;
+    let url = str_of(&info["signIn"], "url");
+    let code = str_of(&info["signIn"], "code");
+    let how = str_of(&info["signIn"], "how");
+    let failed = info["signIn"]["error"].as_str().map(str::to_string);
+    let who = match (account["email"].as_str(), account["plan"].as_str()) {
+        (Some(email), Some(plan)) => format!("Signed in to ChatGPT as {email} ({plan} plan)."),
+        (Some(email), None) => format!("Signed in to ChatGPT as {email}."),
+        _ if account["kind"] == "apiKey" => "Signed in with an OpenAI API key.".to_string(),
+        _ => "Signed in.".to_string(),
+    };
+    rsx! {
+        div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-codex": true,
+            if !installed {
+                p { "Codex isn't installed on this computer. Install it in a terminal:" }
+                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{install}" }
+                p { class: "mt-1", "then sign in here." }
+            } else if signed_in {
+                p { "data-codex-account": true, "{who}" }
+                p { class: "mt-1 text-[12px] text-ink-tertiary", "Shared with Codex on this computer. The bots' chats are kept apart from your own Codex history." }
+            } else if waiting {
+                if how == "browser" {
+                    p { "Finish signing in on the ChatGPT page:" }
+                    a { href: "{url}", target: "_blank", rel: "noreferrer", class: "mt-1 block break-all text-accent underline", "data-codex-url": true, "Open the ChatGPT sign-in page" }
+                } else {
+                    p { "On any device, open " a { href: "{url}", target: "_blank", rel: "noreferrer", class: "text-accent underline", "data-codex-url": true, "{url}" } ", sign in to ChatGPT, and enter this code:" }
+                    p { class: "mt-1.5 font-mono text-[20px] font-semibold tracking-widest", "data-codex-code": true, "{code}" }
+                }
+                div { class: "mt-2 flex items-center gap-2",
+                    span { class: "flex-1 text-[12px] text-ink-tertiary", "Waiting for ChatGPT…" }
+                    button { r#type: "button", class: SMALL_BUTTON, onclick: cancel, "Cancel" }
+                }
+            } else if at_home {
+                p { "Codex runs on your ChatGPT plan. Signing in here signs in Codex on this computer too." }
+                div { class: "mt-2 flex flex-wrap gap-2",
+                    button {
+                        r#type: "button",
+                        "data-codex-sign-in": "code",
+                        disabled: busy(),
+                        class: "rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-50",
+                        onclick: move |_| start.call("code"),
+                        "Sign in with ChatGPT"
+                    }
+                    button { r#type: "button", "data-codex-sign-in": "browser", disabled: busy(), class: SMALL_BUTTON, onclick: move |_| start.call("browser"), "Use this computer's browser" }
+                }
+                p { class: "mt-1 text-[12px] text-ink-tertiary", "The first gives a code to type on any device. If ChatGPT refuses it, turn on device codes in ChatGPT's security settings, or use the browser." }
+            } else {
+                p { class: "text-ink-secondary", "Codex isn't signed in. Sign in from Catbot on the computer at home." }
+            }
+            if let Some(err) = failed.or(problem()) {
+                p { role: "alert", class: "mt-1 text-[12px] text-danger", "{err}" }
             }
         }
     }

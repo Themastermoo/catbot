@@ -6,6 +6,9 @@
 //! - `GET /api/engines/:id/models`: the models the API itself lists, for the picker.
 //! - `PUT /api/engines/:id/key` `{ key, url? }` and `DELETE /api/engines/:id/key`: save or forget
 //!   a key. Only at home: the remote door offers the first two and not these.
+//! - Codex (12.4.1): `GET /api/engines/codex/account` says who it's signed in as;
+//!   `POST /api/engines/codex/sign-in` `{ how: "code" | "browser" }` signs in with ChatGPT (the
+//!   person's own Codex too) and `DELETE` gives up on it. Signing in is at home only.
 
 use std::sync::Arc;
 
@@ -18,6 +21,57 @@ use crate::engines::{self, Engine, Kind};
 pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request, at_home: bool) -> Answer {
     match (method, rest) {
         (&Method::GET, []) => Ok((StatusCode::OK, json!({ "engines": list(app) }))),
+        (&Method::GET, ["codex", "account"]) => {
+            let state = app.codex_sign_in.state.lock().expect("sign-in lock").clone();
+            let Some(program) = engines::find(engines::CODEX).and_then(engines::agent_program) else {
+                return Ok((StatusCode::OK, json!({ "installed": false, "account": { "signedIn": false }, "signIn": state })));
+            };
+            let account = crate::codex::account(&program).await.unwrap_or_else(|problem| json!({ "signedIn": crate::codex::signed_in(), "problem": problem }));
+            Ok((StatusCode::OK, json!({ "installed": true, "account": account, "signIn": state })))
+        }
+        (&Method::POST, ["codex", "sign-in"]) if at_home => {
+            let program = engines::find(engines::CODEX).and_then(engines::agent_program).ok_or_else(|| bad("Codex isn't installed on this computer: npm install -g @openai/codex"))?;
+            let body: Value = json_body(req).await?;
+            let how = if body["how"] == "browser" { "browser" } else { "code" };
+            if let Some(old) = app.codex_sign_in.task.lock().expect("sign-in lock").take() {
+                old.abort();
+            }
+            let done = app.clone();
+            let (shown, task) = crate::codex::sign_in(&program, how, move |outcome| {
+                let mut state = done.codex_sign_in.state.lock().expect("sign-in lock");
+                *state = if outcome["success"] == true { Value::Null } else { json!({ "error": outcome["error"].as_str().unwrap_or("the sign-in didn't finish") }) };
+                drop(state);
+                eprintln!("catbot: Codex sign-in {}", if outcome["success"] == true { "finished" } else { "didn't finish" });
+                done.hub.send(json!({ "kind": "engines" }));
+            })
+            .await
+            .map_err(bad)?;
+            *app.codex_sign_in.state.lock().expect("sign-in lock") = json!({ "pending": true, "how": shown["how"], "url": shown["url"], "code": shown["code"] });
+            *app.codex_sign_in.task.lock().expect("sign-in lock") = Some(task);
+            app.hub.send(json!({ "kind": "engines" }));
+            Ok((StatusCode::OK, json!({ "signIn": app.codex_sign_in.state.lock().expect("sign-in lock").clone() })))
+        }
+        (&Method::DELETE, ["codex", "sign-in"]) if at_home => {
+            if let Some(task) = app.codex_sign_in.task.lock().expect("sign-in lock").take() {
+                task.abort();
+            }
+            *app.codex_sign_in.state.lock().expect("sign-in lock") = Value::Null;
+            app.hub.send(json!({ "kind": "engines" }));
+            Ok((StatusCode::OK, json!({ "signIn": null })))
+        }
+        (_, ["codex", "sign-in"]) => Err((StatusCode::NOT_FOUND, "Codex signs in at home".into())),
+        (&Method::GET, ["codex", "models"]) => {
+            let fallback = json!([]);
+            let Some(program) = engines::find(engines::CODEX).and_then(engines::agent_program) else {
+                return Ok((StatusCode::OK, json!({ "models": fallback, "live": false, "problem": "Codex isn't installed" })));
+            };
+            let home = app.with_store(|store| Ok(store.home().to_path_buf())).ok_or_else(|| fail("no home"))?;
+            match crate::codex::models(&program, &home).await {
+                Ok(models) if !models.is_empty() => Ok((StatusCode::OK, json!({ "models": models.iter().map(|m| m["id"].clone()).collect::<Vec<_>>(), "labels": models, "live": true }))),
+                Ok(_) => Ok((StatusCode::OK, json!({ "models": fallback, "live": false }))),
+                Err(problem) => Ok((StatusCode::OK, json!({ "models": fallback, "live": false, "problem": problem }))),
+            }
+        }
         (&Method::GET, [id, "models"]) => {
             let engine = find(id)?;
             let fallback: Vec<&str> = engine.models.iter().map(|(id, _)| *id).filter(|id| !id.is_empty()).collect();
@@ -77,11 +131,13 @@ fn list(app: &App) -> Vec<Value> {
 fn describe(app: &App, engine: &Engine) -> Value {
     let saved = app.with_store(|store| store.engine_key(engine.id)).flatten();
     let access = engines::access(engine, saved.as_ref());
-    let installed = (engine.kind == Kind::Agent).then(|| engines::agent_program(engine).is_some());
+    let installed = matches!(engine.kind, Kind::Agent | Kind::Codex).then(|| engines::agent_program(engine).is_some());
+    let signed_in = (engine.kind == Kind::Codex).then(crate::codex::signed_in);
     let ready = match engine.kind {
         Kind::Claude => true,
         Kind::Api => access.is_some(),
         Kind::Agent => installed == Some(true),
+        Kind::Codex => installed == Some(true) && signed_in == Some(true),
     };
     json!({
         "id": engine.id,
@@ -96,6 +152,7 @@ fn describe(app: &App, engine: &Engine) -> Value {
         "models": engine.models.iter().map(|(id, label)| json!({ "id": id, "label": label })).collect::<Vec<_>>(),
         "defaultModel": engine.default_model,
         "installed": installed,
+        "signedIn": signed_in,
         "install": engine.install,
         "signIn": engine.sign_in,
     })

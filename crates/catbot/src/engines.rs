@@ -5,6 +5,8 @@
 //!   Groq, Mistral, Cerebras, DeepSeek, OpenRouter, MiniMax, and models on this computer through
 //!   Ollama or LM Studio. They need a key (saved in Settings, kept in Catbot's private store, or
 //!   given in the environment), except the local ones. Catbot gives them its own tools.
+//! - **Codex** with a ChatGPT plan (`codex.rs`), over its app-server, signed in once for Catbot and
+//!   the person's own Codex together.
 //! - **Agent programs** that speak the Agent Client Protocol (`acp.rs`): Grok CLI, Gemini CLI,
 //!   GitHub Copilot, Cursor, OpenCode, Qwen Code, Kimi, Droid, Cline, Kiro, Hermes, DeepSeek
 //!   Harness, OMP and Command Code. Each must be installed and signed in on the computer, with its
@@ -19,6 +21,8 @@ use crate::claude::PermissionMode;
 
 /// The engine every bot started on.
 pub const CLAUDE: &str = "claude";
+/// Codex on a ChatGPT plan.
+pub const CODEX: &str = "codex";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -29,6 +33,8 @@ pub enum Kind {
     Api,
     /// An agent program on the computer, over the Agent Client Protocol.
     Agent,
+    /// Codex, over its own app-server protocol, on a ChatGPT plan.
+    Codex,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -196,6 +202,17 @@ pub const ALL: &[Engine] = &[
         needs_key: false,
         key_page: "https://claude.com/product/claude-code",
         models: &[("", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")],
+        ..BLANK
+    },
+    Engine {
+        id: CODEX,
+        name: "Codex (ChatGPT)",
+        kind: Kind::Codex,
+        key_page: "https://chatgpt.com/codex",
+        models: &[("", "Default")],
+        program: "codex",
+        install: "npm install -g @openai/codex",
+        sign_in: "codex login",
         ..BLANK
     },
     api(

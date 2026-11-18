@@ -9,6 +9,7 @@ pub mod catbot_tools;
 pub mod chat;
 pub mod checkpoints;
 pub mod claude;
+pub mod codex;
 pub mod console;
 pub mod engines;
 pub mod memory;

@@ -227,6 +227,16 @@ its permission requests become Catbot's approval cards, its file requests are se
 bot's folders only, and its session carries on from message to message. `CATBOT_AGENT_<ID>`
 (e.g. `CATBOT_AGENT_GROK_CLI=/opt/grok/bin/grok`) points Catbot at a program it can't find.
 
+Bots can run on **Codex (ChatGPT)**, OpenAI's Codex on your ChatGPT plan. Install it
+(`npm install -g @openai/codex`), then pick Codex in a bot's settings and press "Sign in with
+ChatGPT": it gives a code to type at auth.openai.com on any device (or opens the sign-in in this
+computer's browser). The sign-in is shared with Codex on this computer (`~/.codex`, or
+`$CODEX_HOME`): signing in either place signs in both. The bots' own chats are kept in Catbot's
+Codex home (`<catbot home>/codex`), out of your Codex history. On "Ask for approval" Codex runs
+read-only, so every change and command asks; on "Auto-accept edits" it writes in the bot's
+folders and asks for commands; "Full access" asks nothing. Bots on Codex get Catbot's own tools
+too. `CATBOT_AGENT_CODEX` points Catbot at a `codex` it can't find.
+
 **Memory vault.** Each computer running Catbot keeps a folder of linked Markdown notes the bots
 write as they work: `~/CatbotMemory` (`$CATBOT_MEMORY` to move it, `off` to turn it off).
 `Bots/` holds a note per bot (Catbot seeds it when the bot is made and moves it when the bot is

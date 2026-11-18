@@ -113,6 +113,8 @@ pub struct App {
     pub tool_grants: std::sync::Mutex<std::collections::HashMap<String, bot_tools::Grant>>,
     /// The bots' computers while Catbot runs (`computers.rs`).
     pub computers: computers::Computers,
+    /// A Codex sign-in under way (`codex.rs`).
+    pub codex_sign_in: crate::codex::SignIn,
 }
 
 impl App {
@@ -144,6 +146,7 @@ impl App {
             local: std::sync::OnceLock::new(),
             tool_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
             computers: computers::Computers::default(),
+            codex_sign_in: crate::codex::SignIn::default(),
         })
     }
 

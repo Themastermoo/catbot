@@ -57,6 +57,7 @@ pub fn ready(app: &App, engine: &str) -> bool {
         Kind::Claude => true,
         Kind::Api => engines::access(engine, app.with_store(|store| store.engine_key(engine.id)).flatten().as_ref()).is_some(),
         Kind::Agent => engines::agent_program(engine).is_some(),
+        Kind::Codex => engines::agent_program(engine).is_some() && crate::codex::signed_in(),
     }
 }
 

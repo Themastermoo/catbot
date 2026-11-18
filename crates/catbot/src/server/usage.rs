@@ -53,7 +53,7 @@ pub fn billing(engine: &str) -> &'static str {
         }
         Some(e) if e.kind == engines::Kind::Api && e.needs_key => "key",
         Some(e) if e.kind == engines::Kind::Api => "free",
-        // Agent programs sign in to their own accounts (plans, mostly).
+        // Codex on a ChatGPT plan, and agent programs signed in to their own accounts (plans, mostly).
         _ => "plan",
     }
 }

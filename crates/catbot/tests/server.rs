@@ -331,8 +331,8 @@ async fn bots_are_renamed_retuned_and_deleted() {
     assert!(std::fs::read_to_string(s.memory.join("Bots/Ranger.md")).unwrap().contains("# Ranger"), "the note follows the name");
     assert_eq!(patched["bot"]["approvalMode"], "edits");
     assert_eq!(patched["bot"]["modelSelection"]["model"], "claude-opus-5-5");
-    let (status, _) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "codex", "model": "gpt" } }))).await;
-    assert_eq!(status, 400, "Catbot bots run on Claude");
+    let (status, _) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "nonesuch", "model": "x" } }))).await;
+    assert_eq!(status, 400, "an AI Catbot doesn't know");
     assert_eq!(s.call("GET", &format!("/api/bots/{bot}/activity"), None).await.0, 404);
     assert_eq!(s.call("DELETE", &format!("/api/bots/{bot}"), None).await.0, 200);
     let (_, list) = s.call("GET", "/api/bots", None).await;
@@ -2775,4 +2775,124 @@ async fn boat_computers() {
     // Disconnected: the key is forgotten.
     let (_, gone) = s.call("PUT", "/api/computers/boat", Some(json!({ "key": null }))).await;
     assert_eq!(gone["boat"], json!({ "connected": false }));
+}
+
+/// Stage 12.4.1: a bot on Codex with a ChatGPT plan, signed in once with the person's own Codex.
+#[tokio::test]
+async fn a_bot_on_codex_signs_in_streams_asks_and_resumes() {
+    let bin = tempfile::tempdir().unwrap();
+    let program = bin.path().join("codex");
+    let log = bin.path().join("codex.log");
+    std::fs::write(&program, format!("#!/bin/sh\nFAKE_CODEX_LOG={} exec python3 {} \"$@\"\n", log.display(), concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-codex.py"))).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let person = bin.path().join("person-codex");
+    std::fs::create_dir_all(&person).unwrap();
+    // SAFETY: only this test reads these.
+    unsafe {
+        std::env::set_var("CATBOT_AGENT_CODEX", &program);
+        std::env::set_var("CODEX_HOME", &person);
+    }
+    let logged = || std::fs::read_to_string(&log).unwrap_or_default().lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect::<Vec<_>>();
+
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let codex = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "codex").unwrap().clone();
+    let listed = codex(&s.call("GET", "/api/engines", None).await.1);
+    assert_eq!((listed["kind"].as_str(), listed["installed"].as_bool(), listed["signedIn"].as_bool(), listed["ready"].as_bool()), (Some("codex"), Some(true), Some(false), Some(false)), "{listed}");
+    assert_eq!(s.call("GET", "/api/engines/codex/account", None).await.1["account"]["signedIn"], false);
+
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Cody", "soul": "Be brief." }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "codex", "model": "" }, "approvalMode": "edits" }))).await;
+
+    // Not signed in: the bot says how.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
+    let error = until(&mut events, "error", |f| runtime(f, "runtime.error")).await;
+    assert!(error["event"]["message"].as_str().unwrap().contains("Sign in with ChatGPT"), "{error}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Signing in with a code: shown, then finished by Codex, in the person's own Codex home.
+    let (_, started) = s.call("POST", "/api/engines/codex/sign-in", Some(json!({ "how": "code" }))).await;
+    assert_eq!((started["signIn"]["pending"].as_bool(), started["signIn"]["code"].as_str()), (Some(true), Some("ABCD-1234")), "{started}");
+    assert_eq!(started["signIn"]["url"], "https://auth.openai.com/codex/device");
+    let mut account = Value::Null;
+    for _ in 0..100 {
+        account = s.call("GET", "/api/engines/codex/account", None).await.1;
+        if account["account"]["signedIn"] == true && account["signIn"].is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(account["account"], json!({ "signedIn": true, "kind": "chatgpt", "email": "moo@example.com", "plan": "plus" }), "{account}");
+    assert!(person.join("auth.json").is_file());
+    assert_eq!(codex(&s.call("GET", "/api/engines", None).await.1)["ready"], true);
+    let (_, models) = s.call("GET", "/api/engines/codex/models", None).await;
+    assert_eq!((models["models"].clone(), models["live"].as_bool()), (json!(["gpt-5.5-codex"]), Some(true)), "{models}");
+
+    // A first message: a new thread in Catbot's own Codex home, with the sign-in linked in.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
+    let thought = until(&mut events, "thinking", |f| runtime(f, "content.delta") && f["event"]["streamKind"] == "reasoning_text").await;
+    assert_eq!(thought["event"]["delta"], "hmm");
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Echo: hello (new)");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let lines = logged();
+    let opened = lines.iter().rev().find(|l| l.get("home").is_some()).unwrap();
+    let ours = s._dir.path().join("home/codex");
+    assert_eq!(opened["home"].as_str(), Some(ours.to_str().unwrap()), "the bots' chats stay out of the person's Codex");
+    assert!(opened["cwd"].as_str().unwrap().ends_with("bots/cody"));
+    assert!(std::fs::symlink_metadata(ours.join("auth.json")).unwrap().file_type().is_symlink());
+    let begun = lines.iter().find(|l| l["method"] == "thread/start").unwrap()["params"].clone();
+    assert_eq!((begun["sandbox"].as_str(), begun["approvalPolicy"].as_str()), (Some("workspace-write"), Some("untrusted")), "{begun}");
+    assert!(begun["developerInstructions"].as_str().unwrap().contains("Be brief."));
+    assert!(begun["config"]["sandbox_workspace_write"]["network_access"] == true);
+
+    // The next message carries on the thread.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "again", "threadId": thread }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Echo: again (resumed)");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    assert!(logged().iter().any(|l| l["method"] == "thread/resume" && l["params"]["threadId"] == "th-1"));
+
+    // On "Ask": a command waits for a yes; a no is told to Codex.
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "approvalMode": "ask" }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "please run", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    assert_eq!((asked["event"]["tool"].as_str(), asked["event"]["summary"].as_str().map(|s| s.contains("ls"))), (Some("Bash"), Some(true)), "{asked}");
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "deny" }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Didn't run it.");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let resumed = logged().into_iter().rev().find(|l| l["method"] == "thread/resume").unwrap();
+    assert_eq!(resumed["params"]["sandbox"], "read-only", "on Ask, every change asks");
+
+    // An edit asks too, and is written once allowed.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "please edit", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    assert_eq!(asked["event"]["tool"], "Edit");
+    let notes = s._dir.path().join("home/bots/cody/notes.md");
+    assert!(!notes.exists());
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Edited.");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello from codex");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Signed out on Codex's side: the bot says how to sign in again.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "fail", "threadId": thread }))).await;
+    let error = until(&mut events, "error", |f| runtime(f, "runtime.error")).await;
+    let said = error["event"]["message"].as_str().unwrap();
+    assert!(said.contains("401") && said.contains("Sign in with ChatGPT"), "{said}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let shown = s.app.with_store(|store| store.messages(&thread, 5)).unwrap();
+    let errors = shown.iter().filter(|m| format!("{m:?}").contains("401")).count();
+    assert_eq!(errors, 1, "the error is shown once");
 }

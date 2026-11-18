@@ -128,6 +128,17 @@ pub fn person_text(m: &Message) -> String {
 }
 
 /// The pictures attached to a message, read from the bot's folder: (type, bytes).
+/// A message's pictures as files, for AIs that read them from disk (Codex).
+pub fn picture_files(m: &Message, folder: &Path) -> Vec<std::path::PathBuf> {
+    let attached = m.detail.as_ref().and_then(|d| d["attachments"].as_array().cloned()).unwrap_or_default();
+    attached
+        .iter()
+        .filter(|a| a["mime"].as_str().is_some_and(|m| m.starts_with("image/")))
+        .filter_map(|a| Some(folder.join("attachments").join(a["file"].as_str()?)))
+        .filter(|p| p.is_file())
+        .collect()
+}
+
 pub fn pictures(m: &Message, folder: &Path) -> Vec<(String, Vec<u8>)> {
     let attached = m.detail.as_ref().and_then(|d| d["attachments"].as_array().cloned()).unwrap_or_default();
     attached
