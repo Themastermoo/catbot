@@ -244,6 +244,14 @@ Google" opens Google's page; if you finish on a phone, paste the address its bro
 It keeps its own Google profile there. This release offers Catbot its Gemini models: Google
 gives its others only to editors it lists, and Catbot doesn't pretend to be one.
 
+Bots can run on **Muse Code (Meta)** the same way. Catbot downloads Meta's `muse` program itself
+(about 420 MB, from the address and checksum in the ACP registry) and runs its ACP mode. "Sign
+in with Meta" shows a code to type at Meta's page, on this computer or a phone. The sign-in is
+shared with Muse Code on this computer (`muse login`), so signing in either place signs in both;
+a `META_API_KEY` works too. Muse may keep its sign-in in the system's keychain, where Catbot
+can't look, so a bot signed in from a terminal may still show the button: a turn goes ahead
+either way, and says so if Muse wants a sign-in.
+
 Bots can run on **Pi**, the open coding agent, with your own providers and keys. Install it
 (`npm install -g @earendil-works/pi-coding-agent`) and sign it in to a provider once in a
 terminal (`pi auth login <provider>`, with an account or a key); a bot on Pi offers the models

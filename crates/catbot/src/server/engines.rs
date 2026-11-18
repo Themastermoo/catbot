@@ -102,9 +102,12 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
             let env = engines::agent_env(engine, &program);
             let folder = engines::agents_dir().map(|d| d.join(engine.id)).ok_or_else(|| fail("no folder"))?;
             let done = app.clone();
-            let (url, task) = crate::acp::sign_in(engine, program, env, folder, method, move |outcome| {
+            let (shown, task) = crate::acp::sign_in(engine, program, env, folder, method, move |outcome| {
                 let state = match outcome {
-                    Ok(()) => Value::Null,
+                    Ok(()) => {
+                        engines::note_signed_in(engine);
+                        Value::Null
+                    }
                     Err(problem) => json!({ "problem": format!("The sign-in didn't finish: {problem}") }),
                 };
                 done.agent_work.lock().expect("agent work lock").insert(engine.id.to_string(), (state, None));
@@ -112,9 +115,12 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
             })
             .await
             .map_err(bad)?;
-            match url {
-                Some(url) => set_work(app, engine.id, json!({ "signingIn": true, "url": url }), Some(task)),
-                None => set_work(app, engine.id, Value::Null, None),
+            match shown {
+                Some((url, code)) => set_work(app, engine.id, json!({ "signingIn": true, "url": url, "code": code }), Some(task)),
+                None => {
+                    engines::note_signed_in(engine);
+                    set_work(app, engine.id, Value::Null, None)
+                }
             }
             app.hub.send(json!({ "kind": "engines" }));
             Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })))
@@ -259,6 +265,7 @@ fn describe(app: &App, engine: &Engine) -> Value {
         "signedIn": signed_in,
         "download": engine.download.filter(|_| engines::asset(engine).is_some()).map(|d| json!({ "version": d.version, "size": d.size })),
         "signsInHere": engines::agent_sign_in(engine).is_some(),
+        "signInWith": engines::sign_in_with(engine),
         "work": work(app, engine.id),
         "install": engine.install,
         "signIn": engine.sign_in,

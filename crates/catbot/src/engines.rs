@@ -24,6 +24,7 @@ pub const CLAUDE: &str = "claude";
 /// Codex on a ChatGPT plan.
 pub const CODEX: &str = "codex";
 pub const PI: &str = "pi";
+pub const MUSE: &str = "muse-code";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -109,10 +110,49 @@ pub const ANTIGRAVITY_DOWNLOAD: Download = Download {
     ],
 };
 
-/// The engines that sign in through their own Google (or other) page: Catbot shows the link,
-/// and the method to ask for.
+/// Meta's Muse Code, as the ACP registry lists it (muse-code/agent.json, read 2026-11-18): one
+/// program per platform, not an archive.
+pub const MUSE_DOWNLOAD: Download = Download {
+    version: "1.4.14",
+    size: "about 420 MB",
+    assets: &[
+        Asset { platform: "linux-x86_64", url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=muse-x86-linux", sha256: "0809aac7cb58d18f5022b6d05e02aa1974683c0ec430e5f04d25b60ed17de2da", cmd: "muse", zip: false },
+        Asset { platform: "linux-aarch64", url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=muse-aarch64-linux", sha256: "3dc39b8fa26f9963cc2038f2966c0932ed5a39f0f9efb39cc0266a261cbbcf76", cmd: "muse", zip: false },
+        Asset { platform: "windows-x86_64", url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=muse-x86-windows.exe", sha256: "20d18c426cc26e9e4b3cc07008ec07ec97e12e466a2be8cd2797b2e0e2018382", cmd: "muse.exe", zip: false },
+        Asset { platform: "windows-aarch64", url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=muse-aarch64-windows.exe", sha256: "64cef76cb210de993d31478ee582ef4639bbb212df8912b74f45d40431e66e82", cmd: "muse.exe", zip: false },
+        Asset { platform: "darwin-aarch64", url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=muse-aarch64-macos", sha256: "1c96114408acbeade9a8fb79e3b4425e5b64d50425938568aef01bdc04ce2e03", cmd: "muse", zip: false },
+        Asset { platform: "darwin-x86_64", url: "https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.14-R7309.1&file=muse-x86-macos", sha256: "6da5a12d3298afba45afec929fc385b516084ed28e9504ae29354dbcdfc4089d", cmd: "muse", zip: false },
+    ],
+};
+
+/// The engines that sign in through Catbot, with the method to ask for: Antigravity through
+/// Google's page, Muse Code with a code typed at Meta's.
 pub fn agent_sign_in(engine: &Engine) -> Option<&'static str> {
-    (engine.id == "antigravity").then_some("oauth-personal")
+    match engine.id {
+        "antigravity" => Some("oauth-personal"),
+        MUSE => Some("muse-login"),
+        _ => None,
+    }
+}
+
+/// Whose account an engine that signs in through Catbot signs in with, for its button.
+pub fn sign_in_with(engine: &Engine) -> Option<&'static str> {
+    match engine.id {
+        "antigravity" => Some("Google"),
+        MUSE => Some("Meta"),
+        _ => None,
+    }
+}
+
+/// Notes that Catbot signed an engine in (Muse may keep its sign-in in the system's keychain,
+/// where Catbot can't look).
+pub fn note_signed_in(engine: &Engine) {
+    if engine.id == MUSE
+        && let Some(dir) = agents_dir().map(|d| d.join(MUSE))
+    {
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(dir.join("signed-in"), "Catbot signed Muse Code in here.\n");
+    }
 }
 
 fn no_args(_: PermissionMode, _: &str) -> Vec<String> {
@@ -373,6 +413,20 @@ pub const ALL: &[Engine] = &[
         download: Some(&ANTIGRAVITY_DOWNLOAD),
         ..BLANK
     },
+    // Meta's Muse Code: Catbot downloads it and signs it in with a code at Meta's page. The
+    // sign-in is the person's own Muse's too (`muse login`), so it's shared both ways.
+    Engine {
+        id: MUSE,
+        name: "Muse Code (Meta)",
+        kind: Kind::Agent,
+        program: "muse",
+        args: acp_word,
+        install: "Install it from this bot's settings",
+        sign_in: "Sign in with Meta in this bot's settings (or run `muse login` on this computer)",
+        key_page: "https://dev.meta.ai/docs/muse-code",
+        download: Some(&MUSE_DOWNLOAD),
+        ..BLANK
+    },
     agent("omp", "OMP", "omp", acp_word, "npm install -g @oh-my-pi/pi-coding-agent", "omp login", "https://omp.sh", &["agent"]),
     agent("command-code", "Command Code", "command-code", acp_word, "npm install -g command-code", "cmd login", "https://commandcode.ai/docs/acp", &[]),
 ];
@@ -463,6 +517,8 @@ pub fn agent_env(engine: &Engine, program: &std::path::Path) -> Vec<(String, Str
             }
             env
         }
+        // Its ACP mode is still marked experimental.
+        MUSE => vec![("MUSE_EXPERIMENTAL_ACP".to_string(), "on".to_string())],
         _ => Vec::new(),
     }
 }
@@ -471,6 +527,13 @@ pub fn agent_env(engine: &Engine, program: &std::path::Path) -> Vec<(String, Str
 pub fn agent_signed_in(engine: &Engine) -> Option<bool> {
     match engine.id {
         "antigravity" => Some(agents_dir().is_some_and(|d| d.join("antigravity/profile/antigravity-acp/acp_token.json").metadata().is_ok_and(|m| m.is_file() && m.len() > 0))),
+        // A key, Muse's own file, or Catbot's note; else Catbot can't tell (the keychain).
+        MUSE => {
+            let config = std::env::var_os("XDG_CONFIG_HOME").filter(|d| !d.is_empty()).map(std::path::PathBuf::from).unwrap_or_else(|| crate::store::user_home().join(".config"));
+            let keyed = std::env::var_os("META_API_KEY").is_some_and(|k| !k.is_empty());
+            let noted = agents_dir().is_some_and(|d| d.join(MUSE).join("signed-in").is_file());
+            (keyed || noted || config.join("muse/auth.json").is_file()).then_some(true)
+        }
         _ => None,
     }
 }

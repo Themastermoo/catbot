@@ -2893,8 +2893,8 @@ async fn a_bot_on_codex_signs_in_streams_asks_and_resumes() {
     assert!(said.contains("401") && said.contains("Sign in with ChatGPT"), "{said}");
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
     let shown = s.app.with_store(|store| store.messages(&thread, 5)).unwrap();
-    let errors = shown.iter().filter(|m| format!("{m:?}").contains("401")).count();
-    assert_eq!(errors, 1, "the error is shown once");
+    let errors: Vec<&str> = shown.iter().filter(|m| m.role == catbot::store::Role::Step).map(|m| m.body.as_str()).filter(|b| b.contains("Codex")).collect();
+    assert_eq!(errors.len(), 1, "the error is shown once: {errors:?}");
 
     // 12.4.2: Codex's plan windows on the Usage page, asked of Codex itself.
     let (_, plans) = s.call("GET", "/api/usage/plans?fresh=1", None).await;
@@ -3012,12 +3012,16 @@ async fn a_bot_on_pi_lists_models_asks_on_cards_and_carries_on() {
     assert!(said.contains("No API key") && said.contains("pi auth login"), "{said}");
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
     let shown = s.app.with_store(|store| store.messages(&thread, 5)).unwrap();
-    assert_eq!(shown.iter().filter(|m| format!("{m:?}").contains("No API key")).count(), 1, "the error is shown once");
+    assert_eq!(shown.iter().filter(|m| m.body.contains("No API key")).count(), 1, "the error is shown once");
 }
+
+/// The tests that set `CATBOT_AGENTS_DIR` (process-wide) take turns.
+static AGENTS_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Stage 12.4.3: Antigravity, downloaded by Catbot, signed in with Google, and answering.
 #[tokio::test]
 async fn antigravity_installs_signs_in_with_google_and_answers() {
+    let _turn = AGENTS_TURN.lock().await;
     use sha2::Digest;
     use std::io::Write;
     // The download: a zip with a stand-in server (the ACP stand-in, as Google's) and its harness.
@@ -3101,4 +3105,84 @@ async fn antigravity_installs_signs_in_with_google_and_answers() {
     assert_eq!(turn["env"]["GEMINI_HOME"].as_str(), Some(agents.join("antigravity/profile").to_str().unwrap()));
     assert_eq!(turn["env"]["ANTIGRAVITY_HARNESS_PATH"].as_str(), Some(agents.join("antigravity/1.5.0/localharness_external").to_str().unwrap()));
     assert!(turn["cwd"].as_str().unwrap().ends_with("bots/gem"));
+}
+
+/// Stage 12.4.5: Muse Code, downloaded by Catbot (one program, no archive), signed in with a code
+/// at Meta's page, and answering over ACP.
+#[tokio::test]
+async fn muse_code_installs_signs_in_with_a_code_and_answers() {
+    let _turn = AGENTS_TURN.lock().await;
+    use sha2::Digest;
+    let bin = tempfile::tempdir().unwrap();
+    let (log, approve) = (bin.path().join("muse.log"), bin.path().join("approved"));
+    let script = format!(
+        "#!/bin/sh\nFAKE_ACP_META=1 FAKE_ACP_APPROVE={} FAKE_ACP_LOG={} exec python3 {} \"$@\"\n",
+        approve.display(),
+        log.display(),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-acp.py")
+    );
+    let bytes = script.into_bytes();
+    let sha = format!("{:x}", sha2::Sha256::digest(&bytes));
+    let addr = listen(Router::new().route("/muse", axum::routing::get(move || async move { bytes.clone() }))).await;
+    let s = setup().await;
+    let agents = s._dir.path().join("home/agents");
+    // SAFETY: only the tests holding AGENTS_TURN read these.
+    unsafe {
+        std::env::set_var("CATBOT_DOWNLOAD_MUSE_CODE", format!("http://{addr}/muse {sha}"));
+        std::env::set_var("CATBOT_AGENTS_DIR", &agents);
+        std::env::set_var("XDG_CONFIG_HOME", bin.path().join("config"));
+        std::env::remove_var("META_API_KEY");
+    }
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let muse = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "muse-code").unwrap().clone();
+    let listed = muse(&s.call("GET", "/api/engines", None).await.1);
+    assert_eq!((listed["installed"].as_bool(), listed["download"]["version"].as_str(), listed["signInWith"].as_str()), (Some(false), Some("1.4.14"), Some("Meta")), "{listed}");
+
+    // Installing: fetched, checked, and put in place as it is.
+    s.call("POST", "/api/engines/muse-code/install", None).await;
+    let mut listed = Value::Null;
+    for _ in 0..100 {
+        listed = muse(&s.call("GET", "/api/engines", None).await.1);
+        if listed["installed"] == true && listed["work"].is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!((listed["installed"].as_bool(), listed["ready"].as_bool()), (Some(true), Some(true)), "{listed}");
+    assert!(listed["signedIn"].is_null(), "Catbot can't tell yet (the keychain): {listed}");
+    assert!(agents.join("muse-code/1.4.14/muse").is_file());
+
+    // Not signed in yet: Muse refuses the session, and the bot says how.
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Muse" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "muse-code", "model": "" }, "approvalMode": "edits" }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
+    let error = until(&mut events, "error", |f| runtime(f, "runtime.error")).await;
+    assert!(error["event"]["message"].as_str().unwrap().contains("Sign in with Meta"), "{error}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Signing in: the code and Meta's page, then the person approves there.
+    let (_, started) = s.call("POST", "/api/engines/muse-code/sign-in", None).await;
+    let work = &started["engine"]["work"];
+    assert_eq!((work["code"].as_str(), work["url"].as_str()), (Some("WVCW-VRLT"), Some("https://auth.meta.com/oauth/device/?code=WVCW-VRLT")), "{started}");
+    std::fs::write(&approve, "yes").unwrap();
+    for _ in 0..100 {
+        listed = muse(&s.call("GET", "/api/engines", None).await.1);
+        if listed["signedIn"] == true && listed["work"].is_null() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!((listed["signedIn"].as_bool(), listed["ready"].as_bool()), (Some(true), Some(true)), "{listed}");
+
+    // A turn: `muse acp`, with its ACP switched on.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Echo: hello (new)");
+    let started: Vec<Value> = std::fs::read_to_string(&log).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    let turn = started.last().unwrap();
+    assert_eq!((turn["args"].clone(), turn["env"]["MUSE_EXPERIMENTAL_ACP"].as_str()), (json!(["acp"]), Some("on")), "{turn}");
+    assert!(turn["cwd"].as_str().unwrap().ends_with("bots/muse"));
 }

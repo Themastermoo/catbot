@@ -458,10 +458,11 @@ fn file_of(params: &Value, workspace: &Workspace) -> Result<PathBuf, String> {
 /// The line an agent prints with its sign-in link (Antigravity's words).
 const LINK_PREFIX: &str = "Open the following link to authenticate the ACP server: ";
 
-/// Signs an agent in through its own page (Antigravity: Google). Starts the program, asks it to
-/// `authenticate` with `method`, and gives back the link it prints (None when it was already
-/// signed in and finished at once); `finished` hears how it ended. The program stays up, waiting
-/// for the page to send the person back to it, for ten minutes at most.
+/// Signs an agent in through its own page. Starts the program, asks it to `authenticate` with
+/// `method`, and gives back the link to open (None when it was already signed in and finished at
+/// once), with a code to type there when it gives one; `finished` hears how it ended. The link
+/// comes as Antigravity prints it, or as ACP's URL elicitation (Muse Code: a device code at
+/// Meta's page). The program stays up, waiting for the sign-in to finish, for ten minutes at most.
 pub async fn sign_in(
     engine: &'static Engine,
     program: PathBuf,
@@ -469,7 +470,7 @@ pub async fn sign_in(
     folder: PathBuf,
     method: &'static str,
     finished: impl FnOnce(Result<(), String>) + Send + 'static,
-) -> Result<(Option<String>, tokio::task::JoinHandle<()>), String> {
+) -> Result<(Option<(String, Option<String>)>, tokio::task::JoinHandle<()>), String> {
     let _ = std::fs::create_dir_all(&folder);
     let mut command = Command::new(&program);
     command
@@ -484,9 +485,13 @@ pub async fn sign_in(
     command.creation_flags(0x0800_0000);
     let mut child = command.spawn().map_err(|e| format!("couldn't start {}: {e}", engine.name))?;
     let link = Link { stdin: Arc::new(tokio::sync::Mutex::new(child.stdin.take().expect("stdin is piped"))), waiting: Arc::default(), next: Arc::default() };
-    // Its answers; anything it asks is refused (nothing to do mid-sign-in).
+    // Its answers; a sign-in link it asks Catbot to show is taken (and the link, from its output,
+    // for agents that print it); anything else it asks is refused (nothing to do mid-sign-in).
+    let (link_tx, link_rx) = oneshot::channel::<(String, Option<String>)>();
+    let link_tx = Arc::new(Mutex::new(Some(link_tx)));
     let stdout = child.stdout.take().expect("stdout is piped");
     let reading = link.clone();
+    let shown = link_tx.clone();
     let reader = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
@@ -502,6 +507,18 @@ pub async fn sign_in(
                         let _ = waiter.send(result);
                     }
                 }
+                (Some("elicitation/create"), Some(id)) if message["params"]["mode"] == "url" => {
+                    let params = &message["params"];
+                    match params["url"].as_str().filter(|u| u.starts_with("https://")) {
+                        Some(url) => {
+                            if let Some(tx) = shown.lock().expect("link lock").take() {
+                                let _ = tx.send((url.to_string(), device_code(url, params["message"].as_str().unwrap_or_default())));
+                            }
+                            reading.reply(id, json!({ "action": "accept" })).await;
+                        }
+                        None => reading.reply(id, json!({ "action": "decline" })).await,
+                    }
+                }
                 (Some(_), Some(id)) => reading.refuse(id, -32601, "not now").await,
                 _ => {}
             }
@@ -509,22 +526,24 @@ pub async fn sign_in(
         reading.waiting.lock().expect("waiting lock").clear();
     });
     // The link, from its output. Never shown otherwise: the lines after can carry a code.
-    let (link_tx, link_rx) = oneshot::channel::<String>();
     let stderr = child.stderr.take().expect("stderr is piped");
     let watcher = tokio::spawn(async move {
-        let mut link_tx = Some(link_tx);
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             if let Some(url) = line.trim().strip_prefix(LINK_PREFIX).map(str::trim).filter(|u| u.starts_with("https://"))
-                && let Some(tx) = link_tx.take()
+                && let Some(tx) = link_tx.lock().expect("link lock").take()
             {
-                let _ = tx.send(url.to_string());
+                let _ = tx.send((url.to_string(), None));
             }
         }
     });
     link.call(
         "initialize",
-        json!({ "protocolVersion": 1, "clientInfo": { "name": "catbot", "version": env!("CARGO_PKG_VERSION") }, "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false } }),
+        json!({
+            "protocolVersion": 1,
+            "clientInfo": { "name": "catbot", "version": env!("CARGO_PKG_VERSION") },
+            "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false }, "terminal": false, "elicitation": { "url": {} } },
+        }),
         Some(START_TIME),
     )
     .await?;
@@ -550,6 +569,17 @@ pub async fn sign_in(
             Err(format!("{} didn't give a sign-in link", engine.name))
         }
     }
+}
+
+/// The code a device sign-in asks the person to type: the link's `code=`, or the one its message
+/// names ("…enter the code WVCW-VRLT there.").
+fn device_code(url: &str, message: &str) -> Option<String> {
+    let from_link = reqwest::Url::parse(url).ok().and_then(|u| u.query_pairs().find(|(k, _)| k == "code").map(|(_, v)| v.into_owned()));
+    let from_message = || {
+        let words: Vec<&str> = message.split_whitespace().collect();
+        words.windows(2).find(|w| w[0].eq_ignore_ascii_case("code")).map(|w| w[1].trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-').to_string())
+    };
+    from_link.or_else(from_message).filter(|c| !c.is_empty() && c.len() <= 32)
 }
 
 /// Sends the page's "back to the agent" address on, when the browser that finished the sign-in
@@ -623,6 +653,13 @@ mod tests {
         let (name, input) = shown(&json!({ "title": "Edit a.md", "kind": "edit", "locations": [{ "path": "/x/a.md" }] }));
         assert_eq!((name.as_str(), input["file_path"].as_str()), ("Edit", Some("/x/a.md")));
         assert_eq!(output_of(&json!({ "content": [{ "type": "content", "content": { "type": "text", "text": "done" } }] })), "done");
+    }
+
+    #[test]
+    fn a_device_code_is_read_from_the_link_or_the_words() {
+        assert_eq!(device_code("https://auth.meta.com/oauth/device/?code=WVCW-VRLT", "").as_deref(), Some("WVCW-VRLT"));
+        assert_eq!(device_code("https://example.com/device", "Open the link, and enter the code AB12-CD34 there.").as_deref(), Some("AB12-CD34"));
+        assert_eq!(device_code("https://example.com/device", "Open the link."), None);
     }
 
     #[test]

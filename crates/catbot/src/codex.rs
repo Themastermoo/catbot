@@ -284,9 +284,12 @@ async fn run(turn: CodexTurn, mut child: Child, tx: mpsc::Sender<Event>, answers
     let outcome = match result {
         Ok((thread, status, problem)) => {
             let ok = status == "completed";
-            if let Some(problem) = problem.as_ref().filter(|p| !told.contains(p)) {
-                let _ = tx.send(Event::Error { message: explain(problem, "") }).await;
-            } else if !ok && status != "interrupted" {
+            if let Some(problem) = problem.as_ref() {
+                // Shown once: it may have come as an error notice already.
+                if !told.contains(problem) {
+                    let _ = tx.send(Event::Error { message: explain(problem, "") }).await;
+                }
+            } else if !ok && status != "interrupted" && told.is_empty() {
                 let _ = tx.send(Event::Error { message: format!("Codex stopped ({status}).") }).await;
             }
             let tokens = tokens.or_else(|| Some(Tokens::guess(turn.text.len(), said.len())));

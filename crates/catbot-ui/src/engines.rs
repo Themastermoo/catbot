@@ -223,7 +223,8 @@ fn AgentBox(engine: Value) -> Element {
 
 /// An agent Catbot installs and signs in itself: an Install button with its progress, then a
 /// sign-in through the agent's own page (Google, for Antigravity). When the browser that
-/// finished the sign-in is on another device, the address it ended at is pasted here.
+/// finished the sign-in is on another device, the address it ended at is pasted here. Muse Code
+/// (12.4.5) signs in with a code typed at Meta's page instead, so it's shown here.
 #[component]
 fn ManagedAgentBox(engine: Value) -> Element {
     let mut busy = use_signal(|| false);
@@ -236,6 +237,8 @@ fn ManagedAgentBox(engine: Value) -> Element {
     let work = engine["work"].clone();
     let size = str_of(&engine["download"], "size");
     let version = str_of(&engine["download"], "version");
+    let with = engine["signInWith"].as_str().unwrap_or("its account").to_string();
+    let code = work["code"].as_str().map(str::to_string);
     let at_home = crate::link::active().is_none();
     let act = use_callback(move |(method, path, body): (&'static str, String, Option<Value>)| {
         busy.set(true);
@@ -250,7 +253,7 @@ fn ManagedAgentBox(engine: Value) -> Element {
         });
     });
     let mb = |bytes: &Value| bytes.as_u64().map(|b| format!("{} MB", b / 1_000_000)).unwrap_or_default();
-    let (i1, i2, i3, i4) = (id.clone(), id.clone(), id.clone(), id.clone());
+    let (i1, i2, i3, i4, i5) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
     rsx! {
         div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-agent": "{id}",
             if work["installing"] == true {
@@ -274,6 +277,15 @@ fn ManagedAgentBox(engine: Value) -> Element {
                 }
             } else if signed_in {
                 p { "data-agent-signed-in": true, "{name} is installed and signed in." }
+            } else if work["signingIn"] == true && code.is_some() {
+                // A device code (Muse Code): typed at the page, on this computer or any other.
+                p { "Open {with}'s page, on this computer or your phone, and enter this code:" }
+                p { class: "mt-1 font-mono text-[18px] font-semibold tracking-wider", "data-agent-code": true, "{code.clone().unwrap_or_default()}" }
+                a { href: "{work[\"url\"].as_str().unwrap_or_default()}", target: "_blank", rel: "noreferrer", class: "mt-1 block text-accent underline", "data-agent-sign-in-link": true, "Open {with}'s page" }
+                div { class: "mt-2 flex items-center gap-2",
+                    span { class: "flex-1 text-[12px] text-ink-tertiary", "Waiting for the sign-in…" }
+                    button { r#type: "button", class: SMALL_BUTTON, onclick: move |_| act.call(("DELETE", format!("/api/engines/{i5}/sign-in"), None)), "Cancel" }
+                }
             } else if work["signingIn"] == true {
                 p { "Sign in on the page this opens, then come back:" }
                 a { href: "{work[\"url\"].as_str().unwrap_or_default()}", target: "_blank", rel: "noreferrer", class: "mt-1 block text-accent underline", "data-agent-sign-in-link": true, "Open the sign-in page" }
@@ -299,17 +311,20 @@ fn ManagedAgentBox(engine: Value) -> Element {
                     button { r#type: "button", class: SMALL_BUTTON, onclick: move |_| act.call(("DELETE", format!("/api/engines/{i3}/sign-in"), None)), "Cancel" }
                 }
             } else if at_home {
-                p { "{name} is installed. Sign it in once with your Google account:" }
+                p { "{name} is installed. Sign it in once with your {with} account:" }
                 button {
                     r#type: "button",
                     "data-agent-sign-in": true,
                     disabled: busy(),
                     class: "mt-2 rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-50",
                     onclick: move |_| act.call(("POST", format!("/api/engines/{i4}/sign-in"), None)),
-                    if busy() { "Starting…" } else { "Sign in with Google" }
+                    if busy() { "Starting…" } else { "Sign in with {with}" }
                 }
             } else {
                 p { class: "text-ink-secondary", "{name} isn't signed in. Sign it in from Catbot on the computer at home." }
+            }
+            if id == "muse-code" && !signed_in {
+                p { class: "mt-1.5 text-[12px] text-ink-tertiary", "The sign-in is shared with Muse Code on this computer: if you've already run `muse login`, it's signed in." }
             }
             if id == "antigravity" {
                 p { class: "mt-1.5 text-[12px] text-ink-tertiary", "Catbot gets Antigravity's Gemini models: this release offers its others only to editors Google lists." }

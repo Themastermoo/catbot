@@ -9,7 +9,13 @@ session/prompt behaviour by the message's last line:
 As Antigravity (FAKE_ACP_GOOGLE set): offers "oauth-personal"; authenticate prints a sign-in link
 on stderr, as the real one does, whose redirect_uri is a listener here; a GET to it with a code
 writes $GEMINI_HOME/antigravity-acp/acp_token.json and answers authenticate.
+
+As Muse Code (FAKE_ACP_META set): offers "muse-login"; authenticate shows a device code through
+ACP's URL elicitation (refused, as the real one does, when the client can't show links), then
+waits for the file FAKE_ACP_APPROVE names (the person approving at Meta's page) before it
+answers. Until then, session/new is refused.
 """
+import time
 import json, os, sys, socket, urllib.parse
 
 def send(obj):
@@ -18,6 +24,24 @@ def send(obj):
 if os.environ.get("FAKE_ACP_LOG"):
     with open(os.environ["FAKE_ACP_LOG"], "a") as log:
         log.write(json.dumps({"args": sys.argv[1:], "cwd": os.getcwd(), "env": {k: v for k, v in os.environ.items() if k in ("GEMINI_HOME", "ANTIGRAVITY_HARNESS_PATH", "AGY_ACP_FORCE_FILE_STORAGE", "MUSE_EXPERIMENTAL_ACP")}}) + "\n")
+
+def meta_sign_in(rid, can_show):
+    code = "WVCW-VRLT"
+    url = f"https://auth.meta.com/oauth/device/?code={code}"
+    if not can_show:
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": f"This editor cannot show the Muse login link: open {url}", "data": {"reason": "url_elicitation_unsupported"}}})
+        return
+    answer = ask("elicitation/create", {"elicitationId": "e1", "mode": "url", "requestId": rid, "url": url,
+                                        "message": f"Open the link to log in to Muse, and enter the code {code} there."})
+    if answer.get("result", {}).get("action") != "accept":
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "login declined"}})
+        return
+    for _ in range(200):
+        if os.path.exists(os.environ["FAKE_ACP_APPROVE"]):
+            send({"jsonrpc": "2.0", "id": rid, "result": {}})
+            return
+        time.sleep(0.05)
+    send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "the code expired"}})
 
 def google_sign_in(rid):
     listener = socket.socket(); listener.bind(("127.0.0.1", 0)); listener.listen(1)
@@ -58,10 +82,17 @@ for line in sys.stdin:
     msg = json.loads(line)
     method, rid, params = msg.get("method"), msg.get("id"), msg.get("params", {})
     if method == "initialize":
+        can_show = bool(params.get("clientCapabilities", {}).get("elicitation", {}).get("url") is not None)
         methods = [{"id": "oauth-personal", "name": "Google"}] if os.environ.get("FAKE_ACP_GOOGLE") else []
+        if os.environ.get("FAKE_ACP_META"):
+            methods = [{"id": "muse-login", "name": "Log in to Muse"}]
         send({"jsonrpc": "2.0", "id": rid, "result": {"protocolVersion": 1, "agentCapabilities": {"loadSession": True}, "authMethods": methods}})
+    elif method == "authenticate" and os.environ.get("FAKE_ACP_META"):
+        meta_sign_in(rid, can_show)
     elif method == "authenticate":
         google_sign_in(rid)
+    elif method == "session/new" and os.environ.get("FAKE_ACP_META") and not os.path.exists(os.environ["FAKE_ACP_APPROVE"]):
+        send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "log in to Muse before opening a session"}})
     elif method == "session/new":
         send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fake-session-1"}})
     elif method == "session/load":
