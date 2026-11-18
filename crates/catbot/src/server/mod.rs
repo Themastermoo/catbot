@@ -22,6 +22,7 @@ pub mod chief;
 pub mod handoffs;
 pub mod limits;
 pub mod reactions;
+pub mod secrets;
 pub mod usage;
 pub mod devices;
 pub mod email;

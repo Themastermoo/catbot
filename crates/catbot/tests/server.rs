@@ -2545,6 +2545,44 @@ async fn computers() {
         assert_eq!(state_of(&s).await["bots"][0]["watching"], 1);
     }
 
+    // Secrets (17.3): only for a bot the person ticks, and the value goes in unseen.
+    let op_log = s._dir.path().join("op.log");
+    unsafe {
+        std::env::set_var("CATBOT_OP", format!("python3 {}", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-op.py")));
+        std::env::set_var("FAKE_OP_LOG", &op_log);
+    }
+    assert!(reply(&s, &mut events, "catbot-tool: secrets_list {}").await.contains("no tool secrets_list"));
+    let (status, wrong) = s.call("PUT", "/api/computers/secrets", Some(json!({ "token": "nope" }))).await;
+    assert!(status == 400 && wrong["error"].as_str().unwrap().contains("starts with ops_"), "{wrong}");
+    let (status, refused) = s.call("PUT", "/api/computers/secrets", Some(json!({ "token": "ops_wrong" }))).await;
+    assert!(status == 400 && refused["error"].as_str().unwrap().contains("invalid service account token"), "{refused}");
+    let (_, joined) = s.call("PUT", "/api/computers/secrets", Some(json!({ "token": "ops_good1234", "bots": [scout] }))).await;
+    assert_eq!(joined["secrets"], json!({ "cli": true, "connected": true, "ends": "1234", "bots": [scout], "vaults": ["Bots"] }));
+    assert!(!state_of(&s).await.to_string().contains("ops_good"), "the token never comes back");
+    assert!(reply(&s, &mut events, "catbot-tool: secrets_list {}").await.starts_with("Bots › GitHub (login)"));
+    let fields = reply(&s, &mut events, r#"catbot-tool: secrets_list {"item": "github"}"#).await;
+    assert!(fields.contains("password (concealed): op://Bots/GitHub/password") && !fields.contains("hunter2"), "{fields}");
+    let used = reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "echo $GH; echo ${#GH}; echo -n $GH | base64", "secrets": {"GH": "op://Bots/GitHub/password"}}"#).await;
+    assert_eq!(used, "exit 0\n--- output ---\n[secret GH]\n20\n[secret GH]", "the value is blanked out of what comes back");
+    let exec = ran().into_iter().rev().find(|l| l[0] == "exec" && l.contains(&"GH".to_string())).unwrap();
+    assert!(exec.windows(2).any(|w| w == ["-e", "GH"]) && !exec.iter().any(|a| a.contains("hunter2")), "never on a command line: {exec:?}");
+    let filed = reply(&s, &mut events, r#"catbot-tool: secret_to_file {"reference": "op://Bots/GitHub/password", "path": "keys/gh.txt"}"#).await;
+    assert!(filed.starts_with("Put the secret into keys/gh.txt") && !filed.contains("hunter2"), "{filed}");
+    let file = std::path::PathBuf::from(format!("{}.home/keys/gh.txt", state.display()));
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "hunter2-secret-value");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+    }
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "true", "secrets": {"X": "op://Bots/Nope/x"}}"#).await.contains("Couldn't read op://Bots/Nope/x"));
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "true", "secrets": {"1X": "op://Bots/GitHub/password"}}"#).await.contains("can't be an environment variable"));
+    let uses = state_of(&s).await["secretUses"].clone();
+    assert_eq!((uses[0]["how"].as_str(), uses[0]["botName"].as_str(), uses[1]["how"].as_str()), (Some("file"), Some("Scout"), Some("command")), "{uses}");
+    assert!(!std::fs::read_to_string(&op_log).unwrap().contains("ops_good"));
+    s.call("PUT", "/api/computers/secrets", Some(json!({ "bots": [] }))).await;
+    assert!(reply(&s, &mut events, "catbot-tool: secrets_list {}").await.contains("no tool secrets_list"));
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "true", "secrets": {"GH": "op://Bots/GitHub/password"}}"#).await.contains("hasn't allowed it"));
+
     // Stopped, it starts again when the bot next uses it; its files stay.
     let (_, stopped) = s.call("POST", &format!("/api/computers/{scout}/stop"), None).await;
     assert_eq!(stopped["computer"]["state"], "off", "{stopped}");
@@ -2624,6 +2662,7 @@ async fn fake_boat() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) 
                     let out = if command.contains("base64 -w0") { "/9j/4AAQZmFrZQ==".to_string() } else { format!("ran: {command}") };
                     answer(200, json!({ "ok": true, "type": "command.finished", "exitCode": 0, "stdout": out, "stderr": "", "timedOut": false }))
                 }
+                ("PUT", ["sandboxes", _, "files"]) => answer(200, json!({ "ok": true, "type": "file.written", "success": true })),
                 ("POST", ["sandboxes", _, "desktop"]) => {
                     // Getting ready the first time it's asked.
                     if views.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
@@ -2689,6 +2728,18 @@ async fn boat_computers() {
     assert_eq!(logged(r#"'it'\\''s'"#).len(), 1, "{:?}", logged("type"));
     assert!(reply(&s, &mut events, r#"catbot-tool: computer_open {"url": "https://example.com"}"#).await.starts_with("Opened https://example.com"));
     assert!(logged("google-chrome-stable").iter().any(|c| c.contains("\"detached\":true")));
+
+    // Secrets go in through a file the command reads and deletes: never in Boat's command history.
+    unsafe { std::env::set_var("CATBOT_OP", format!("python3 {}", concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-op.py"))) };
+    s.call("PUT", "/api/computers/secrets", Some(json!({ "token": "ops_good1234", "bots": [lin] }))).await;
+    let used = reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "deploy", "secrets": {"GH": "op://Bots/GitHub/password"}}"#).await;
+    assert!(used.starts_with("exit 0\n--- output ---\nran: . /tmp/.catbot-") && used.ends_with("; deploy"), "{used}");
+    let written = logged("/files [] ");
+    assert!(written[0].contains(r#""content":"export GH='hunter2-secret-value'\n""#) && written[0].contains(r#""path":"/tmp/.catbot-"#), "{written:?}");
+    assert!(logged("/commands").iter().all(|c| !c.contains("hunter2")), "never in a command");
+    reply(&s, &mut events, r#"catbot-tool: secret_to_file {"reference": "op://Bots/GitHub/password", "path": "~/keys/gh.txt"}"#).await;
+    assert!(logged("/files [] ").iter().any(|c| c.contains(r#""path":"/home/user/keys/gh.txt""#)));
+    assert_eq!(logged("chmod 600 '/home/user/keys/gh.txt'").len(), 1);
 
     // The live view is Boat's own, watching only unless asked.
     let (_, watch) = s.call("GET", &format!("/api/computers/{lin}/view/watch"), None).await;

@@ -186,6 +186,12 @@ pub async fn start_command(app: &App, id: &str, command: &str) -> Result<(), Str
     call(app, reqwest::Method::POST, &format!("/sandboxes/{id}/commands"), Some(body), Duration::from_secs(60)).await.map(|_| ())
 }
 
+/// Writes a file into the sandbox (under /home/user or /tmp).
+pub async fn write_file(app: &App, id: &str, path: &str, content: &str) -> Result<(), String> {
+    let body = json!({ "path": path, "content": content });
+    call(app, reqwest::Method::PUT, &format!("/sandboxes/{id}/files"), Some(body), Duration::from_secs(60)).await.map(|_| ())
+}
+
 /// The screen as a JPEG: ffmpeg grabs it (ImageMagick if that fails), carried as base64 text.
 pub async fn screenshot(app: &App, id: &str) -> Result<Vec<u8>, String> {
     use base64::Engine;

@@ -41,6 +41,7 @@ pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
     tools.extend(super::apps::tools_for(app, bot_id));
     tools.extend(super::composio::tools_for(app, bot_id));
     tools.extend(super::computers::tools_for(app, bot_id));
+    tools.extend(super::secrets::tools_for(app, bot_id));
     tools
 }
 
@@ -81,6 +82,7 @@ pub async fn route(app: &Arc<App>, call: bool, req: Request) -> Answer {
     }
     let answer = match name {
         "page_publish" => super::pages::propose(app, &grant, &args).await,
+        "secrets_list" => super::secrets::call(app, &grant, &args).await,
         "trigger_info" | "trigger" | "delete_trigger" => super::triggers::call(app, &grant, name, &args).await,
         _ if name.starts_with("mail_") => super::email::call(app, &grant, name, &args).await,
         _ if super::apps::knows(app, &grant.bot_id, name) => super::apps::call(app, &grant, name, &args).await,

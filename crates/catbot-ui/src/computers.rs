@@ -1,6 +1,7 @@
 //! Settings › Computers (stage 17.1): which bots have a computer of their own, whether each is
 //! on, and a live view of its screen that can be watched or taken over. Stage 17.2: a computer
-//! can be at Boat instead (boat.dev), with Boat's key kept here.
+//! can be at Boat instead (boat.dev), with Boat's key kept here. Stage 17.3: secrets from a
+//! 1Password service account, for the bots ticked here, handed into their computers unseen.
 
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -268,6 +269,13 @@ pub fn ComputersSettings() -> Element {
                 }
             }
         }
+        Secrets { list: list.clone(), on_change: move |_| {
+            spawn(async move {
+                if let Ok(list) = api::get("/api/computers").await {
+                    found.set(list);
+                }
+            });
+        } }
         if let Some((bot_id, name, at_boat)) = watching() {
             ComputerView { bot_id, name, at_boat, on_close: move |_| watching.set(None) }
         }
@@ -352,6 +360,119 @@ pub fn ComputerView(bot_id: String, name: String, at_boat: bool, on_close: Event
                 p { class: "text-[12px] text-ink-tertiary",
                     if use_it() { "Your clicks and typing go to the bot's computer. The bot can see what you do." } else { "Watching only: your clicks don't reach it." }
                 }
+            }
+        }
+    }
+}
+
+/// Secrets from 1Password: the service account's token, the bots that may use secrets, and the
+/// last uses. Values never come here.
+#[component]
+fn Secrets(list: Value, on_change: EventHandler<()>) -> Element {
+    let state = use_context::<Signal<State>>();
+    let mut token = use_signal(String::new);
+    let mut busy = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let save = use_callback(move |body: Value| {
+        busy.set(true);
+        problem.set(None);
+        spawn(async move {
+            match api::call("PUT", "/api/computers/secrets", Some(&body)).await {
+                Ok(_) => token.set(String::new()),
+                Err(err) => problem.set(Some(err)),
+            }
+            busy.set(false);
+            on_change.call(());
+        });
+    });
+    let secrets = list["secrets"].clone();
+    let cli = secrets["cli"] == true;
+    let connected = secrets["connected"] == true;
+    let ends = secrets["ends"].as_str().unwrap_or_default().to_string();
+    let vaults = secrets["vaults"].as_array().map(|v| v.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default();
+    let allowed: Vec<String> = secrets["bots"].as_array().map(|b| b.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let with_computer: Vec<String> = list["bots"].as_array().map(|b| b.iter().filter_map(|x| x["botId"].as_str().map(str::to_string)).collect()).unwrap_or_default();
+    let uses: Vec<Value> = list["secretUses"].as_array().cloned().unwrap_or_default();
+    let bots: Vec<(String, String)> = state.read().bots.iter().map(|b| (b.id.clone(), b.name.clone())).collect();
+    rsx! {
+        div { class: "flex flex-col gap-2 rounded-lg border border-hairline/40 px-3 py-2", "data-secrets": true,
+            div { class: "flex items-center gap-2",
+                span { class: "flex-1 text-[14px] font-medium text-ink", "Secrets (1Password)" }
+                if connected {
+                    span { class: "text-[12px] text-ink-tertiary", "Connected · token …{ends}" }
+                    button { r#type: "button", class: BUTTON, disabled: busy(), onclick: move |_| save.call(json!({ "token": null })), "Disconnect" }
+                }
+            }
+            p { class: "text-[12px] leading-relaxed text-ink-secondary",
+                "A bot you tick can name a secret from 1Password; Catbot puts it into a command or a file on the bot's computer. The value isn't shown in the chat or given to the AI: Catbot blanks it out of what comes back. Give the service account a vault made for bots only."
+            }
+            if !cli {
+                p { class: "text-[12px] text-warning", "data-secrets-cli": "missing",
+                    "Needs the 1Password CLI (op) on this computer: 1password.com/downloads/command-line. Then open this again."
+                }
+            }
+            if connected {
+                if !vaults.is_empty() {
+                    p { class: "text-[12px] text-ink-tertiary", "Reads: {vaults}" }
+                }
+                span { class: "text-[12px] font-medium text-ink-secondary", "Bots that may use secrets" }
+                for (bot_id, name) in bots {
+                    {
+                        let on = allowed.contains(&bot_id);
+                        let has_computer = with_computer.contains(&bot_id);
+                        let next: Vec<String> = if on { allowed.iter().filter(|b| **b != bot_id).cloned().collect() } else { allowed.iter().cloned().chain([bot_id.clone()]).collect() };
+                        rsx! {
+                            div { key: "{bot_id}", class: "flex items-center gap-2", "data-secrets-bot": "{bot_id}",
+                                span { class: "min-w-0 flex-1 truncate text-[13px] text-ink", "{name}" }
+                                if on && !has_computer {
+                                    span { class: "text-[11px] text-ink-tertiary", "can list them; needs a computer to use one" }
+                                }
+                                crate::settings::Switch {
+                                    checked: on,
+                                    disabled: busy(),
+                                    label: format!("{name} may use secrets"),
+                                    on_toggle: move |_| save.call(json!({ "bots": next.clone() })),
+                                }
+                            }
+                        }
+                    }
+                }
+                if !uses.is_empty() {
+                    span { class: "text-[12px] font-medium text-ink-secondary", "Last used" }
+                    for (i, u) in uses.iter().take(8).enumerate() {
+                        {
+                            let who = u["botName"].as_str().unwrap_or("A bot").to_string();
+                            let what = u["reference"].as_str().unwrap_or_default().to_string();
+                            let place = if u["how"] == "file" { "into a file" } else { "into a command" };
+                            let when = u["at"].as_str().map(crate::chat::parse_time).filter(|at| !at.is_nan()).map(crate::chat::short_when).unwrap_or_default();
+                            rsx! {
+                                p { key: "{i}", class: "truncate text-[11px] text-ink-tertiary", "data-secret-use": true, "{who} put {what} {place} · {when}" }
+                            }
+                        }
+                    }
+                }
+            } else {
+                div { class: "flex gap-2",
+                    input {
+                        class: "w-full rounded-lg bg-inset px-3 py-2 text-[13px] text-ink focus:outline-none focus:ring-1 focus:ring-accent",
+                        r#type: "password",
+                        placeholder: "Service account token (ops_…)",
+                        "data-secrets-token": true,
+                        value: "{token}",
+                        oninput: move |e| token.set(e.value()),
+                    }
+                    button {
+                        r#type: "button",
+                        class: "rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibold text-white disabled:opacity-50",
+                        "data-secrets-connect": true,
+                        disabled: busy() || !cli || token().trim().is_empty(),
+                        onclick: move |_| save.call(json!({ "token": token() })),
+                        "Connect"
+                    }
+                }
+            }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "text-[12px] text-danger", "{err}" }
             }
         }
     }

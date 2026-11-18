@@ -108,13 +108,20 @@ elif cmd == "exec":
     # Skip exec's own flags to the container's name, then the command.
     i = 0
     while rest[i].startswith("-"):
-        i += 1 if rest[i] == "-d" else 2
+        i += 1 if rest[i] in ("-d", "-i") else 2
     name, command = rest[i], rest[i + 1:]
     box = boxes.get(name)
     if not box or not box["running"]: sys.exit("container is not running")
     if command[0] == "timeout":
         script = command[command.index("-lc") + 1]
         done = subprocess.run(["bash", "-c", script], cwd=tempfile.gettempdir(), capture_output=True, timeout=int(command[3]))
+        sys.stdout.buffer.write(done.stdout); sys.stderr.buffer.write(done.stderr)
+        save(state); sys.exit(done.returncode)
+    elif command[0] == "sh":
+        # Runs here, in the box's own scratch folder (HOME), its input passed on.
+        home = os.environ["FAKE_ENGINE_STATE"] + ".home"
+        os.makedirs(home, exist_ok=True)
+        done = subprocess.run(command, cwd=home, env=dict(os.environ, HOME=home), stdin=sys.stdin, capture_output=True)
         sys.stdout.buffer.write(done.stdout); sys.stderr.buffer.write(done.stderr)
         save(state); sys.exit(done.returncode)
     elif command[0] == "import":

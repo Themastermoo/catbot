@@ -253,6 +253,15 @@ one is off): connect a Boat API key in the same tab, then pick "At Boat" for the
 per second while it's on; a stop saves its disk and the next use resumes it. It gets none of the
 Boat account's secrets, and the key never leaves Catbot except to Boat.
 
+**Secrets.** Settings › Computers can connect a 1Password service account (make one at
+1Password.com › Developer › Service accounts, with read access to a vault made for bots, and
+paste its `ops_` token; it needs the 1Password CLI, `op`, on this computer). Bots you tick there
+can list the vault's items and fields (never values) and name a secret
+(`op://Vault/Item/field`): Catbot reads it and hands it into a command on the bot's computer as an
+environment variable, or into a file only the bot can read there. The value isn't kept, isn't
+shown in the chat, and isn't given to the AI: Catbot blanks it (and its base64) out of what
+comes back. Every use is listed under "Last used". `CATBOT_OP` points at another `op`.
+
 ## Talking to Claude through Catbot
 
 `catbot ask` runs one unsaved turn through Catbot's own Claude driver (`crates/catbot/src/claude.rs`),

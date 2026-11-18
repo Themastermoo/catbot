@@ -46,7 +46,7 @@ pub const WIDTH: i64 = 1280;
 pub const HEIGHT: i64 = 800;
 /// How much of a command's output a bot reads back, from the end.
 const MOST_OUTPUT: usize = 30_000;
-const TOOLS: [&str; 3] = ["computer_run", "computer_screen", "computer_open"];
+const TOOLS: [&str; 4] = ["computer_run", "computer_screen", "computer_open", "secret_to_file"];
 
 /// A bot's computer, kept in the settings as `computers`: bot id → this.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -195,11 +195,24 @@ impl Ran {
 }
 
 async fn run(args: &[&str], wait: Duration) -> Result<Ran, String> {
+    run_with(args, wait, &[], None).await
+}
+
+/// Runs the container program with extra environment (for `exec -e NAME`, so a secret's value
+/// never shows in a command line) and, if given, something to write to its input.
+async fn run_with(args: &[&str], wait: Duration, env: &[(String, String)], input: Option<&[u8]>) -> Result<Ran, String> {
+    use tokio::io::AsyncWriteExt;
     let words = engine().ok_or("there's no Podman or Docker on this computer")?;
     let (program, leading) = words.split_first().ok_or("no container program")?;
     let mut command = tokio::process::Command::new(program);
-    command.args(leading).args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
-    let output = tokio::time::timeout(wait, command.output())
+    command.args(leading).args(args).envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str()))).kill_on_drop(true);
+    command.stdin(if input.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() });
+    command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().map_err(|e| format!("couldn't run {program}: {e}"))?;
+    if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
+        stdin.write_all(bytes).await.map_err(|e| e.to_string())?;
+    }
+    let output = tokio::time::timeout(wait, child.wait_with_output())
         .await
         .map_err(|_| format!("{} took too long", engine_name(&words)))?
         .map_err(|e| format!("couldn't run {program}: {e}"))?;
@@ -501,16 +514,24 @@ pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
     let about = about(&e);
     let (w, h) = e.size();
     let (home, most) = if e.boat() { ("/home/user", super::boat::MOST_SECONDS) } else { ("/home/bot", 1800) };
+    let mut run_args = json!({
+        "command": { "type": "string", "description": "The command, run with bash -lc" },
+        "timeout_seconds": { "type": "integer", "description": format!("Stop it after this many seconds (default 120, at most {most})") },
+    });
+    if super::secrets::allowed(app, bot_id) {
+        run_args["secrets"] = json!({
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "description": "Secrets for this command, as environment variables: {\"GH_TOKEN\": \"op://Bots/GitHub/token\"}. References come from secrets_list. You don't see the values: they're blanked out of what comes back.",
+        });
+    }
     vec![
         json!({
             "name": "computer_run",
             "description": format!("Run a shell command (bash) on {about} It starts in {home}; what you make there stays between runs. Output is cut to its last {MOST_OUTPUT} characters."),
             "inputSchema": {
                 "type": "object",
-                "properties": {
-                    "command": { "type": "string", "description": "The command, run with bash -lc" },
-                    "timeout_seconds": { "type": "integer", "description": format!("Stop it after this many seconds (default 120, at most {most})") },
-                },
+                "properties": run_args,
                 "required": ["command"],
             },
         }),
@@ -590,18 +611,42 @@ async fn use_computer(app: &Arc<App>, grant: &Grant, name: &str, args: &Value) -
     }
     app.computers.with_box(bot_id, |live| live.last_used = Some(Instant::now()));
     let e = entry(app, bot_id).ok_or("You have no computer.")?;
-    if e.boat() { on_boat(app, &e.sandbox, work).await } else { in_container(bot_id, work).await }
+    // Secrets are read only now, just before they're handed over, and blanked out of what comes back.
+    let secrets = match &work {
+        Work::Shell { secrets, .. } if !secrets.is_empty() => super::secrets::read(app, bot_id, secrets, "command").await?,
+        Work::SecretFile { reference, .. } => super::secrets::read(app, bot_id, &[("SECRET".to_string(), reference.clone())], "file").await?,
+        _ => Vec::new(),
+    };
+    let done = if e.boat() { on_boat(app, &e.sandbox, work, &secrets).await } else { in_container(bot_id, work, &secrets).await };
+    match done {
+        Ok((text, picture)) => Ok((super::secrets::scrub(&text, &secrets), picture)),
+        Err(text) => Err(super::secrets::scrub(&text, &secrets)),
+    }
 }
 
-async fn in_container(bot_id: &str, work: Work) -> Result<(String, Option<Vec<u8>>), String> {
+async fn in_container(bot_id: &str, work: Work, secrets: &[(String, String)]) -> Result<(String, Option<Vec<u8>>), String> {
     let name = container(bot_id);
     match work {
-        Work::Shell { command, seconds } => {
+        Work::Shell { command, seconds, .. } => {
             let secs = seconds.to_string();
-            let mut args = vec!["exec", "-u", "bot", "-w", "/home/bot", "-e", "DISPLAY=:1", &name, "timeout", "-k", "5", &secs, "bash", "-lc"];
-            args.push(&command);
-            let ran = run(&args, Duration::from_secs(seconds + 30)).await?;
+            let mut args = vec!["exec", "-u", "bot", "-w", "/home/bot", "-e", "DISPLAY=:1"];
+            // `-e NAME` takes the value from the container program's own environment.
+            for (key, _) in secrets {
+                args.extend(["-e", key.as_str()]);
+            }
+            args.extend([name.as_str(), "timeout", "-k", "5", &secs, "bash", "-lc", &command]);
+            let ran = run_with(&args, Duration::from_secs(seconds + 30), secrets, None).await?;
             Ok((shell_report(&ran, seconds), None))
+        }
+        Work::SecretFile { path, .. } => {
+            let value = secrets.first().map(|(_, v)| v.as_bytes()).unwrap_or_default();
+            let script = r#"umask 077; case "$1" in "~/"*) set -- "$HOME/${1#\~/}";; esac; mkdir -p "$(dirname "$1")" && cat > "$1" && chmod 600 "$1""#;
+            let args = ["exec", "-i", "-u", "bot", "-w", "/home/bot", &name, "sh", "-c", script, "secret", &path];
+            let ran = run_with(&args, Duration::from_secs(60), &[], Some(value)).await?;
+            if !ran.ok() {
+                return Err(format!("The file wasn't written: {}", ran.why()));
+            }
+            Ok((format!("Put the secret into {path}; only you can read it there. Its value isn't shown here."), None))
         }
         Work::Screen { args: xdotool, said } => {
             let mut args = vec!["exec", "-u", "bot", "-e", "DISPLAY=:1", &name, "xdotool"];
@@ -627,10 +672,20 @@ async fn in_container(bot_id: &str, work: Work) -> Result<(String, Option<Vec<u8
     }
 }
 
-async fn on_boat(app: &App, id: &str, work: Work) -> Result<(String, Option<Vec<u8>>), String> {
+async fn on_boat(app: &App, id: &str, work: Work, secrets: &[(String, String)]) -> Result<(String, Option<Vec<u8>>), String> {
     use super::boat::{self, quote};
     match work {
-        Work::Shell { command, seconds } => {
+        Work::Shell { command, seconds, .. } => {
+            // Boat keeps commands in its history, so the values go in a file the command reads
+            // and deletes, and only the file's name is in the command.
+            let command = if secrets.is_empty() {
+                command
+            } else {
+                let file = format!("/tmp/.catbot-{}", uuid::Uuid::new_v4().simple());
+                let lines: Vec<String> = secrets.iter().map(|(k, v)| format!("export {k}={}", quote(v))).collect();
+                boat::write_file(app, id, &file, &(lines.join("\n") + "\n")).await?;
+                format!(". {file}; rm -f {file}; {command}")
+            };
             let done = boat::run(app, id, &command, seconds).await?;
             let code = if done.timed_out { Some(124) } else { done.code };
             let ran = Ran { code, out: done.out.into_bytes(), err: done.err };
@@ -648,6 +703,13 @@ async fn on_boat(app: &App, id: &str, work: Work) -> Result<(String, Option<Vec<
             let jpeg = boat::screenshot(app, id).await.map_err(|e| format!("The screenshot didn't work: {e}"))?;
             Ok((format!("The screen ({}×{}).", boat::WIDTH, boat::HEIGHT), Some(jpeg)))
         }
+        Work::SecretFile { path, .. } => {
+            let value = secrets.first().map(|(_, v)| v.as_str()).unwrap_or_default();
+            let path = path.strip_prefix("~/").map(|rest| format!("/home/user/{rest}")).unwrap_or(path);
+            boat::write_file(app, id, &path, value).await.map_err(|e| format!("The file wasn't written: {e}"))?;
+            let _ = boat::run(app, id, &format!("chmod 600 {}", quote(&path)), 30).await;
+            Ok((format!("Put the secret into {path}; only you can read it there. Its value isn't shown here."), None))
+        }
         Work::Open(url) => {
             let command = format!("DISPLAY=:0 google-chrome-stable --no-first-run --no-default-browser-check {} >/dev/null 2>&1", quote(&url));
             boat::start_command(app, id, &command).await.map_err(|e| format!("The browser didn't open it: {e}"))?;
@@ -659,7 +721,10 @@ async fn on_boat(app: &App, id: &str, work: Work) -> Result<(String, Option<Vec<
 /// What a tool call does, checked.
 #[derive(Debug, PartialEq)]
 pub enum Work {
-    Shell { command: String, seconds: u64 },
+    /// A command, and the secrets it gets as environment variables (name, reference).
+    Shell { command: String, seconds: u64, secrets: Vec<(String, String)> },
+    /// A secret put into a file.
+    SecretFile { reference: String, path: String },
     /// xdotool's arguments, and what to tell the bot.
     Screen { args: Vec<String>, said: String },
     Screenshot,
@@ -675,7 +740,34 @@ pub fn plan(name: &str, args: &Value, size: (i64, i64), most: u64) -> Result<Wor
                 return Err("Say what command to run.".into());
             }
             let seconds = args["timeout_seconds"].as_u64().unwrap_or(120).clamp(1, most);
-            Ok(Work::Shell { command, seconds })
+            let mut secrets = Vec::new();
+            if let Some(asked) = args["secrets"].as_object() {
+                if asked.len() > super::secrets::MOST_AT_ONCE {
+                    return Err(format!("At most {} secrets for one command.", super::secrets::MOST_AT_ONCE));
+                }
+                for (name, reference) in asked {
+                    let reference = reference.as_str().unwrap_or_default().trim();
+                    if !super::secrets::good_name(name) {
+                        return Err(format!("{name} can't be an environment variable's name."));
+                    }
+                    if !super::secrets::good_reference(reference) {
+                        return Err(format!("{name}: a secret is named like op://Vault/Item/field (see secrets_list)."));
+                    }
+                    secrets.push((name.clone(), reference.to_string()));
+                }
+            }
+            Ok(Work::Shell { command, seconds, secrets })
+        }
+        "secret_to_file" => {
+            let reference = args["reference"].as_str().unwrap_or_default().trim().to_string();
+            let path = args["path"].as_str().unwrap_or_default().trim().to_string();
+            if !super::secrets::good_reference(&reference) {
+                return Err("A secret is named like op://Vault/Item/field (see secrets_list).".into());
+            }
+            if path.is_empty() || path.ends_with('/') || path.chars().any(char::is_control) {
+                return Err("Say which file to put it in.".into());
+            }
+            Ok(Work::SecretFile { reference, path })
         }
         "computer_open" => {
             let url = args["url"].as_str().unwrap_or_default().trim().to_string();
@@ -832,6 +924,7 @@ async fn view(app: &Arc<App>, bot_id: &str, use_it: bool) -> Result<String, Stri
 }
 
 /// `/api/computers`: `GET` all; `PUT /boat {key}` connects Boat (`null` disconnects);
+/// `PUT /secrets {token?, bots?}` connects 1Password and says which bots may use it;
 /// `PUT /:bot {on, kind?}` gives a bot a computer (here or at Boat), moves it, or takes it away;
 /// `POST /:bot/start|stop|reset|watching`; `GET /:bot/view/watch|use` the live view's address.
 pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>) -> Answer {
@@ -855,12 +948,18 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<
                 bots.push(shown(app, &bot_id, &entry).await);
             }
             let boat = super::boat::shown(app);
-            Ok((StatusCode::OK, json!({ "engine": words.as_deref().map(engine_name), "image": image, "imageProblem": problem, "idleMinutes": idle_minutes(), "boat": boat, "bots": bots })))
+            let secrets = super::secrets::shown(app);
+            let uses = super::secrets::uses(app);
+            Ok((StatusCode::OK, json!({ "engine": words.as_deref().map(engine_name), "image": image, "imageProblem": problem, "idleMinutes": idle_minutes(), "boat": boat, "secrets": secrets, "secretUses": uses, "bots": bots })))
         }
         (&Method::PUT, ["boat"]) => {
             super::boat::connect(app, body["key"].as_str()).await.map_err(bad)?;
             changed(app);
             Ok((StatusCode::OK, json!({ "boat": super::boat::shown(app) })))
+        }
+        (&Method::PUT, ["secrets"]) => {
+            let secrets = super::secrets::change(app, &body).await.map_err(bad)?;
+            Ok((StatusCode::OK, json!({ "secrets": secrets })))
         }
         (&Method::PUT, [bot_id]) => {
             if app.with_store(|store| store.bot_by_id(bot_id)).flatten().is_none() {
@@ -1071,7 +1170,7 @@ mod tests {
 
     #[test]
     fn commands_and_addresses() {
-        assert_eq!(plan_c("computer_run", &json!({ "command": " ls ", "timeout_seconds": 99999 })).unwrap(), Work::Shell { command: "ls".into(), seconds: 1800 });
+        assert_eq!(plan_c("computer_run", &json!({ "command": " ls ", "timeout_seconds": 99999 })).unwrap(), Work::Shell { command: "ls".into(), seconds: 1800, secrets: Vec::new() });
         assert!(plan_c("computer_run", &json!({})).is_err());
         assert_eq!(plan_c("computer_open", &json!({ "url": "https://example.com" })).unwrap(), Work::Open("https://example.com".into()));
         assert!(plan_c("computer_open", &json!({ "url": "file:///etc/passwd" })).is_err());
