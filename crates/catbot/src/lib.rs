@@ -14,6 +14,7 @@ pub mod codex;
 pub mod console;
 pub mod engines;
 pub mod memory;
+pub mod pi;
 pub mod proxy;
 pub mod record;
 pub mod routes;

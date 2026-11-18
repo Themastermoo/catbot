@@ -244,6 +244,15 @@ Google" opens Google's page; if you finish on a phone, paste the address its bro
 It keeps its own Google profile there. This release offers Catbot its Gemini models: Google
 gives its others only to editors it lists, and Catbot doesn't pretend to be one.
 
+Bots can run on **Pi**, the open coding agent, with your own providers and keys. Install it
+(`npm install -g @earendil-works/pi-coding-agent`) and sign it in to a provider once in a
+terminal (`pi auth login <provider>`, with an account or a key); a bot on Pi offers the models
+Pi has a sign-in for. Catbot runs Pi in its RPC mode with a small extension of its own
+(`<catbot home>/pi/catbot-pi.ts`) that stops each command and edit for a yes on a card, at the
+bot's approval level, and gives Pi Catbot's own tools. Pi ignores files a bot leaves in its own
+folder (`--no-approve`), and the bots' sessions are kept in `<catbot home>/pi`, out of your Pi
+history. `CATBOT_AGENT_PI` points Catbot at a `pi` it can't find.
+
 **Memory vault.** Each computer running Catbot keeps a folder of linked Markdown notes the bots
 write as they work: `~/CatbotMemory` (`$CATBOT_MEMORY` to move it, `off` to turn it off).
 `Bots/` holds a note per bot (Catbot seeds it when the bot is made and moves it when the bot is

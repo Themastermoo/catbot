@@ -23,6 +23,7 @@ use crate::claude::PermissionMode;
 pub const CLAUDE: &str = "claude";
 /// Codex on a ChatGPT plan.
 pub const CODEX: &str = "codex";
+pub const PI: &str = "pi";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -35,6 +36,8 @@ pub enum Kind {
     Agent,
     /// Codex, over its own app-server protocol, on a ChatGPT plan.
     Codex,
+    /// Pi, over its own RPC mode, with Catbot's extension asking for approvals.
+    Pi,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -264,6 +267,17 @@ pub const ALL: &[Engine] = &[
         program: "codex",
         install: "npm install -g @openai/codex",
         sign_in: "codex login",
+        ..BLANK
+    },
+    Engine {
+        id: PI,
+        name: "Pi",
+        kind: Kind::Pi,
+        key_page: "https://github.com/earendil-works/pi",
+        models: &[("", "Default")],
+        program: "pi",
+        install: "npm install -g @earendil-works/pi-coding-agent",
+        sign_in: "pi auth login <provider>",
         ..BLANK
     },
     api(

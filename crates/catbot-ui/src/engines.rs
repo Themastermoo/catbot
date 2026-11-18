@@ -5,7 +5,8 @@
 //! characters). Picking another AI is a change to the bot like any other; its models come from
 //! the API itself once it has a key (`GET /api/engines/:id/models`). Keys are typed here and
 //! saved at home only: on the phone, or the Windows app talking to home, the box says so.
-//! Codex (12.4.1) signs in with ChatGPT here instead, shared with the person's own Codex.
+//! Codex (12.4.1) signs in with ChatGPT here instead, shared with the person's own Codex. Pi
+//! (12.4.4) offers the models it's signed in to.
 
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -71,7 +72,9 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
     let default_model = str_of(&engine, "defaultModel");
     let agent = engine["kind"] == "agent";
     let codex = engine["kind"] == "codex";
-    let default_label = if engine_id == "claude" || agent || codex {
+    let pi = engine["kind"] == "pi";
+    let listed = models().filter(|(id, _)| *id == engine_id).map(|(_, list)| list.len());
+    let default_label = if engine_id == "claude" || agent || codex || pi {
         "Default".to_string()
     } else if default_model.is_empty() {
         "Pick a model".to_string()
@@ -102,6 +105,7 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
                             (false, Some("agent")) => format!("{name} (not installed)"),
                             (false, Some("codex")) if e["installed"] != true => format!("{name} (not installed)"),
                             (false, Some("codex")) => format!("{name} (not signed in)"),
+                            (false, Some("pi")) => format!("{name} (not installed)"),
                             (false, _) => format!("{name} (needs a key)"),
                         };
                         rsx! { option { key: "{id}", value: "{id}", selected: id == picked, "{shown}" } }
@@ -147,6 +151,40 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
         if codex {
             CodexBox { engine: engine.clone() }
         }
+        if pi {
+            PiBox { engine: engine.clone(), listed }
+        }
+        }
+    }
+}
+
+/// Pi (12.4.4): installed or not, and signed in to a provider of the person's own. Its models
+/// are the ones Pi has a sign-in or key for (`listed`, once Catbot has asked). Commands and edits
+/// stop for a yes on a card, through Catbot's extension.
+#[component]
+fn PiBox(engine: Value, listed: Option<usize>) -> Element {
+    let install = str_of(&engine, "install");
+    let sign_in = str_of(&engine, "signIn");
+    let page = str_of(&engine, "keyPage");
+    let installed = engine["installed"] == true;
+    rsx! {
+        div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-agent": "pi",
+            if !installed {
+                p { "Pi isn't installed on this computer. Install it in a terminal:" }
+                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{install}" }
+                p { class: "mt-1", "then sign it in to a provider (Anthropic, OpenAI, Google and others, with an account or a key):" }
+                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+            } else if listed == Some(0) {
+                p { "Pi is installed but has no models with a sign-in yet. Sign it in to a provider in a terminal, then come back:" }
+                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+            } else {
+                p { "Pi uses your own providers and keys. The models above are the ones it's signed in to; to add more, run:" }
+                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+            }
+            p { class: "mt-1.5 text-[12px] text-ink-tertiary",
+                "Commands and edits wait for your yes on a card, as with the other AIs. More: "
+                a { href: "{page}", target: "_blank", rel: "noreferrer", class: "text-accent underline", "{page}" }
+            }
         }
     }
 }

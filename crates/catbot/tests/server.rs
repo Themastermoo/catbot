@@ -2911,6 +2911,110 @@ async fn a_bot_on_codex_signs_in_streams_asks_and_resumes() {
     until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
 }
 
+/// Stage 12.4.4: a bot on Pi, with the person's own providers; Catbot's extension asks on cards.
+#[tokio::test]
+async fn a_bot_on_pi_lists_models_asks_on_cards_and_carries_on() {
+    let bin = tempfile::tempdir().unwrap();
+    let program = bin.path().join("pi");
+    let log = bin.path().join("pi.log");
+    std::fs::write(&program, format!("#!/bin/sh\nFAKE_PI_LOG={} exec python3 {} \"$@\"\n", log.display(), concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-pi.py"))).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let agent = bin.path().join("pi-agent");
+    std::fs::create_dir_all(&agent).unwrap();
+    // SAFETY: only this test reads these.
+    unsafe {
+        std::env::set_var("CATBOT_AGENT_PI", &program);
+        std::env::set_var("PI_CODING_AGENT_DIR", &agent);
+    }
+    let logged = || std::fs::read_to_string(&log).unwrap_or_default().lines().map(|l| serde_json::from_str::<Value>(l).unwrap()).collect::<Vec<_>>();
+    let reply_of = |f: &Value| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text";
+
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let pi = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "pi").unwrap().clone();
+    let listed = pi(&s.call("GET", "/api/engines", None).await.1);
+    assert_eq!((listed["kind"].as_str(), listed["installed"].as_bool(), listed["ready"].as_bool()), (Some("pi"), Some(true), Some(true)), "{listed}");
+    assert!(listed["signedIn"].is_null(), "Catbot can't tell (a key may be in the environment): {listed}");
+    std::fs::write(agent.join("auth.json"), r#"{"openai":{"type":"api_key","key":"sk-x"}}"#).unwrap();
+    assert_eq!(pi(&s.call("GET", "/api/engines", None).await.1)["signedIn"], true);
+    let (_, models) = s.call("GET", "/api/engines/pi/models", None).await;
+    assert_eq!((models["models"].clone(), models["live"].as_bool(), models["labels"][0]["label"].as_str()), (json!(["openai/gpt-5"]), Some(true), Some("gpt-5 (openai)")), "{models}");
+
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Piper", "soul": "Be brief." }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "pi", "model": "openai/gpt-5" }, "approvalMode": "edits" }))).await;
+
+    // A first message: a new Pi session in Catbot's folder, Catbot's extension loaded.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
+    let thought = until(&mut events, "thinking", |f| runtime(f, "content.delta") && f["event"]["streamKind"] == "reasoning_text").await;
+    assert_eq!(thought["event"]["delta"], "hmm");
+    let reply = until(&mut events, "reply", reply_of).await;
+    assert_eq!(reply["message"]["text"], "Echo: hello (new)");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let started = logged().into_iter().find(|l| l.get("args").is_some()).unwrap();
+    let args: Vec<String> = serde_json::from_value(started["args"].clone()).unwrap();
+    let at = |flag: &str| args.iter().position(|a| a == flag).map(|i| args[i + 1].clone()).unwrap_or_default();
+    let ours = s._dir.path().join("home/pi");
+    assert!(args.contains(&"--no-approve".to_string()) && at("--mode") == "rpc" && at("--model") == "openai/gpt-5", "{args:?}");
+    assert!(at("--session-dir").starts_with(ours.to_str().unwrap()), "the bots' sessions stay out of the person's Pi: {args:?}");
+    assert_eq!(at("-e"), ours.join("catbot-pi.ts").display().to_string());
+    assert_eq!(started["extension"].as_str(), Some(catbot::pi::EXTENSION));
+    assert!(started["instructions"].as_str().unwrap().contains("Be brief."));
+    assert!(started["cwd"].as_str().unwrap().ends_with("bots/piper"));
+    assert_eq!(started["mode"], "edits");
+
+    // The next message carries on the session.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "again", "threadId": thread }))).await;
+    let reply = until(&mut events, "reply", reply_of).await;
+    assert_eq!(reply["message"]["text"], "Echo: again (resumed)");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // On "Auto-accept edits", an edit goes ahead; a command asks, and a no is told to Pi.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "please edit", "threadId": thread }))).await;
+    assert_eq!(until(&mut events, "reply", reply_of).await["message"]["text"], "Edited.");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let notes = s._dir.path().join("home/bots/piper/notes.md");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello from pi");
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "please run", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    assert_eq!((asked["event"]["tool"].as_str(), asked["event"]["summary"].as_str().map(|s| s.contains("ls"))), (Some("Bash"), Some(true)), "{asked}");
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "deny" }))).await;
+    assert_eq!(until(&mut events, "reply", reply_of).await["message"]["text"], "Didn't run it.");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let answered = logged().into_iter().rev().find_map(|l| l["got"].as_object().filter(|g| g["type"] == "extension_ui_response").cloned()).unwrap();
+    assert_eq!((answered["id"].as_str(), answered["confirmed"].as_bool()), (Some("ui-1"), Some(false)));
+
+    // On "Ask", an edit asks too, and is written once allowed.
+    std::fs::remove_file(&notes).unwrap();
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "approvalMode": "ask" }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "please edit", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    assert_eq!(asked["event"]["tool"], "Write");
+    assert!(!notes.exists());
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    assert_eq!(until(&mut events, "reply", reply_of).await["message"]["text"], "Edited.");
+    assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello from pi");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    assert_eq!(logged().into_iter().rev().find_map(|l| l["mode"].as_str().map(str::to_string)).as_deref(), Some("ask"));
+
+    // No key for its provider: the bot says how to set Pi up, once.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "fail", "threadId": thread }))).await;
+    let error = until(&mut events, "error", |f| runtime(f, "runtime.error")).await;
+    let said = error["event"]["message"].as_str().unwrap();
+    assert!(said.contains("No API key") && said.contains("pi auth login"), "{said}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let shown = s.app.with_store(|store| store.messages(&thread, 5)).unwrap();
+    assert_eq!(shown.iter().filter(|m| format!("{m:?}").contains("No API key")).count(), 1, "the error is shown once");
+}
+
 /// Stage 12.4.3: Antigravity, downloaded by Catbot, signed in with Google, and answering.
 #[tokio::test]
 async fn antigravity_installs_signs_in_with_google_and_answers() {

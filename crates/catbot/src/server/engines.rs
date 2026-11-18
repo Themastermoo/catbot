@@ -145,6 +145,19 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
                 Err(problem) => Ok((StatusCode::OK, json!({ "models": fallback, "live": false, "problem": problem }))),
             }
         }
+        (&Method::GET, ["pi", "models"]) => {
+            let Some(program) = engines::find(engines::PI).and_then(engines::agent_program) else {
+                return Ok((StatusCode::OK, json!({ "models": [], "live": false, "problem": "Pi isn't installed" })));
+            };
+            match crate::pi::models(&program).await {
+                Ok(models) if !models.is_empty() => {
+                    let labels: Vec<Value> = models.iter().map(|(id, label)| json!({ "id": id, "label": label })).collect();
+                    Ok((StatusCode::OK, json!({ "models": models.iter().map(|(id, _)| id).collect::<Vec<_>>(), "labels": labels, "live": true })))
+                }
+                Ok(_) => Ok((StatusCode::OK, json!({ "models": [], "live": false, "problem": "Pi has no models with a sign-in yet: run `pi auth login <provider>` on this computer" }))),
+                Err(problem) => Ok((StatusCode::OK, json!({ "models": [], "live": false, "problem": problem }))),
+            }
+        }
         (&Method::GET, [id, "models"]) => {
             let engine = find(id)?;
             let fallback: Vec<&str> = engine.models.iter().map(|(id, _)| *id).filter(|id| !id.is_empty()).collect();
@@ -217,13 +230,18 @@ fn list(app: &App) -> Vec<Value> {
 fn describe(app: &App, engine: &Engine) -> Value {
     let saved = app.with_store(|store| store.engine_key(engine.id)).flatten();
     let access = engines::access(engine, saved.as_ref());
-    let installed = matches!(engine.kind, Kind::Agent | Kind::Codex).then(|| engines::agent_program(engine).is_some());
-    let signed_in = if engine.kind == Kind::Codex { Some(crate::codex::signed_in()) } else { engines::agent_signed_in(engine) };
+    let installed = matches!(engine.kind, Kind::Agent | Kind::Codex | Kind::Pi).then(|| engines::agent_program(engine).is_some());
+    let signed_in = match engine.kind {
+        Kind::Codex => Some(crate::codex::signed_in()),
+        Kind::Pi => crate::pi::signed_in(),
+        _ => engines::agent_signed_in(engine),
+    };
     let ready = match engine.kind {
         Kind::Claude => true,
         Kind::Api => access.is_some(),
         Kind::Agent => installed == Some(true) && signed_in != Some(false),
         Kind::Codex => installed == Some(true) && signed_in == Some(true),
+        Kind::Pi => installed == Some(true),
     };
     json!({
         "id": engine.id,

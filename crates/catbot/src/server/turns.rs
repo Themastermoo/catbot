@@ -324,6 +324,8 @@ async fn drive(
         start_agent(app, bot, thread, session, codex, tools)
     } else if bot.engine == engines::CODEX {
         start_codex(app, bot, thread, session, codex, tools)
+    } else if bot.engine == engines::PI {
+        start_pi(app, bot, thread, session, codex, tools)
     } else {
         start_api(app, bot, thread, codex, tools)
     };
@@ -504,6 +506,31 @@ fn start_codex(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
     let model = bot.model.clone().unwrap_or_default();
     let mcp = tools.and_then(|t| super::bot_tools::acp_server(app, t));
     crate::codex::start(crate::codex::CodexTurn { program, home, model, session, instructions, earlier: history, text, pictures, workspace, mcp })
+}
+
+/// Starts a turn on Pi: the program, Catbot's folder for this bot's Pi sessions, the session (a new
+/// one gets the conversation so far), and Catbot's extension.
+fn start_pi(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex: Option<std::path::PathBuf>, tools: Option<&super::bot_tools::Open>) -> Result<Running, String> {
+    let engine = engines::find(engines::PI).ok_or("no Pi")?;
+    let program = engines::agent_program(engine).ok_or_else(|| format!("Pi isn't installed on this computer. Install it with `{}`, then sign it in to a provider (`{}`).", engine.install, engine.sign_in))?;
+    let messages = app.with_store(|store| store.messages(thread, 60)).unwrap_or_default();
+    let pictures = messages.iter().rev().find(|m| m.role == Role::Person).map(|m| super::attachments::pictures(m, &bot.folder)).unwrap_or_default();
+    let mut history = with_cue(lines(app, thread, messages, bot), app, thread, bot);
+    let text = match history.last() {
+        Some((true, _)) => history.pop().map(|(_, text)| text).unwrap_or_default(),
+        _ => String::new(),
+    };
+    let instructions = chat::system_prompt(bot, codex.as_deref(), app.memory.as_deref());
+    let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
+    let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode, catbot: tools.map(|t| (t.access.clone(), t.tools.clone())) };
+    let (session, new) = match session {
+        Session::Resume(id) => (id.clone(), false),
+        Session::New(id) => (id.clone(), true),
+    };
+    let home = app.with_store(|store| Ok(store.home().join("pi"))).ok_or("no Catbot home")?;
+    let model = bot.model.clone().unwrap_or_default();
+    let mcp = tools.and_then(|t| super::bot_tools::acp_server(app, t));
+    crate::pi::start(crate::pi::PiTurn { program, folder: home.join(&bot.id), extension: home.join("catbot-pi.ts"), model, session, new, instructions, earlier: history, text, pictures, workspace, mcp })
 }
 
 /// Marks an approval card answered (`dismissed` when nobody answered it) and shows the change.
