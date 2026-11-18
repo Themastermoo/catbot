@@ -2430,3 +2430,126 @@ async fn an_app_event_from_composio_starts_its_bot() {
     assert!(said["message"]["text"].as_str().unwrap().contains("When Gmail: New Gmail message"), "{said}");
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
 }
+
+/// Stage 17.1: a bot's own computer, with a stand-in for Podman or Docker.
+#[tokio::test]
+async fn computers() {
+    let s = setup().await;
+    let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-engine.py");
+    let (state, log) = (s._dir.path().join("engine.json"), s._dir.path().join("engine.log"));
+    unsafe {
+        std::env::set_var("CATBOT_CONTAINER", format!("python3 {fake}"));
+        std::env::set_var("FAKE_ENGINE_STATE", &state);
+        std::env::set_var("FAKE_ENGINE_LOG", &log);
+    }
+    // The stand-in screens are stopped at the end, however the test ends.
+    struct Stop(String);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("python3").args([concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-engine.py"), "rm", "-f", &self.0]).status();
+        }
+    }
+    let ran = || std::fs::read_to_string(&log).unwrap_or_default().lines().map(|l| serde_json::from_str::<Vec<String>>(l).unwrap()).collect::<Vec<_>>();
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let _stop = Stop(catbot::server::computers::container(&scout));
+    let reply = async |s: &Setup, events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, text: &str| -> String {
+        s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": text }))).await;
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+    let state_of = async |s: &Setup| -> Value { s.call("GET", "/api/computers", None).await.1 };
+
+    // No computer yet: no tools, and nothing listed.
+    let list = state_of(&s).await;
+    assert_eq!((list["engine"].as_str(), list["image"].as_str(), list["bots"].clone()), (Some("fake-engine.py"), Some("missing"), json!([])), "{list}");
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "echo hi"}"#).await.contains("no tool computer_run"));
+
+    // Given one: the first use sets it up, and says so.
+    let (_, given) = s.call("PUT", &format!("/api/computers/{scout}"), Some(json!({ "on": true }))).await;
+    assert_eq!((given["computer"]["kind"].as_str(), given["computer"]["state"].as_str()), (Some("container"), Some("off")), "{given}");
+    let first = reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "echo hi"}"#).await;
+    assert!(first.contains("being set up for the first time"), "{first}");
+    let mut on = Value::Null;
+    for _ in 0..100 {
+        on = state_of(&s).await;
+        if on["bots"][0]["state"] == "on" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!((on["image"].as_str(), on["bots"][0]["state"].as_str()), (Some("ready"), Some("on")), "{on}");
+    let lines = ran();
+    assert!(lines.iter().any(|l| l[0] == "build" && l[2] == "catbot-computer:1"), "{lines:?}");
+    let run = lines.iter().find(|l| l[0] == "run").unwrap();
+    assert!(run.contains(&"127.0.0.1::6080".to_string()) && !run.iter().any(|a| a == "-v" || a.starts_with("--volume") || a == "--privileged"), "nothing of the person's goes in: {run:?}");
+
+    // Inside its box, nothing asks.
+    let shell = reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "echo hello; echo oops >&2; exit 3"}"#).await;
+    assert_eq!(shell, "exit 3\n--- output ---\nhello\n--- errors ---\noops");
+    let shot = reply(&s, &mut events, r#"catbot-tool: computer_screen {"action": "screenshot"}"#).await;
+    assert!(shot.starts_with("The screen (1280×800). [image image/jpeg"), "{shot}");
+    assert_eq!(reply(&s, &mut events, r#"catbot-tool: computer_screen {"action": "click", "x": 10, "y": 20}"#).await, "Clicked at (10, 20).");
+    assert!(ran().iter().any(|l| l.ends_with(&["xdotool", "mousemove", "--sync", "10", "20", "click", "1"].map(String::from))));
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_screen {"action": "click", "x": 5000, "y": 20}"#).await.starts_with("ERROR: (x, y) is off the screen"));
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_open {"url": "https://example.com"}"#).await.starts_with("Opened https://example.com"));
+
+    // The live view: its files from Catbot itself, and the screen carried to the box.
+    let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
+    let get = async |path: &str| -> (u16, String) {
+        let res = client.request(hyper::Request::get(format!("{}{path}", s.base)).body(Full::new(Bytes::new())).unwrap()).await.unwrap();
+        let status = res.status().as_u16();
+        (status, String::from_utf8_lossy(&res.into_body().collect().await.unwrap().to_bytes()).into_owned())
+    };
+    assert_eq!(get("/computer/view/vnc.html").await, (200, "<html>fake view</html>".to_string()));
+    assert_eq!(get("/computer/view/core/rfb.js").await.0, 200);
+    assert_eq!(get("/computer/view/.hidden").await.0, 404);
+    let screen = async |origin: Option<&str>| -> (String, Option<tokio::net::TcpStream>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let host = s.base.trim_start_matches("http://");
+        let mut tcp = tokio::net::TcpStream::connect(host).await.unwrap();
+        let origin = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default();
+        let ask = format!("GET /computer/{scout}/websockify HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n{origin}\r\n");
+        tcp.write_all(ask.as_bytes()).await.unwrap();
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0u8; 1];
+            if tcp.read(&mut byte).await.unwrap() == 0 {
+                break;
+            }
+            head.push(byte[0]);
+        }
+        (String::from_utf8_lossy(&head).into_owned(), Some(tcp))
+    };
+    let (refused, _) = screen(Some("https://evil.example")).await;
+    assert!(refused.starts_with("HTTP/1.1 403"), "another website can't reach the screen: {refused}");
+    let (opened, tcp) = screen(Some(&s.base)).await;
+    assert!(opened.starts_with("HTTP/1.1 101") && opened.contains("s3pPLMBiTxaQ9kYGzzhZRbK+xOo="), "{opened}");
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut tcp = tcp.unwrap();
+        tcp.write_all(b"ping").await.unwrap();
+        let mut back = [0u8; 4];
+        tcp.read_exact(&mut back).await.unwrap();
+        assert_eq!(&back, b"ping");
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert_eq!(state_of(&s).await["bots"][0]["watching"], 1);
+    }
+
+    // Stopped, it starts again when the bot next uses it; its files stay.
+    let (_, stopped) = s.call("POST", &format!("/api/computers/{scout}/stop"), None).await;
+    assert_eq!(stopped["computer"]["state"], "off", "{stopped}");
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_run {"command": "echo again"}"#).await.contains("again"));
+    assert!(ran().iter().any(|l| l[0] == "start"));
+
+    // Reset throws the box away; taking the computer away does too, and its tools go.
+    s.call("POST", &format!("/api/computers/{scout}/reset"), None).await;
+    assert_eq!(state_of(&s).await["bots"][0]["state"], "off");
+    let (_, gone) = s.call("PUT", &format!("/api/computers/{scout}"), Some(json!({ "on": false }))).await;
+    assert_eq!(gone["computer"], Value::Null);
+    assert_eq!(state_of(&s).await["bots"], json!([]));
+    assert!(reply(&s, &mut events, r#"catbot-tool: computer_screen {"action": "screenshot"}"#).await.contains("no tool computer_screen"));
+}

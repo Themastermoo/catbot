@@ -239,6 +239,16 @@ read-only Memory viewer (on the phone app too), where `[[links]]` open the note 
 Codex notes included. A bot kept out of the Codex isn't told about it or given it, but the
 link is still in its vault, so that switch points bots away rather than walling them off.
 
+**A computer for each bot.** Settings › Computers gives a bot its own small Linux desktop with
+a browser, in a container on this computer. It needs Podman or Docker (on Kubuntu,
+`sudo apt install podman`); `CATBOT_CONTAINER` names another program. The first start builds
+the image from `crates/catbot/computer/` (a few minutes). The bot runs commands, clicks, types
+and browses there without asking; nothing of yours is put inside, and sending, posting and using
+your apps still ask. Watch opens a live view (watching only, unless you switch on "Let me use
+it"); it's served at home only. Each computer keeps its files when stopped; Reset throws it
+away. One nobody uses or watches for 30 minutes is stopped (`CATBOT_COMPUTER_IDLE_MINUTES`,
+`0` never). Keep `catbot serve` on 127.0.0.1 (the default): the boxes can't reach it there.
+
 ## Talking to Claude through Catbot
 
 `catbot ask` runs one unsaved turn through Catbot's own Claude driver (`crates/catbot/src/claude.rs`),

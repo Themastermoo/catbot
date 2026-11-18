@@ -5,6 +5,7 @@
 
 mod api;
 mod apps;
+mod computers;
 mod attach;
 mod emoji_list;
 mod react;

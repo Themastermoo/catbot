@@ -12,6 +12,7 @@ pub mod backups;
 pub mod bot_tools;
 pub mod changes;
 pub mod composio;
+pub mod computers;
 pub mod channels;
 pub mod skills;
 pub mod team;
@@ -108,6 +109,8 @@ pub struct App {
     pub local: std::sync::OnceLock<SocketAddr>,
     /// The keys of turns using Catbot's tools, and whose they are.
     pub tool_grants: std::sync::Mutex<std::collections::HashMap<String, bot_tools::Grant>>,
+    /// The bots' computers while Catbot runs (`computers.rs`).
+    pub computers: computers::Computers,
 }
 
 impl App {
@@ -138,6 +141,7 @@ impl App {
             channels_busy: std::sync::Mutex::new(std::collections::HashSet::new()),
             local: std::sync::OnceLock::new(),
             tool_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
+            computers: computers::Computers::default(),
         })
     }
 
@@ -288,6 +292,7 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
     tokio::spawn(chief::keep_watch(app.clone()));
     tokio::spawn(triggers::keep_time(app.clone()));
     tokio::spawn(triggers::watch_mail(app.clone()));
+    tokio::spawn(computers::keep_tidy(app.clone()));
     axum::serve(listener, router(app)).await?;
     Ok(())
 }
@@ -401,6 +406,24 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         }
         ["p", id, rest @ ..] if method == Method::GET => pages::serve(&app, id, rest).await,
         ["hooks", id, rest @ ..] => hooks::receive(&app, id, rest, req).await,
+        ["computer", "view", rest @ ..] if method == Method::GET => computers::serve_view(&app, rest).await,
+        ["computer", id, "websockify"] if method == Method::GET => {
+            let id = id.to_string();
+            computers::view_socket(&app, &id, req).await
+        }
+        ["api", "computers", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(computers::route(&app, &method, &rest, body).await)
+        }
         ["api", "composio", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

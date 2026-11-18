@@ -213,6 +213,10 @@ pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"email\"}", "data-settings-email": true, class: tab(page() == "email"), onclick: move |_| page.set("email"), "Email" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"pages\"}", "data-settings-pages-list": true, class: tab(page() == "pages"), onclick: move |_| page.set("pages"), "Pages" }
                     button { r#type: "button", role: "tab", "aria-selected": "{page() == \"apps\"}", "data-settings-apps": true, class: tab(page() == "apps"), onclick: move |_| page.set("apps"), "Apps" }
+                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"computers\"}", "data-settings-computers": true, class: tab(page() == "computers"), onclick: move |_| page.set("computers"), "Computers" }
+                }
+                if page() == "computers" {
+                    crate::computers::ComputersSettings {}
                 }
                 if page() == "apps" {
                     crate::apps::AppsSettings {}

@@ -59,7 +59,11 @@ def call_catbot_tool(name, arguments):
     result = rpc(3, "tools/call", {"name": name, "arguments": arguments})["result"]
     server.stdin.close()
     server.wait()
-    return ("ERROR: " if result.get("isError") else "") + result["content"][0]["text"]
+    text = result["content"][0]["text"]
+    for part in result["content"][1:]:
+        if part.get("type") == "image":
+            text += f" [image {part['mimeType']} {len(part['data'])}]"
+    return ("ERROR: " if result.get("isError") else "") + text
 
 import os
 session = arg_after("--session-id") or arg_after("--resume") or "none"

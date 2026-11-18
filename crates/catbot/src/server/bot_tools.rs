@@ -32,14 +32,15 @@ impl Drop for Open {
     }
 }
 
-/// The tools a bot has: publishing pages, its triggers, its mailbox if it may use one, and the
-/// connected apps it's ticked for.
+/// The tools a bot has: publishing pages, its triggers, its mailbox if it may use one, the
+/// connected apps it's ticked for, and its own computer if it has one.
 pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
     let mut tools = super::pages::tools();
     tools.extend(super::triggers::tools());
     tools.extend(super::email::tools_for(app, bot_id));
     tools.extend(super::apps::tools_for(app, bot_id));
     tools.extend(super::composio::tools_for(app, bot_id));
+    tools.extend(super::computers::tools_for(app, bot_id));
     tools
 }
 
@@ -73,6 +74,10 @@ pub async fn route(app: &Arc<App>, call: bool, req: Request) -> Answer {
     let args = if body["arguments"].is_object() { body["arguments"].clone() } else { json!({}) };
     if !tools_for(app, &grant.bot_id).iter().any(|t| t["name"] == name) {
         return Ok((StatusCode::OK, json!({ "text": format!("There's no Catbot tool called {name} for this bot."), "isError": true })));
+    }
+    // A bot's own computer: free inside its box, and a screenshot comes back as a picture.
+    if super::computers::knows(name) {
+        return Ok((StatusCode::OK, super::computers::call(app, &grant, name, &args).await));
     }
     let answer = match name {
         "page_publish" => super::pages::propose(app, &grant, &args).await,

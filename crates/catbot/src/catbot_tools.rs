@@ -40,18 +40,48 @@ pub async fn list(access: &Access) -> Vec<Value> {
     body["tools"].as_array().cloned().unwrap_or_default()
 }
 
-/// Calls one: its text answer, or what went wrong (told to the bot).
-pub async fn call(access: &Access, name: &str, arguments: &Value) -> Result<String, String> {
-    let answer = client()
+/// What a tool gave back: its words, a picture if it made one (base64 data and its type), and
+/// whether it failed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Reply {
+    pub text: String,
+    pub image: Option<(String, String)>,
+    pub failed: bool,
+}
+
+/// Calls one, picture and all (MCP can carry a picture back to the AI).
+pub async fn reply(access: &Access, name: &str, arguments: &Value) -> Reply {
+    let sent = client()
         .post(format!("{}/api/bot-tools/call", access.url))
         .header(KEY_HEADER, &access.key)
         .json(&json!({ "name": name, "arguments": arguments }))
         .send()
-        .await
-        .map_err(|e| format!("Catbot didn't answer: {e}"))?;
-    let body: Value = answer.json().await.map_err(|e| format!("Catbot's answer didn't read: {e}"))?;
+        .await;
+    let answer = match sent {
+        Ok(answer) => answer,
+        Err(e) => return Reply { text: format!("Catbot didn't answer: {e}"), image: None, failed: true },
+    };
+    let body: Value = match answer.json().await {
+        Ok(body) => body,
+        Err(e) => return Reply { text: format!("Catbot's answer didn't read: {e}"), image: None, failed: true },
+    };
     let text = body["text"].as_str().or(body["error"].as_str()).unwrap_or_default().to_string();
-    if body["isError"] == true || body.get("error").is_some() { Err(text) } else { Ok(text) }
+    let image = match (body["image"]["data"].as_str(), body["image"]["mimeType"].as_str()) {
+        (Some(data), Some(kind)) => Some((data.to_string(), kind.to_string())),
+        _ => None,
+    };
+    Reply { text, image, failed: body["isError"] == true || body.get("error").is_some() }
+}
+
+/// Calls one: its text answer, or what went wrong (told to the bot). A chat API can't be shown
+/// a picture from a tool, so the bot is told one came back and how else to look.
+pub async fn call(access: &Access, name: &str, arguments: &Value) -> Result<String, String> {
+    let reply = reply(access, name, arguments).await;
+    let mut text = reply.text;
+    if reply.image.is_some() {
+        text.push_str("\n(A picture came back, but this AI can't be shown pictures from tools. To read the screen, use computer_run, such as `xdotool getactivewindow getwindowname`.)");
+    }
+    if reply.failed { Err(text) } else { Ok(text) }
 }
 
 /// An MCP tool as a chat API's function.

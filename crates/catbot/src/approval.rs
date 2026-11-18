@@ -365,11 +365,12 @@ pub async fn serve_mcp(socket: &Path) -> std::io::Result<()> {
                 let name = msg["params"]["name"].as_str().unwrap_or_default();
                 let args = if msg["params"]["arguments"].is_object() { msg["params"]["arguments"].clone() } else { json!({}) };
                 let access = tools.as_ref().expect("checked");
-                let (text, failed) = match crate::catbot_tools::call(access, name, &args).await {
-                    Ok(text) => (text, false),
-                    Err(text) => (text, true),
-                };
-                Some(json!({ "content": [{ "type": "text", "text": text }], "isError": failed }))
+                let reply = crate::catbot_tools::reply(access, name, &args).await;
+                let mut content = vec![json!({ "type": "text", "text": reply.text })];
+                if let Some((data, kind)) = reply.image {
+                    content.push(json!({ "type": "image", "data": data, "mimeType": kind }));
+                }
+                Some(json!({ "content": content, "isError": reply.failed }))
             }
             "tools/call" if msg["params"]["name"] == "approve" => {
                 let args = &msg["params"]["arguments"];
