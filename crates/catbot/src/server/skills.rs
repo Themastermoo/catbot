@@ -168,7 +168,7 @@ pub fn command(app: &App, bot: &Bot, text: &str) -> Option<String> {
 }
 
 /// Saves a skill to the library (`replace` to write over one with the same name).
-fn save(store: &Store, text: &str, replace: bool) -> Result<Skill, String> {
+pub(super) fn save(store: &Store, text: &str, replace: bool) -> Result<Skill, String> {
     let skill = parse(text)?;
     let dir = library_dir(store).join(&skill.name);
     if dir.join("SKILL.md").exists() && !replace {

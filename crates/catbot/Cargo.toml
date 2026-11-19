@@ -9,6 +9,7 @@ description = "Catbot server. For now: a pass-through recorder in front of the r
 axum = "0.8"
 bytes = "1"
 chrono = "0.4"
+chrono-tz = "0.10"
 clap = { version = "4", features = ["derive"] }
 http-body = "1"
 http-body-util = "0.1"

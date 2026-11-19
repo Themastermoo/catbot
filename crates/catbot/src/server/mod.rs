@@ -18,6 +18,7 @@ pub mod channels;
 pub mod skills;
 pub mod team;
 pub mod teams;
+pub mod grok_move;
 pub mod chief;
 pub mod handoffs;
 pub mod limits;
@@ -390,6 +391,19 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
                 None
             };
             respond(skills::route(&app, &method, &rest, body).await)
+        }
+        ["api", "grok-move", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::POST {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(grok_move::route(&app, &method, &rest, body))
         }
         ["api", "teams", which] if method == Method::POST => {
             let body = match json_body(req).await {

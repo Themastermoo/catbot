@@ -316,7 +316,7 @@ pub fn import(app: &Arc<App>, body: &Value) -> Answer {
 }
 
 /// Takes out anything that looks like a key or token, so a shared file never carries one.
-fn scrub(text: &str) -> String {
+pub(super) fn scrub(text: &str) -> String {
     const PREFIXES: [&str; 11] = ["sk-", "sk_live_", "sk_test_", "xai-", "ghp_", "gho_", "github_pat_", "AKIA", "AIza", "xoxb-", "xoxp-"];
     text.split_inclusive(char::is_whitespace)
         .map(|piece| {

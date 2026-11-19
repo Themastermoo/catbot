@@ -3186,3 +3186,80 @@ async fn muse_code_installs_signs_in_with_a_code_and_answers() {
     assert_eq!((turn["args"].clone(), turn["env"]["MUSE_EXPERIMENTAL_ACP"].as_str()), (json!(["acp"]), Some("on")), "{turn}");
     assert!(turn["cwd"].as_str().unwrap().ends_with("bots/muse"));
 }
+
+/// Stage 18.1: a Grok Bot brought over from the export it writes about itself.
+#[tokio::test]
+async fn a_grok_bot_comes_over_from_its_export() {
+    let downloads = tempfile::tempdir().unwrap();
+    // SAFETY: only this test reads it.
+    unsafe { std::env::set_var("CATBOT_DOWNLOADS", downloads.path()) };
+    let export = json!({
+        "format": "grok-bot-export",
+        "version": 1,
+        "bots": [
+            {
+                "name": "Scout",
+                "title": "Researcher",
+                "instructions": "Find things out and cite sources.",
+                "memories": ["The garden is in zone 8a"],
+                "user_facts": ["Goes by Moo"],
+                "skills": [{ "name": "Weekly Digest", "description": "Sum up the week", "instructions": "Collect the week's notes and write five bullets." }],
+                "routines": [
+                    { "name": "Morning brief", "instruction": "Write the morning brief.", "trigger": "schedule", "schedule_cron": "30 8 * * 1-5", "skills": ["Weekly Digest"] },
+                    { "name": "PR watch", "instruction": "Review new pull requests.", "trigger": "github", "trigger_details": "repo moo/catbot" }
+                ],
+                "apps": [{ "name": "Notion", "mcp_url": "https://mcp.notion.com/mcp" }]
+            },
+            { "name": "Quill", "instructions": "Write drafts." }
+        ]
+    });
+    std::fs::write(downloads.path().join("grok-bot-export-scout.json"), serde_json::to_string_pretty(&export).unwrap()).unwrap();
+    std::fs::write(downloads.path().join("holiday.json"), "{}").unwrap();
+    let s = setup().await;
+
+    // The prompt, and what's in Downloads (only exports).
+    let (_, look) = s.call("GET", "/api/grok-move", None).await;
+    assert!(look["prompt"].as_str().unwrap().contains("\"format\": \"grok-bot-export\""));
+    let files: Vec<&str> = look["files"].as_array().unwrap().iter().filter_map(|f| f["name"].as_str()).collect();
+    assert_eq!(files, ["grok-bot-export-scout.json"]);
+    assert_eq!(s.call("POST", "/api/grok-move/preview", Some(json!({ "files": ["holiday.json"] }))).await.0, 400, "only an export in Downloads is read");
+    assert_eq!(s.call("POST", "/api/grok-move/preview", Some(json!({ "files": ["../grok-bot-export-x.json"] }))).await.0, 400);
+    let (status, refused) = s.call("POST", "/api/grok-move/preview", Some(json!({ "text": r#"{"format":"grok-bot-export","bots":[{"name":"A","token":"x"}]}"# }))).await;
+    assert!(status == 400 && refused.to_string().contains("keys or passwords"), "{refused}");
+    // The phone can't reach it.
+    let away = reqwest::Client::new().get(format!("{}/api/grok-move", s.away)).send().await.unwrap();
+    assert_ne!(away.status(), 200);
+
+    // The review.
+    let (_, preview) = s.call("POST", "/api/grok-move/preview", Some(json!({ "files": ["grok-bot-export-scout.json"] }))).await;
+    let scout = &preview["plan"]["bots"][0];
+    assert_eq!((scout["name"].as_str(), scout["schedules"][0]["when"].as_str(), scout["events"][0].as_str()), (Some("Scout"), Some("weekdays at 08:30"), Some("PR watch")), "{preview}");
+    assert_eq!((scout["skills"].clone(), scout["facts"].as_u64(), scout["apps"].clone()), (json!(["Weekly Digest"]), Some(1), json!(["Notion"])));
+
+    // Bringing Scout over, leaving Quill out.
+    let (status, made) = s.call("POST", "/api/grok-move/import", Some(json!({ "files": ["grok-bot-export-scout.json"], "leaveOut": ["Quill"] }))).await;
+    assert_eq!(status, 201, "{made}");
+    assert_eq!(made["bots"].as_array().unwrap().len(), 1);
+    let id = made["bots"][0]["id"].as_str().unwrap().to_string();
+    let (_, bot) = s.call("GET", &format!("/api/bots/{id}"), None).await;
+    let bot = &bot["bot"];
+    assert_eq!((bot["name"].as_str(), bot["approvalMode"].as_str(), bot["skills"].clone()), (Some("Scout"), Some("ask"), json!([])), "asks first; its skill is off: {bot}");
+    assert!(bot["soul"].as_str().unwrap().contains("cite sources") && bot["soul"].as_str().unwrap().contains("Your role: Researcher."), "{bot}");
+    let (_, library) = s.call("GET", "/api/skills", None).await;
+    assert!(library["skills"].as_array().unwrap().iter().any(|k| k["name"] == "weekly-digest"), "{library}");
+    let (_, listed) = s.call("GET", "/api/triggers", None).await;
+    let brief = listed["triggers"].as_array().unwrap().iter().find(|t| t["botId"] == id.as_str()).unwrap().clone();
+    assert_eq!((brief["name"].as_str(), brief["enabled"].as_bool(), brief["schedule"]["type"].as_str(), brief["schedule"]["time"].as_str()), (Some("Morning brief"), Some(false), Some("weekly"), Some("08:30")), "paused: {brief}");
+    assert!(brief["prompt"].as_str().unwrap().ends_with("Use these skills: weekly-digest."), "{brief}");
+    let note = std::fs::read_to_string(s.memory.join("Bots/Scout.md")).unwrap();
+    for wanted in ["## Brought over from Grok Bot", "The garden is in zone 8a", "### About the person", "Goes by Moo", "**PR watch** (github; repo moo/catbot)", "Notion (https://mcp.notion.com/mcp)"] {
+        assert!(note.contains(wanted), "{wanted} in {note}");
+    }
+
+    // Again: a numbered Scout, and the same skill shared, not copied.
+    let (_, again) = s.call("POST", "/api/grok-move/import", Some(json!({ "text": serde_json::to_string(&export).unwrap(), "leaveOut": ["quill"] }))).await;
+    assert_ne!(again["bots"][0]["name"], "Scout");
+    assert_eq!(again["bots"][0]["skills"], json!(["weekly-digest"]));
+    let (_, library) = s.call("GET", "/api/skills", None).await;
+    assert_eq!(library["skills"].as_array().unwrap().iter().filter(|k| k["name"].as_str().unwrap().starts_with("weekly-digest")).count(), 1);
+}
