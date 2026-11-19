@@ -14,7 +14,12 @@ const PRIMARY: &str = "rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibol
 
 #[component]
 pub fn TeamFiles() -> Element {
+    // Grok Bot's exports are read at home (they're in this computer's Downloads).
+    let at_home = crate::link::active().is_none();
     rsx! {
+        if at_home {
+            crate::grok::GrokMove {}
+        }
         Import {}
         Export {}
     }

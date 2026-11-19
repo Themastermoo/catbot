@@ -15,6 +15,7 @@ mod channels;
 mod skills;
 mod team;
 mod teams;
+mod grok;
 mod triggers;
 mod chief;
 mod handoffs;

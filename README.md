@@ -296,6 +296,18 @@ environment variable, or into a file only the bot can read there. The value isn'
 shown in the chat, and isn't given to the AI: Catbot blanks it (and its base64) out of what
 comes back. Every use is listed under "Last used". `CATBOT_OP` points at another `op`.
 
+**Moving a bot from Grok Bot.** Grok Bot has no export button, so Settings › Team › Move a bot
+from Grok Bot gives you a prompt to paste into a Grok Bot's chat: the bot writes its own setup
+(instructions, what it remembers, what it knows about you, skills, routines, apps) as
+`grok-bot-export-<name>.json`, saved in Downloads or pasted back. Catbot looks in Downloads
+while that's open, shows what it would make, and makes a bot of each one you keep. A
+brought-in bot asks before it acts, on Catbot's default AI. Its skills go into the skills
+library switched off, its scheduled routines come in as paused triggers (moved to this
+computer's clock), and what it remembered, what it knew about you, its routines that start on
+an event and the apps it used go into its memory note to set up again. An export with fields
+that look like keys or passwords isn't read at all. It's the same file MausBot reads.
+`CATBOT_DOWNLOADS` points Catbot at another Downloads folder.
+
 ## Talking to Claude through Catbot
 
 `catbot ask` runs one unsaved turn through Catbot's own Claude driver (`crates/catbot/src/claude.rs`),

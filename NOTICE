@@ -27,6 +27,31 @@ OpenMausBot contributors, licensed under the Apache License, Version 2.0
 - How Catbot names chats (crates/catbot/src/titles.rs) is adapted from
   OpenMausBot's server/thread-title.ts and thread-title-generate.ts: the
   first-line name, the naming prompt and how the reply is cleaned.
+- Moving a Grok Bot (crates/catbot/src/server/grok_move.rs) follows OpenMausBot's
+  shared/grok-import.ts and server/grok-local.ts: the export's JSON shape and the
+  prompt that asks for it (reworded), the repairs for what a chat window does to
+  it, merging split exports, refusing credential-looking fields, and finding
+  exports in Downloads. Rewritten in Rust; Catbot makes bots, skills, triggers
+  and memory notes of its own from it.
+
+Moving a Grok Bot also adapts, through OpenMausBot, the export message, reader
+repairs and credential refusal of the agent-importers plugin in
+hermes-official-plugins, https://github.com/NousResearch/hermes-official-plugins,
+Copyright (c) 2026 Nous Research, used under the MIT License: Permission is
+hereby granted, free of charge, to any person obtaining a copy of this software
+and associated documentation files (the "Software"), to deal in the Software
+without restriction, including without limitation the rights to use, copy,
+modify, merge, publish, distribute, sublicense, and/or sell copies of the
+Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions: The above copyright notice and this
+permission notice shall be included in all copies or substantial portions of
+the Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
+EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO
+EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR
+OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 
 The Windows package (scripts/build-windows.sh) ships Microsoft's
 WebView2Loader.dll beside the app, as provided by the webview2-com-sys crate;
