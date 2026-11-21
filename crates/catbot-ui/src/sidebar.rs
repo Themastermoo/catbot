@@ -1,217 +1,173 @@
-//! The sidebar: a search field and Catbot's bots, one row each. A bot with more than one chat
-//! gets an arrow that opens its chats beneath it (`chats.rs`).
+//! The sidebar, in Grok Bot's look as MausBot's default ("simple") layout has it (stage 19.1,
+//! Moo's choice 2026-11-21): round Search and New buttons in the top corner, the Chief of Staff
+//! as a tile of its own, the bots as roomy rows, and at the foot the account button (with its
+//! menu) and a "Connect apps" pill. A bot with more than one chat can open them beneath its row
+//! (`chats.rs`).
 //!
-//! Classes and sizes follow the full layout of OpenMausBot's `src/components/Sidebar.tsx`
-//! (`Sidebar` and `BotListItem`, Apache-2.0, see NOTICE). Their bot picture is their mascot
-//! artwork, which Catbot doesn't copy: a bot wears one of Catbot's own (`mascots.rs`).
+//! Classes and sizes follow OpenMausBot 0.1.176's `Sidebar.tsx`, `SidebarSimpleTop.tsx`,
+//! `SidebarTiles.tsx`, `SidebarRowMarkers.tsx`, `SidebarFooter.tsx`, `SidebarConnectApps.tsx` and
+//! `SidebarProfileMenu.tsx` (Apache-2.0, see NOTICE). Their pictures and app logos aren't copied:
+//! a bot wears one of Catbot's cats (`mascots.rs`), and an app shows its initial.
 
 use std::collections::HashSet;
 
 use dioxus::prelude::*;
 
 use crate::bots::{Activity, Bot};
-use crate::chat::clock;
 use crate::chats::{self, ChatList, Chevron};
 use crate::live::State;
 use crate::mascots::BotMark;
 use crate::settings::Ui;
 
-/// Their focus ring for rows (`SIMPLE_ROW_FOCUS`).
+/// Their focus ring for rows and tiles (`SIMPLE_ROW_FOCUS`).
 const ROW_FOCUS: &str = "focus-visible:outline-2 focus-visible:-outline-offset-2! focus-visible:outline-focus";
-/// Their raised-control look for the search field (`ELEVATED_CONTROL`).
-const ELEVATED_CONTROL: &str = "bg-composer ring-1 ring-inset ring-ink/[0.07]";
+/// Their raised control (`ELEVATED_CONTROL`), with its hover and open tint (`ELEVATED_HOVER`).
+const ELEVATED: &str = "bg-composer ring-1 ring-inset ring-ink/[0.07] transition-colors duration-[120ms] hover:bg-[color-mix(in_srgb,var(--color-composer),var(--color-ink)_7%)] aria-expanded:bg-[color-mix(in_srgb,var(--color-composer),var(--color-ink)_7%)]";
+/// The round buttons in the sidebar's top corner (`SIMPLE_TOP_BUTTON`).
+const TOP_BUTTON: &str = "flex size-9 shrink-0 items-center justify-center rounded-full text-ink/90 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus";
+/// Their menu sheet and its rows (`menu-recipe.ts`, `SidebarPopoverMenu.tsx`).
+pub const MENU_SHEET: &str = "popover-surface flex flex-col gap-1 rounded-[var(--radius-menu)] border border-hairline/50 bg-menu p-1.5 shadow-lg";
+pub const MENU_ROW: &str = "flex min-h-8 w-full items-center gap-2 rounded-lg px-2 py-1.5 text-start text-[14px] leading-5 text-ink hover:bg-menu-hover focus-visible:bg-menu-hover focus-visible:outline-none disabled:opacity-60";
+const MENU_SEPARATOR: &str = "mx-1.5 h-px shrink-0 bg-hairline/50";
+/// The Chief's crown badge colour (their `#E8993A`).
+const CROWN: &str = "bg-[#E8993A]";
+
+/// The dialogs the sidebar opens.
+#[derive(Clone, Copy, PartialEq)]
+enum Open {
+    NewBot,
+    NewChannel,
+    Devices,
+    Settings(&'static str),
+    Triggers,
+    Memory,
+    Usage,
+}
 
 #[component]
 pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> Element {
     let mut query = use_signal(String::new);
-    let mut making = use_signal(|| false);
-    let mut pairing = use_signal(|| false);
-    let mut remembering = use_signal(|| false);
-    let mut configuring = use_signal(|| false);
-    let mut measuring = use_signal(|| false);
-    let mut grouping = use_signal(|| false);
-    let mut scheduling = use_signal(|| false);
-    // How many triggers there are, and how many are on: shown on their row.
-    let mut trigger_count = use_signal(|| (0usize, 0usize));
+    let mut searching = use_signal(|| false);
+    let mut adding = use_signal(|| false);
+    let mut open = use_signal(|| None::<Open>);
     // Bots whose chats are showing.
     let mut unfolded = use_signal(HashSet::<String>::new);
     let state = use_context::<Signal<State>>();
     let ui = use_context::<Ui>();
-    use_effect(move || {
-        let _ = state.read().triggers_changed;
+    // Ctrl+, (⌘, on a Mac) opens Settings, as in MausBot.
+    use_hook(|| {
         spawn(async move {
-            if let Ok(found) = crate::api::get("/api/triggers").await {
-                let list = found["triggers"].as_array().cloned().unwrap_or_default();
-                trigger_count.set((list.len(), list.iter().filter(|t| t["enabled"] == true).count()));
+            let mut keys = document::eval(
+                r#"document.addEventListener("keydown", (event) => {
+                    if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key === ",") { event.preventDefault(); dioxus.send("settings"); }
+                });"#,
+            );
+            while keys.recv::<String>().await.is_ok() {
+                open.set(Some(Open::Settings("general")));
             }
         });
     });
-    let shown: Vec<Bot> = bots.read().iter().filter(|b| b.matches(&query.read())).cloned().collect();
-    let empty = bots.read().is_empty();
+    let q = query.read().trim().to_lowercase();
+    let all = bots.read();
+    // The Chief stands apart as a tile while nothing's being searched for.
+    let chief = all.iter().find(|b| b.chief && b.channel.is_none()).cloned().filter(|_| q.is_empty());
+    let shown: Vec<Bot> = all.iter().filter(|b| b.matches(&query.read()) && !chief.as_ref().is_some_and(|c| c.id == b.id)).cloned().collect();
+    let empty = all.is_empty();
+    drop(all);
     // On a phone the list gives way to the open chat.
     let phone = if (ui.showing_chat)() { "max-md:hidden" } else { "" };
-    // Pairing other devices is done at home: not on the phone, nor in the Windows app.
-    let at_home = !crate::link::pairs() && !crate::link::has_own();
-    // Taken every time (hooks keep their order), used only in the Windows app.
-    let all_places = use_context::<crate::settings::Places>();
-    let places = crate::link::has_own().then_some(all_places);
-    let mut pairing_home = use_signal(|| false);
+    let pick = move |id: String| {
+        selected.set(Some(id));
+        let mut showing = ui.showing_chat;
+        showing.set(true);
+    };
+    let mut close_search = move || {
+        searching.set(false);
+        query.set(String::new());
+    };
     rsx! {
         aside {
             "aria-label": "Bots",
             "data-sidebar": true,
-            class: "relative flex h-full w-[320px] shrink-0 flex-col border-r-[0.5px] border-edge bg-panel max-md:w-full max-md:border-r-0 {phone}",
-            div { "data-sidebar-top-row": true, class: "relative flex h-12 items-center pl-4 pr-2",
-                span { class: "min-w-0 flex-1 text-[15px] font-semibold text-ink", "Catbot" }
-                button {
-                    r#type: "button",
-                    "aria-label": "Memory",
-                    title: "The bots' memory",
-                    "data-open-memory": true,
-                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
-                    onclick: move |_| remembering.set(true),
-                    // Lucide `BookOpen` (ISC).
-                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                        path { d: "M12 7v14" }
-                        path { d: "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z" }
-                    }
-                }
-                button {
-                    r#type: "button",
-                    "aria-label": "Usage",
-                    title: "Usage and limits",
-                    "data-open-usage": true,
-                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
-                    onclick: move |_| measuring.set(true),
-                    // Lucide `Gauge` (ISC).
-                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                        path { d: "m12 14 4-4" }
-                        path { d: "M3.34 19a10 10 0 1 1 17.32 0" }
-                    }
-                }
-                button {
-                    r#type: "button",
-                    "aria-label": "Settings",
-                    title: "Settings",
-                    "data-open-settings": true,
-                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
-                    onclick: move |_| configuring.set(true),
-                    // Lucide `SlidersHorizontal` (ISC).
-                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                        path { d: "M21 4h-7M10 4H3M21 12h-9M8 12H3M21 20h-5M12 20H3M14 2v4M8 10v4M16 18v4" }
-                    }
-                }
-                if at_home { button {
-                    r#type: "button",
-                    "aria-label": "Devices",
-                    title: "Devices away from home",
-                    "data-open-devices": true,
-                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
-                    onclick: move |_| pairing.set(true),
-                    // Lucide `Smartphone` (ISC).
-                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                        rect { x: "5", y: "2", width: "14", height: "20", rx: "2" }
-                        path { d: "M12 18h.01" }
-                    }
-                } }
-                button {
-                    r#type: "button",
-                    "aria-label": "New channel",
-                    title: "New channel: a group chat of several bots",
-                    "data-open-new-channel": true,
-                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
-                    onclick: move |_| grouping.set(true),
-                    // Lucide `Hash` (ISC).
-                    svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                        path { d: "M4 9h16M4 15h16M10 3 8 21M16 3l-2 18" }
-                    }
-                }
-                button {
-                    r#type: "button",
-                    "aria-label": "New Bot",
-                    title: "New Bot",
-                    class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
-                    onclick: move |_| making.set(true),
-                    svg { "aria-hidden": "true", width: "18", height: "18", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                        path { d: "M5 12h14M12 5v14" }
-                    }
-                }
-            }
-            if making() {
-                crate::settings::NewBotDialog { on_close: move |_| making.set(false) }
-            }
-            if pairing() {
-                crate::devices::DevicesDialog { on_close: move |_| pairing.set(false) }
-            }
-            if grouping() {
-                crate::channels::NewChannelDialog { on_close: move |_| grouping.set(false) }
-            }
-            if measuring() {
-                crate::usage::UsageDialog { on_close: move |_| measuring.set(false) }
-            }
-            if configuring() {
-                crate::notify::SettingsDialog { on_close: move |_| configuring.set(false) }
-            }
-            if scheduling() {
-                crate::triggers::TriggersDialog { on_close: move |_| scheduling.set(false) }
-            }
-            if remembering() {
-                crate::memory::MemoryDialog { on_close: move |_| remembering.set(false) }
-            }
-            if let Some(places) = places {
-                PlaceSwitch { places, on_pair: move |_| pairing_home.set(true) }
-                if pairing_home() {
-                    crate::pair::PairScreen {
-                        removed: false,
-                        computer: true,
-                        on_cancel: move |_| pairing_home.set(false),
-                        on_paired: move |_| {
-                            pairing_home.set(false);
-                            go_to(places, crate::link::Place::Home);
-                        },
-                    }
-                }
-            }
-            div { class: "px-3 pt-1 pb-3",
-                div { class: "flex h-8 items-center gap-2 rounded-full px-3 focus-within:ring-focus {ELEVATED_CONTROL}",
-                    SearchIcon {}
-                    input {
-                        id: "sidebar-search",
-                        placeholder: "Search",
+            class: "relative flex h-full w-[280px] shrink-0 flex-col border-r-[0.5px] border-edge bg-panel max-md:w-full max-md:border-r-0 max-md:bg-app {phone}",
+            div { "data-sidebar-top-row": true, class: "relative flex h-[60px] shrink-0 items-start pl-4 pr-4 pt-3",
+                div { class: "min-w-0 flex-1" }
+                div { "data-sidebar-top-buttons": true, class: "relative flex shrink-0 items-center gap-2.5",
+                    button {
+                        r#type: "button",
+                        "data-sidebar-search-toggle": true,
                         "aria-label": "Search bots and messages",
-                        class: "w-full bg-transparent text-[13px] text-ink placeholder:text-ink-tertiary focus:outline-none",
-                        oninput: move |e| query.set(e.value()),
-                        onkeydown: move |e| {
-                            if e.key() == Key::Escape {
-                                query.set(String::new());
-                                document::eval(r#"const box = document.getElementById("sidebar-search"); if (box) box.value = "";"#);
+                        "aria-expanded": "{searching()}",
+                        title: "Search",
+                        class: "{TOP_BUTTON} {ELEVATED}",
+                        onclick: move |_| if searching() { close_search() } else { searching.set(true) },
+                        Icon { name: "search", size: 16 }
+                    }
+                    button {
+                        r#type: "button",
+                        "data-sidebar-new": true,
+                        "aria-label": "New",
+                        "aria-haspopup": "menu",
+                        "aria-expanded": "{adding()}",
+                        title: "New bot or channel",
+                        class: "{TOP_BUTTON} {ELEVATED}",
+                        onclick: move |_| adding.toggle(),
+                        Icon { name: "plus", size: 17 }
+                    }
+                    if adding() {
+                        div { class: "fixed inset-0 z-40", onclick: move |_| adding.set(false) }
+                        div { role: "menu", "data-sidebar-new-menu": true, class: "absolute right-0 top-full z-50 mt-1.5 w-[220px] {MENU_SHEET}",
+                            button { r#type: "button", role: "menuitem", "data-new-bot": true, class: MENU_ROW,
+                                onclick: move |_| { adding.set(false); open.set(Some(Open::NewBot)); },
+                                span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "bot", size: 16 } }
+                                span { class: "flex-1", "New bot" }
                             }
-                        },
+                            button { r#type: "button", role: "menuitem", "data-open-new-channel": true, class: MENU_ROW,
+                                onclick: move |_| { adding.set(false); open.set(Some(Open::NewChannel)); },
+                                span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "hash", size: 16 } }
+                                div { class: "flex min-w-0 flex-1 flex-col",
+                                    span { "New channel" }
+                                    span { class: "truncate text-[12px] leading-4 text-ink-secondary", "A group chat of several bots" }
+                                }
+                            }
+                        }
                     }
                 }
             }
-            div { class: "min-h-0 flex-1 overflow-y-auto px-2",
-                button {
-                    r#type: "button",
-                    "data-open-triggers": true,
-                    class: "mb-1 flex h-9 w-full items-center gap-2 rounded-lg px-3 text-left text-[14px] text-ink hover:bg-raised",
-                    onclick: move |_| scheduling.set(true),
-                    // Lucide `Zap` (ISC).
-                    svg { "aria-hidden": "true", width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", class: "shrink-0 text-ink-secondary",
-                        path { d: "M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" }
-                    }
-                    span { class: "min-w-0 flex-1", "Triggers" }
-                    if trigger_count().0 > 0 {
-                        span { class: "text-[12px] text-ink-tertiary", "{trigger_count().1} on" }
+            if searching() {
+                div { "data-sidebar-search-pill": true, class: "px-3 pb-2 pt-0.5",
+                    div { class: "flex h-[34px] items-center gap-2 rounded-full pl-3 pr-1.5 text-ink-secondary focus-within:ring-focus bg-composer ring-1 ring-inset ring-ink/[0.07]",
+                        Icon { name: "search", size: 15 }
+                        input {
+                            id: "sidebar-search",
+                            autofocus: true,
+                            placeholder: "Search",
+                            "aria-label": "Search bots and messages",
+                            class: "min-w-0 flex-1 bg-transparent text-[13px] text-ink placeholder:text-ink-tertiary focus:outline-none",
+                            oninput: move |e| query.set(e.value()),
+                            onmounted: move |e| async move { let _ = e.set_focus(true).await; },
+                            onkeydown: move |e| if e.key() == Key::Escape { e.prevent_default(); close_search(); },
+                        }
+                        button { r#type: "button", "aria-label": "Close search", class: "flex size-6 shrink-0 items-center justify-center rounded-full text-ink-tertiary hover:bg-ink/[0.06] hover:text-ink",
+                            onclick: move |_| close_search(),
+                            Icon { name: "x", size: 14 }
+                        }
                     }
                 }
-                div { class: "flex flex-col gap-0.5",
+            }
+            div { class: "min-h-0 flex-1 overflow-y-auto",
+                if let Some(chief) = chief {
+                    div { "data-sidebar-tiles": true, class: "flex flex-wrap justify-center gap-x-1 gap-y-3 px-3 pb-4 pt-2.5",
+                        ChiefTile { selected: selected.read().as_deref() == Some(chief.id.as_str()), bot: chief, on_select: pick }
+                    }
+                }
+                div { class: "flex flex-col gap-0.5 px-3",
                     if empty {
-                        div { class: "px-3 py-6 text-center text-[13px] text-ink-secondary",
+                        div { "data-sidebar-empty": true, class: "px-2 py-6 text-center text-[13px] leading-[18px] text-ink-tertiary",
                             "No bots yet. Make one with the + above."
                         }
-                    } else if shown.is_empty() {
-                        div { class: "px-3 py-6 text-center text-[13px] text-ink-secondary", "Nothing matches “{query}”" }
+                    } else if shown.is_empty() && !q.is_empty() {
+                        div { class: "px-2 py-6 text-center text-[13px] text-ink-secondary", "Nothing matches “{query}”" }
                     }
                     for bot in shown {
                         BotRow {
@@ -221,11 +177,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                             unfolded: unfolded.read().contains(&bot.id) || chat_found(&bot, &query.read()),
                             query: query.read().clone(),
                             bot,
-                            on_select: move |id| {
-                                selected.set(Some(id));
-                                let mut showing = ui.showing_chat;
-                                showing.set(true);
-                            },
+                            on_select: pick,
                             on_fold: move |id: String| {
                                 let mut open = unfolded.write();
                                 if !open.remove(&id) {
@@ -240,6 +192,17 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                     }
                 }
             }
+            Footer { bot_count: bots.read().iter().filter(|b| b.channel.is_none()).count(), on_open: move |o| open.set(Some(o)) }
+            match open() {
+                Some(Open::NewBot) => rsx! { crate::settings::NewBotDialog { on_close: move |_| open.set(None) } },
+                Some(Open::NewChannel) => rsx! { crate::channels::NewChannelDialog { on_close: move |_| open.set(None) } },
+                Some(Open::Devices) => rsx! { crate::devices::DevicesDialog { on_close: move |_| open.set(None) } },
+                Some(Open::Settings(page)) => rsx! { crate::notify::SettingsDialog { start: page.to_string(), on_close: move |_| open.set(None) } },
+                Some(Open::Triggers) => rsx! { crate::triggers::TriggersDialog { on_close: move |_| open.set(None) } },
+                Some(Open::Memory) => rsx! { crate::memory::MemoryDialog { on_close: move |_| open.set(None) } },
+                Some(Open::Usage) => rsx! { crate::usage::UsageDialog { on_close: move |_| open.set(None) } },
+                None => rsx! {},
+            }
         }
     }
 }
@@ -250,6 +213,64 @@ fn chat_found(bot: &Bot, query: &str) -> bool {
     !query.is_empty() && bot.chats.iter().any(|c| c.title.to_lowercase().contains(&query))
 }
 
+/// The marker on a bot's picture: waiting for you wins, then working (`SidebarRowMarkers.tsx`).
+fn status_label(bot: &Bot) -> &'static str {
+    match bot.activity {
+        Activity::WaitingOnYou => "Waiting for you…",
+        Activity::Working => "Working",
+        _ => "",
+    }
+}
+
+/// The Chief of Staff, as a tile above the list (`SidebarBotTile`, primary): its picture large,
+/// with the crown, and its name under it.
+#[component]
+fn ChiefTile(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element {
+    let (id, key_id) = (bot.id.clone(), bot.id.clone());
+    let waiting = bot.activity == Activity::WaitingOnYou;
+    let working = bot.activity == Activity::Working;
+    let tile = if selected { "[--tile:var(--color-raised)]" } else { "[--tile:var(--color-panel)] hover:[--tile:color-mix(in_srgb,var(--color-ink)_6%,var(--color-panel))]" };
+    let label = [bot.name.as_str(), "Chief of Staff", status_label(&bot), if bot.unread { "Unread" } else { "" }].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(" · ");
+    rsx! {
+        div {
+            role: "button",
+            tabindex: 0,
+            "aria-label": "{label}",
+            "aria-current": if selected { "page" },
+            "data-sidebar-bot-row": "{bot.id}",
+            "data-sidebar-tile": "primary",
+            "data-cat-follow": true,
+            title: "{bot.name} · Chief of Staff",
+            class: "flex h-[92px] w-[95px] shrink-0 cursor-pointer flex-col items-center rounded-xl bg-[var(--tile)] px-2 pb-1 pt-1.5 transition-colors duration-150 {ROW_FOCUS} {tile}",
+            onclick: move |_| on_select.call(id.clone()),
+            onkeydown: move |e| {
+                if e.key() == Key::Enter || e.key() == Key::Character(" ".into()) {
+                    e.prevent_default();
+                    on_select.call(key_id.clone());
+                }
+            },
+            span { class: "relative flex",
+                BotMark { color: bot.color.clone(), initial: bot.initial(), size: 60, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
+                span { "data-chief-badge": true, "aria-hidden": "true", class: "absolute -bottom-px -right-px flex size-4 items-center justify-center rounded-full text-white ring-2 ring-[var(--tile)] {CROWN}",
+                    Icon { name: "crown", size: 10, filled: true }
+                }
+                if waiting {
+                    span { "data-testid": "waiting-dot", "aria-hidden": "true", class: "absolute -right-1 -top-1 flex size-4 items-center justify-center rounded-full bg-warning text-[11px] font-black leading-none text-panel ring-2 ring-[var(--tile)]", "!" }
+                } else if working {
+                    span { "data-testid": "working-dot", "aria-hidden": "true", class: "absolute -right-0.5 -top-0.5 size-3 rounded-full bg-success ring-2 ring-[var(--tile)]" }
+                } else if bot.unread {
+                    span { "data-testid": "unread-dot", "aria-hidden": "true", class: "absolute -right-0.5 -top-0.5 size-3 rounded-full bg-accent ring-2 ring-[var(--tile)]" }
+                }
+            }
+            span { class: "mt-1.5 flex w-full min-w-0 justify-center",
+                span { class: "min-w-0 truncate text-center text-[12px] leading-4 text-ink", "{bot.name}" }
+            }
+        }
+    }
+}
+
+/// A bot (or channel) as a roomy row (`BotListItem`, simple): its picture, its name, and a line
+/// of what it last said or is doing. Hovering shows its chats and New chat.
 #[component]
 fn BotRow(
     bot: Bot,
@@ -260,28 +281,27 @@ fn BotRow(
     on_fold: EventHandler<String>,
     on_new_chat: EventHandler<String>,
 ) -> Element {
-    let id = bot.id.clone();
-    let key_id = bot.id.clone();
-    let fold_id = bot.id.clone();
-    let new_id = bot.id.clone();
+    let (id, key_id, fold_id, new_id) = (bot.id.clone(), bot.id.clone(), bot.id.clone(), bot.id.clone());
     let waiting = bot.activity == Activity::WaitingOnYou;
     let working = bot.activity == Activity::Working;
-    let mood = bot.activity.mood().to_string();
     // The arrow shows once there's more than one chat to choose between.
     let has_list = bot.listed_chats().count() > 1 || bot.chats.iter().any(|c| c.archived);
     let expanded = has_list && unfolded;
-    let row_state = if selected && !expanded { "bg-raised" } else { "hover:bg-raised/50" };
-    let row_left = if has_list { "pl-6" } else { "pl-2.5" };
-    let preview_color = if waiting { "font-semibold text-warning" } else { "text-ink-secondary" };
-    let time = bot.last.as_ref().filter(|_| selected && !expanded).map(|last| clock(last.at));
+    let surface = if selected && !expanded {
+        "[--row:var(--color-raised)] bg-[var(--row)]"
+    } else {
+        "[--row:var(--color-panel)] max-md:[--row:var(--color-app)] bg-[var(--row)] hover:[--row:color-mix(in_srgb,var(--color-ink)_6%,var(--color-panel))]"
+    };
     // A draft left in the bot's open chat shows instead, unless the bot is busy or asking.
     let draft = use_context::<Signal<crate::drafts::Drafts>>()
         .read()
         .get(&bot.thread_id)
         .filter(|_| !selected && bot.activity == Activity::Idle)
         .map(|d| d.line());
-    let preview = bot.preview();
+    let preview = if waiting { "Waiting for you…".to_string() } else { bot.preview() };
+    let line_color = if waiting { "text-warning" } else { "text-ink-secondary" };
     let fold_label = if expanded { format!("Hide {} chats", bot.name) } else { format!("Show {} chats", bot.name) };
+    let status = [status_label(&bot), if bot.unread { "Unread" } else { "" }].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(", ");
     rsx! {
         div { class: "group relative",
             div {
@@ -291,7 +311,7 @@ fn BotRow(
                 "data-sidebar-bot-row": "{bot.id}",
                 // The cat's eyes follow the pointer anywhere on its row (see `MASCOT_LIFE`).
                 "data-cat-follow": true,
-                class: "flex w-full items-center gap-3 rounded-xl py-2 {row_left} pr-9 text-left transition-colors duration-150 max-md:rounded-2xl max-md:py-2.5 {ROW_FOCUS} {row_state}",
+                class: "flex w-full items-center gap-2.5 rounded-xl p-2 text-left transition-colors duration-150 md:h-[54px] md:py-0 max-md:rounded-2xl max-md:py-2.5 {ROW_FOCUS} {surface}",
                 onclick: move |_| on_select.call(id.clone()),
                 onkeydown: move |e| {
                     if e.key() == Key::Enter || e.key() == Key::Character(" ".into()) {
@@ -299,77 +319,66 @@ fn BotRow(
                         on_select.call(key_id.clone());
                     }
                 },
-                span { class: "relative flex shrink-0", title: "{bot.name}",
-                    BotMark { color: bot.color.clone(), initial: bot.initial(), size: 44, mark: bot.mark.clone(), state: mood }
+                span { class: "relative -m-[3px] flex shrink-0", title: "{bot.name}",
+                    BotMark { color: bot.color.clone(), initial: bot.initial(), size: 42, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
                     if working {
-                        span { "data-testid": "working-dot", class: "absolute -right-0.5 -bottom-0.5 size-2.5 rounded-full border-2 border-panel bg-success" }
-                    }
-                    if waiting {
-                        span {
-                            "data-testid": "waiting-dot",
-                            role: "status",
-                            "aria-label": "Waiting for you…",
-                            title: "Waiting for you…",
-                            class: "absolute -right-0.5 -bottom-0.5 flex size-4 items-center justify-center overflow-hidden rounded-full border-2 border-panel bg-warning text-[12px] font-black text-panel",
-                            span { "aria-hidden": "true", "!" }
-                        }
+                        span { "data-testid": "working-dot", "aria-hidden": "true", title: "Working", class: "absolute bottom-0.5 right-0.5 size-2 rounded-full bg-success ring-2 ring-[var(--row)]" }
                     }
                 }
                 div { class: "min-w-0 flex-1",
-                    div { class: "flex items-baseline justify-between gap-2",
-                        span { class: "flex min-w-0 grow items-center gap-1.5 truncate text-[15px] font-semibold leading-5 text-ink",
+                    div { class: "flex items-baseline justify-between gap-2 pe-7 group-hover:pe-[3.25rem] group-focus-within:pe-[3.25rem]",
+                        span { class: "flex min-w-0 grow items-center gap-1.5 truncate text-[14px] font-medium leading-5 text-ink",
                             span { class: "truncate", "{bot.name}" }
                             if bot.chief {
-                                // Lucide `Star` (ISC), filled: the Chief of Staff.
-                                svg { "aria-label": "Chief of Staff", "data-chief-star": true, role: "img", width: "13", height: "13", view_box: "0 0 24 24", fill: "currentColor", class: "shrink-0 text-warning",
-                                    title { "Chief of Staff" }
-                                    path { d: "M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.618-2.428a2.122 2.122 0 0 0-1.973 0L6.396 21.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.16 9.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z" }
-                                }
+                                span { class: "shrink-0 text-accent", role: "img", "aria-label": "Chief of Staff", "data-chief-crown": true, Icon { name: "crown", size: 13 } }
                             }
-                        }
-                        if let Some(time) = time {
-                            span { class: "shrink-0 text-[12px] tabular-nums text-ink-secondary", "{time}" }
                         }
                     }
                     if !expanded {
-                        div { class: "flex items-center justify-between gap-2",
-                            span { class: "flex min-w-0 items-center gap-1.5 truncate text-[13px] leading-[18px] {preview_color}",
-                                if let Some(draft) = draft {
-                                    span { dir: "auto", class: "truncate", "data-sidebar-draft": true,
-                                        span { class: "font-semibold text-danger", "Draft: " }
-                                        span { class: "text-ink-secondary", "{draft}" }
-                                    }
-                                } else {
-                                    span { dir: "auto", class: "truncate", "{preview}" }
+                        div { class: "flex items-center gap-2",
+                            if let Some(draft) = draft {
+                                span { dir: "auto", class: "min-w-0 truncate text-[13px] leading-[18px]", "data-sidebar-draft": true,
+                                    span { class: "font-semibold text-danger", "Draft: " }
+                                    span { class: "text-ink-secondary", "{draft}" }
                                 }
-                            }
-                            if bot.unread {
-                                span { class: "size-2 shrink-0 rounded-full bg-accent", "aria-label": "Unread" }
+                            } else if !preview.is_empty() {
+                                span { dir: "auto", class: "min-w-0 truncate text-[13px] leading-[18px] {line_color}", "{preview}" }
                             }
                         }
                     }
+                    if !status.is_empty() {
+                        span { class: "sr-only", "{status}" }
+                    }
                 }
             }
-            if has_list {
+            // Unread, or waiting for you (which wins): one dot at the row's top right, in the spot
+            // its buttons take on hover (`RowDot`).
+            if (bot.unread || waiting) && !expanded {
+                span { "aria-hidden": "true", "data-row-dot": true, class: "pointer-events-none absolute right-[3px] top-1.5 flex size-6 items-center justify-center transition-opacity group-hover:opacity-0 group-focus-within:opacity-0",
+                    span { "data-testid": if waiting { "waiting-dot" } else { "unread-dot" }, class: if waiting { "size-2 shrink-0 rounded-full bg-warning" } else { "size-2 shrink-0 rounded-full bg-accent" } }
+                }
+            }
+            div { class: "absolute right-1.5 top-[27px] flex -translate-y-1/2 items-center gap-0.5",
+                if has_list {
+                    button {
+                        r#type: "button",
+                        "aria-label": "{fold_label}",
+                        "aria-expanded": "{expanded}",
+                        "data-chat-fold": "{bot.id}",
+                        title: if expanded { "Hide chats" } else { "Show chats" },
+                        class: if expanded { "flex size-6 items-center justify-center rounded-md text-ink-secondary hover:bg-ink/[0.06] hover:text-ink" } else { "pointer-events-none flex size-6 items-center justify-center rounded-md text-ink-secondary opacity-0 hover:bg-ink/[0.06] hover:text-ink group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 max-md:pointer-events-auto max-md:opacity-70" },
+                        onclick: move |_| on_fold.call(fold_id.clone()),
+                        Chevron { open: expanded, size: 13 }
+                    }
+                }
                 button {
                     r#type: "button",
-                    "aria-label": "{fold_label}",
-                    "aria-expanded": "{expanded}",
-                    "data-chat-fold": "{bot.id}",
-                    class: "absolute left-0.5 top-[30px] flex size-5 -translate-y-1/2 items-center justify-center rounded text-ink-secondary outline-none hover:text-ink focus-visible:ring-1 focus-visible:ring-accent/60",
-                    onclick: move |_| on_fold.call(fold_id.clone()),
-                    Chevron { open: expanded, size: 13 }
-                }
-            }
-            button {
-                r#type: "button",
-                "aria-label": "New chat with {bot.name}",
-                title: "New chat",
-                "data-row-new-chat": "{bot.id}",
-                class: "pointer-events-none absolute right-1 top-[30px] flex size-7 -translate-y-1/2 items-center justify-center rounded text-ink-secondary opacity-0 hover:bg-raised hover:text-ink group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 max-md:pointer-events-auto max-md:opacity-70",
-                onclick: move |_| on_new_chat.call(new_id.clone()),
-                svg { "aria-hidden": "true", width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                    path { d: "M5 12h14M12 5v14" }
+                    "aria-label": "New chat with {bot.name}",
+                    title: "New chat",
+                    "data-row-new-chat": "{bot.id}",
+                    class: "pointer-events-none flex size-6 items-center justify-center rounded-md text-ink-secondary opacity-0 hover:bg-ink/[0.06] hover:text-ink group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 max-md:pointer-events-auto max-md:opacity-70",
+                    onclick: move |_| on_new_chat.call(new_id.clone()),
+                    Icon { name: "plus", size: 14 }
                 }
             }
             if expanded {
@@ -379,24 +388,187 @@ fn BotRow(
     }
 }
 
-/// Their search glyph (lucide `Search`, ISC), at 15px.
+/// The foot of the sidebar (`SimpleSidebarFooter`): the account button and its menu, and
+/// Connect apps.
 #[component]
-fn SearchIcon() -> Element {
+fn Footer(bot_count: usize, on_open: EventHandler<Open>) -> Element {
+    let mut menu = use_signal(|| false);
+    let state = use_context::<Signal<State>>();
+    // Shown on their rows: how many triggers are on, and whether any apps are connected.
+    let mut triggers = use_signal(|| (0usize, 0usize));
+    let mut apps = use_signal(|| 0usize);
+    use_effect(move || {
+        let _ = state.read().triggers_changed;
+        spawn(async move {
+            if let Ok(found) = crate::api::get("/api/triggers").await {
+                let list = found["triggers"].as_array().cloned().unwrap_or_default();
+                triggers.set((list.len(), list.iter().filter(|t| t["enabled"] == true).count()));
+            }
+        });
+    });
+    use_effect(move || {
+        let _ = state.read().apps_changed;
+        spawn(async move {
+            if let Ok(found) = crate::api::get("/api/apps").await {
+                apps.set(found["servers"].as_array().map(|s| s.iter().filter(|a| a["enabled"] != false).count()).unwrap_or(0));
+            }
+        });
+    });
+    // Pairing other devices is done at home: not on the phone, nor in the Windows app.
+    let at_home = !crate::link::pairs() && !crate::link::has_own();
+    // Taken every time (hooks keep their order), used only in the Windows app.
+    let all_places = use_context::<crate::settings::Places>();
+    let places = crate::link::has_own().then_some(all_places);
+    let mut pairing_home = use_signal(|| false);
+    let mut choose = move |o: Open| {
+        menu.set(false);
+        on_open.call(o);
+    };
+    let where_ = if crate::link::pairs() || places.is_some_and(|p| (p.place)() == crate::link::Place::Home) { "at home" } else { "on this computer" };
+    let bots_line = format!("{bot_count} bot{} {where_}", if bot_count == 1 { "" } else { "s" });
+    let (count, on) = triggers();
+    let label = if apps() > 0 { "Apps" } else { "Connect apps" };
     rsx! {
-        svg {
-            "aria-hidden": "true",
-            class: "shrink-0 text-ink-secondary",
-            width: "15",
-            height: "15",
-            view_box: "0 0 24 24",
-            fill: "none",
-            stroke: "currentColor",
-            stroke_width: "2",
-            stroke_linecap: "round",
-            stroke_linejoin: "round",
-            path { d: "m21 21-4.34-4.34" }
-            circle { cx: "11", cy: "11", r: "8" }
+        div { "data-sidebar-footer": "simple", class: "relative shrink-0 px-4 pb-4 pt-2",
+            if let Some(places) = places {
+                if let Some(notice) = (places.notice)() {
+                    p { role: "status", class: "mb-2 px-1 text-[12px] leading-[17px] text-warning", "{notice}" }
+                }
+            }
+            div { class: "flex items-center gap-2",
+                button {
+                    r#type: "button",
+                    "data-sidebar-account": true,
+                    "aria-label": "Catbot menu",
+                    "aria-haspopup": "menu",
+                    "aria-expanded": "{menu()}",
+                    title: "Catbot",
+                    class: "shrink-0 rounded-full focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus",
+                    onclick: move |_| menu.toggle(),
+                    span { class: if menu() { "relative flex size-9 items-center justify-center rounded-full ring-2 ring-ink/15 transition-shadow" } else { "relative flex size-9 items-center justify-center rounded-full ring-2 ring-transparent transition-shadow hover:ring-ink/10" },
+                        span { class: "flex size-9 items-center justify-center rounded-full bg-raised text-ink-secondary ring-1 ring-inset ring-ink/[0.04]",
+                            Icon { name: "user", size: 16 }
+                        }
+                    }
+                }
+                button {
+                    r#type: "button",
+                    "data-sidebar-nav": "apps",
+                    class: "group/apps flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-full pl-4 pr-3 text-[14px] font-medium leading-5 text-ink {ELEVATED}",
+                    onclick: move |_| on_open.call(Open::Settings("apps")),
+                    span { "data-apps-label": true, class: "shrink-0 whitespace-nowrap", "{label}" }
+                    // Faces of popular apps, grey until hovered (`SidebarConnectApps`): their
+                    // initials, not their logos.
+                    span { "aria-hidden": "true", "data-app-faces": true, class: "flex h-[22px] min-w-0 items-center gap-1 overflow-hidden px-1 opacity-60 grayscale motion-safe:transition-[filter,opacity] group-hover/apps:opacity-100 group-hover/apps:grayscale-0",
+                        for (letter, tint, fan) in [("G", "text-[#EA4335]", "motion-safe:group-hover/apps:-translate-x-[3px] motion-safe:group-hover/apps:-rotate-[8deg]"), ("S", "text-[#611F69]", ""), ("N", "text-ink", "motion-safe:group-hover/apps:translate-x-[3px] motion-safe:group-hover/apps:rotate-[8deg]")] {
+                            span { key: "{letter}", class: "flex size-[18px] shrink-0 items-center justify-center rounded-md text-[11px] font-bold leading-none motion-safe:transition-transform motion-safe:duration-150 group-hover/apps:bg-white {tint} {fan}", "{letter}" }
+                        }
+                    }
+                }
+            }
+            if menu() {
+                div { class: "fixed inset-0 z-40", onclick: move |_| menu.set(false) }
+                div { role: "menu", "aria-label": "Catbot", "data-sidebar-menu": true, class: "absolute bottom-full left-3 z-50 mb-1 w-[272px] max-w-[calc(100vw-1.5rem)] {MENU_SHEET}",
+                    button { r#type: "button", role: "menuitem", "data-menu-key": "catbot", class: "{MENU_ROW} min-h-12",
+                        onclick: move |_| choose(Open::Settings("general")),
+                        span { class: "flex size-8 shrink-0 items-center justify-center rounded-full bg-raised text-ink-secondary", Icon { name: "laptop", size: 16 } }
+                        div { class: "flex min-w-0 flex-1 flex-col",
+                            span { class: "truncate font-medium leading-[18px]", "Catbot" }
+                            span { class: "truncate text-[12px] leading-4 text-ink-secondary", "{bots_line}" }
+                        }
+                        span { class: "shrink-0 text-ink-secondary", Icon { name: "chevron-right", size: 14 } }
+                    }
+                    div { role: "separator", class: MENU_SEPARATOR }
+                    if at_home {
+                        button { r#type: "button", role: "menuitem", "data-open-devices": true, class: MENU_ROW,
+                            onclick: move |_| choose(Open::Devices),
+                            MenuIcon { name: "phone" }
+                            div { class: "flex min-w-0 flex-1 flex-col",
+                                span { "Phone & devices" }
+                                span { class: "truncate text-[12px] leading-4 text-ink-secondary", "Reach your bots away from home" }
+                            }
+                        }
+                    }
+                    button { r#type: "button", role: "menuitem", "data-open-settings": true, class: MENU_ROW,
+                        onclick: move |_| choose(Open::Settings("general")),
+                        MenuIcon { name: "settings" }
+                        span { class: "flex-1", "Settings" }
+                        span { class: "shrink-0 text-[12px] text-ink-secondary", "Ctrl+," }
+                    }
+                    div { role: "separator", class: MENU_SEPARATOR }
+                    button { r#type: "button", role: "menuitem", "data-open-triggers": true, class: MENU_ROW,
+                        onclick: move |_| choose(Open::Triggers),
+                        MenuIcon { name: "zap" }
+                        span { class: "flex-1", "Triggers" }
+                        if count > 0 {
+                            span { class: "shrink-0 text-[13px] tabular-nums text-ink-secondary", "{on} on" }
+                        }
+                    }
+                    button { r#type: "button", role: "menuitem", "data-open-memory": true, class: MENU_ROW,
+                        onclick: move |_| choose(Open::Memory),
+                        MenuIcon { name: "book" }
+                        span { class: "flex-1", "Memory" }
+                    }
+                    button { r#type: "button", role: "menuitem", "data-open-usage": true, class: MENU_ROW,
+                        onclick: move |_| choose(Open::Usage),
+                        MenuIcon { name: "gauge" }
+                        span { class: "flex-1", "Usage" }
+                    }
+                    button { r#type: "button", role: "menuitem", "data-open-pages": true, class: MENU_ROW,
+                        onclick: move |_| choose(Open::Settings("pages")),
+                        MenuIcon { name: "rocket" }
+                        span { class: "flex-1", "Published pages" }
+                    }
+                    if let Some(places) = places {
+                        div { role: "separator", class: MENU_SEPARATOR }
+                        div { class: "px-2 pb-1 pt-2 text-[12px] font-medium leading-4 text-ink-secondary", "Switch place" }
+                        for (place, name, glyph, data) in [(crate::link::Place::ThisPc, "This PC", "laptop", "this-pc"), (crate::link::Place::Home, "Home", "home", "home")] {
+                            button {
+                                key: "{name}",
+                                r#type: "button",
+                                role: "menuitemradio",
+                                "aria-checked": "{(places.place)() == place}",
+                                "data-place": data,
+                                class: MENU_ROW,
+                                onclick: move |_| {
+                                    menu.set(false);
+                                    if place == crate::link::Place::Home && crate::link::current().is_none() {
+                                        pairing_home.set(true);
+                                    } else {
+                                        go_to(places, place);
+                                    }
+                                },
+                                MenuIcon { name: glyph }
+                                span { class: "flex-1", "{name}" }
+                                if (places.place)() == place {
+                                    span { class: "shrink-0 text-accent", Icon { name: "check", size: 15 } }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(places) = places {
+                if pairing_home() {
+                    crate::pair::PairScreen {
+                        removed: false,
+                        computer: true,
+                        on_cancel: move |_| pairing_home.set(false),
+                        on_paired: move |_| {
+                            pairing_home.set(false);
+                            go_to(places, crate::link::Place::Home);
+                        },
+                    }
+                }
+            }
         }
+    }
+}
+
+#[component]
+fn MenuIcon(name: &'static str) -> Element {
+    rsx! {
+        span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name, size: 16 } }
     }
 }
 
@@ -407,44 +579,38 @@ fn go_to(mut places: crate::settings::Places, place: crate::link::Place) {
     places.place.set(place);
 }
 
-/// The Windows app's switch between its own bots and home's.
+/// The sidebar's glyphs: Lucide icons (ISC licence), by name.
 #[component]
-fn PlaceSwitch(places: crate::settings::Places, on_pair: EventHandler<()>) -> Element {
-    use crate::link::Place;
-    let here = (places.place)();
-    let tab = |on: bool| {
-        if on { "flex-1 rounded-full bg-panel px-3 py-1 font-medium text-ink shadow-sm" } else { "flex-1 rounded-full px-3 py-1 text-ink-secondary hover:text-ink" }
+pub fn Icon(name: &'static str, size: u32, #[props(default)] filled: bool) -> Element {
+    let paths: &[&str] = match name {
+        "search" => &["m21 21-4.34-4.34", "M19 11a8 8 0 1 1-16 0 8 8 0 0 1 16 0"],
+        "plus" => &["M5 12h14", "M12 5v14"],
+        "x" => &["M18 6 6 18", "m6 6 12 12"],
+        "bot" => &["M12 8V4H8", "M6 8h12a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2z", "M2 14h2", "M20 14h2", "M15 13v2", "M9 13v2"],
+        "hash" => &["M4 9h16", "M4 15h16", "M10 3 8 21", "M16 3l-2 18"],
+        "crown" => &["M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z", "M5 21h14"],
+        "user" => &["M17 8a5 5 0 1 1-10 0 5 5 0 0 1 10 0z", "M20 21a8 8 0 0 0-16 0"],
+        "laptop" => &["M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z", "M20.054 15.987H3.946"],
+        "phone" => &["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z", "M12 18h.01"],
+        "settings" => &[
+            "M9.671 4.136a2.34 2.34 0 0 1 4.659 0 2.34 2.34 0 0 0 3.319 1.915 2.34 2.34 0 0 1 2.33 4.033 2.34 2.34 0 0 0 0 3.831 2.34 2.34 0 0 1-2.33 4.033 2.34 2.34 0 0 0-3.319 1.915 2.34 2.34 0 0 1-4.659 0 2.34 2.34 0 0 0-3.32-1.915 2.34 2.34 0 0 1-2.33-4.033 2.34 2.34 0 0 0 0-3.831A2.34 2.34 0 0 1 6.35 6.051a2.34 2.34 0 0 0 3.319-1.915",
+            "M15 12a3 3 0 1 1-6 0 3 3 0 0 1 6 0z",
+        ],
+        "zap" => &["M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z"],
+        "book" => &["M12 7v14", "M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"],
+        "gauge" => &["m12 14 4-4", "M3.34 19a10 10 0 1 1 17.32 0"],
+        "rocket" => &["M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z", "m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z", "M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0", "M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"],
+        "home" => &["M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8", "M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
+        "check" => &["M20 6 9 17l-5-5"],
+        "chevron-right" => &["m9 18 6-6-6-6"],
+        _ => &[],
     };
+    let fill = if filled { "currentColor" } else { "none" };
+    let stroke_width = if filled { "1.5" } else { "2" };
     rsx! {
-        div { class: "px-3 pb-2",
-            div { role: "tablist", "aria-label": "Which Catbot", "data-place-switch": true, class: "flex rounded-full bg-raised p-0.5 text-[13px]",
-                button {
-                    r#type: "button",
-                    role: "tab",
-                    "aria-selected": here == Place::ThisPc,
-                    "data-place": "this-pc",
-                    class: tab(here == Place::ThisPc),
-                    onclick: move |_| go_to(places, Place::ThisPc),
-                    "This PC"
-                }
-                button {
-                    r#type: "button",
-                    role: "tab",
-                    "aria-selected": here == Place::Home,
-                    "data-place": "home",
-                    class: tab(here == Place::Home),
-                    onclick: move |_| {
-                        if crate::link::current().is_some() {
-                            go_to(places, Place::Home);
-                        } else {
-                            on_pair.call(());
-                        }
-                    },
-                    "Home"
-                }
-            }
-            if let Some(notice) = (places.notice)() {
-                p { role: "status", class: "mt-2 px-1 text-[12px] leading-[17px] text-warning", "{notice}" }
+        svg { "aria-hidden": "true", width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "{fill}", stroke: "currentColor", stroke_width: "{stroke_width}", stroke_linecap: "round", stroke_linejoin: "round",
+            for d in paths.iter() {
+                path { d: "{d}" }
             }
         }
     }

@@ -178,14 +178,24 @@ fn file() -> Option<std::path::PathBuf> {
 
 /// Settings → Notifications.
 #[component]
-pub fn SettingsDialog(on_close: EventHandler<()>) -> Element {
+pub fn SettingsDialog(on_close: EventHandler<()>, #[props(default)] start: String) -> Element {
     let mut prefs = use_context::<Signal<Prefs>>();
     let mut change = move |update: fn(&mut Prefs)| {
         update(&mut prefs.write());
         save(*prefs.peek());
     };
     let current = prefs();
-    let mut page = use_signal(|| "general");
+    // The page it opens on (the sidebar's Connect apps opens Apps).
+    let mut page = use_signal(move || match start.as_str() {
+        "chief" => "chief",
+        "team" => "team",
+        "skills" => "skills",
+        "email" => "email",
+        "pages" => "pages",
+        "apps" => "apps",
+        "computers" => "computers",
+        _ => "general",
+    });
     let tab = |on: bool| if on { "rounded-lg bg-raised px-3 py-1.5 text-[13px] font-semibold text-ink" } else { "rounded-lg px-3 py-1.5 text-[13px] text-ink-secondary hover:bg-raised/60 hover:text-ink" };
     rsx! {
         div { class: "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4", onclick: move |_| on_close.call(()),
