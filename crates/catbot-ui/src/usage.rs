@@ -9,7 +9,8 @@ use crate::api;
 use crate::chat::{clock, day, js_now, month_day, parse_time, weekday};
 
 #[component]
-pub fn UsageDialog(on_close: EventHandler<()>) -> Element {
+/// `embedded`: as the Settings window's Spending page, without its own frame.
+pub fn UsageDialog(on_close: EventHandler<()>, #[props(default)] embedded: bool) -> Element {
     let mut plans = use_signal(|| None::<Result<Value, String>>);
     let mut period = use_signal(|| "this-month".to_string());
     let mut by = use_signal(|| "bot".to_string());
@@ -34,14 +35,14 @@ pub fn UsageDialog(on_close: EventHandler<()>) -> Element {
     });
 
     rsx! {
-        div { class: "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 max-md:p-0", onclick: move |_| on_close.call(()),
+        div { class: if embedded { "contents" } else { "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 max-md:p-0" }, onclick: move |_| if !embedded { on_close.call(()) },
             div {
-                role: "dialog",
+                role: if embedded { "region" } else { "dialog" },
                 "aria-label": "Usage",
                 "data-usage-dialog": true,
-                class: "flex max-h-[88vh] w-full max-w-[760px] flex-col overflow-hidden rounded-2xl bg-panel shadow-2xl max-md:h-full max-md:max-h-none max-md:rounded-none",
+                class: if embedded { "flex flex-col" } else { "flex max-h-[88vh] w-full max-w-[760px] flex-col overflow-hidden rounded-2xl bg-panel shadow-2xl max-md:h-full max-md:max-h-none max-md:rounded-none" },
                 onclick: move |e| e.stop_propagation(),
-                div { class: "flex h-12 shrink-0 items-center gap-1 border-b-[0.5px] border-edge pl-5 pr-2",
+                div { class: if embedded { "hidden" } else { "flex h-12 shrink-0 items-center gap-1 border-b-[0.5px] border-edge pl-5 pr-2" },
                     span { class: "min-w-0 flex-1 text-[15px] font-semibold text-ink", "Usage" }
                     button { r#type: "button", "aria-label": "Refresh", title: "Refresh", class: ICON_BUTTON, onclick: move |_| *refreshed.write() += 1,
                         // Lucide `RefreshCw` (ISC).
@@ -54,7 +55,7 @@ pub fn UsageDialog(on_close: EventHandler<()>) -> Element {
                     }
                     button { r#type: "button", "aria-label": "Close", class: ICON_BUTTON, onclick: move |_| on_close.call(()), "×" }
                 }
-                div { class: "min-h-0 flex-1 overflow-y-auto px-5 py-4",
+                div { class: if embedded { "" } else { "min-h-0 flex-1 overflow-y-auto px-5 py-4" },
                     // The limits: the main thing.
                     match plans() {
                         None => rsx! { p { class: "text-[13px] text-ink-tertiary", "Reading the limits…" } },

@@ -53,7 +53,8 @@ fn seen(at: Option<&str>) -> String {
 }
 
 #[component]
-pub fn DevicesDialog(on_close: EventHandler<()>) -> Element {
+/// `embedded`: as a page of the Settings window, without its own frame.
+pub fn DevicesDialog(on_close: EventHandler<()>, #[props(default)] embedded: bool) -> Element {
     let state = use_context::<Signal<State>>();
     let mut overview = use_signal(|| None::<Value>);
     let mut problem = use_signal(|| None::<String>);
@@ -121,14 +122,14 @@ pub fn DevicesDialog(on_close: EventHandler<()>) -> Element {
     };
     let countdown = format!("{}:{:02}", left() / 60, left() % 60);
     rsx! {
-        div { class: "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4", onclick: move |_| on_close.call(()),
+        div { class: if embedded { "contents" } else { "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" }, onclick: move |_| if !embedded { on_close.call(()) },
             div {
-                role: "dialog",
+                role: if embedded { "region" } else { "dialog" },
                 "aria-label": "Devices",
                 "data-devices-dialog": true,
-                class: "max-h-[90vh] w-full max-w-[460px] overflow-y-auto rounded-2xl bg-panel p-5 shadow-2xl",
+                class: if embedded { "" } else { "max-h-[90vh] w-full max-w-[460px] overflow-y-auto rounded-2xl bg-panel p-5 shadow-2xl" },
                 onclick: move |e| e.stop_propagation(),
-                div { class: "mb-3 flex items-center justify-between",
+                div { class: if embedded { "hidden" } else { "mb-3 flex items-center justify-between" },
                     span { class: "text-[17px] font-semibold text-ink", "Devices away from home" }
                     button { r#type: "button", "aria-label": "Close", class: ICON_BUTTON, onclick: move |_| on_close.call(()),
                         svg { "aria-hidden": "true", width: "18", height: "18", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round",

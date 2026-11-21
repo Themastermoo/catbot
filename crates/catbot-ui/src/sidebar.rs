@@ -68,10 +68,19 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
         });
     });
     let q = query.read().trim().to_lowercase();
+    let look = use_context::<Signal<crate::looks::Looks>>();
+    let show_chief = look.read().show_chief;
+    let tint = crate::looks::tint_color(&look.read().tint);
     let all = bots.read();
-    // The Chief stands apart as a tile while nothing's being searched for.
-    let chief = all.iter().find(|b| b.chief && b.channel.is_none()).cloned().filter(|_| q.is_empty());
-    let shown: Vec<Bot> = all.iter().filter(|b| b.matches(&query.read()) && !chief.as_ref().is_some_and(|c| c.id == b.id)).cloned().collect();
+    // The Chief stands apart as a tile while nothing's being searched for. Hidden in Settings,
+    // only a search shows it.
+    let the_chief = all.iter().find(|b| b.chief && b.channel.is_none()).cloned();
+    let chief = the_chief.clone().filter(|_| q.is_empty() && show_chief);
+    let shown: Vec<Bot> = all
+        .iter()
+        .filter(|b| b.matches(&query.read()) && !the_chief.as_ref().is_some_and(|c| c.id == b.id && q.is_empty()))
+        .cloned()
+        .collect();
     let empty = all.is_empty();
     drop(all);
     // On a phone the list gives way to the open chat.
@@ -90,6 +99,10 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             "aria-label": "Bots",
             "data-sidebar": true,
             class: "relative flex h-full w-[280px] shrink-0 flex-col border-r-[0.5px] border-edge bg-panel max-md:w-full max-md:border-r-0 max-md:bg-app {phone}",
+            // The sidebar's colour (Settings › This computer): faded into its top.
+            if let Some(color) = tint {
+                div { "aria-hidden": "true", "data-sidebar-tint": true, class: "pointer-events-none absolute inset-x-0 top-0 h-[180px]", style: "background: linear-gradient(to bottom, color-mix(in srgb, {color} 22%, transparent), transparent)" }
+            }
             div { "data-sidebar-top-row": true, class: "relative flex h-[60px] shrink-0 items-start pl-4 pr-4 pt-3",
                 div { class: "min-w-0 flex-1" }
                 div { "data-sidebar-top-buttons": true, class: "relative flex shrink-0 items-center gap-2.5",
@@ -602,6 +615,14 @@ pub fn Icon(name: &'static str, size: u32, #[props(default)] filled: bool) -> El
         "rocket" => &["M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z", "m12 15-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z", "M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0", "M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"],
         "home" => &["M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8", "M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"],
         "check" => &["M20 6 9 17l-5-5"],
+        "sparkles" => &["M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z", "M20 3v4", "M22 5h-4"],
+        "puzzle" => &["M15.39 4.39a1 1 0 0 0 1.68-.474 2.5 2.5 0 1 1 3.014 3.015 1 1 0 0 0-.474 1.68l1.683 1.682a2.414 2.414 0 0 1 0 3.414L19.61 15.39a1 1 0 0 1-1.68-.474 2.5 2.5 0 1 0-3.014 3.015 1 1 0 0 1 .474 1.68l-1.683 1.682a2.414 2.414 0 0 1-3.414 0L8.61 19.61a1 1 0 0 0-1.68.474 2.5 2.5 0 1 1-3.014-3.015 1 1 0 0 0 .474-1.68l-1.683-1.682a2.414 2.414 0 0 1 0-3.414L4.39 8.61a1 1 0 0 1 1.68.474 2.5 2.5 0 1 0 3.014-3.015 1 1 0 0 1-.474-1.68l1.683-1.682a2.414 2.414 0 0 1 3.414 0z"],
+        "monitor" => &["M4 3h16a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z", "M8 21h8", "M12 17v4"],
+        "coins" => &["M16 8a6 6 0 1 1-12 0 6 6 0 0 1 12 0z", "M18.09 10.37A6 6 0 1 1 10.34 18", "M7 6h1v4", "m16.71 13.88.7.71-2.82 2.82"],
+        "arrows" => &["M8 3 4 7l4 4", "M4 7h16", "m16 21 4-4-4-4", "M20 17H4"],
+        "mail" => &["m22 7-8.991 5.727a2 2 0 0 1-2.009 0L2 7", "M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z"],
+        "handoff" => &["M18 8L22 12L18 16", "M2 12H22", "M6 4v16"],
+        "palette" => &["M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z", "M14 7.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z", "M18 11.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z", "M7 10.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z", "M9 6.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z"],
         "chevron-right" => &["m9 18 6-6-6-6"],
         _ => &[],
     };

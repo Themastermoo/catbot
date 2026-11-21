@@ -176,100 +176,42 @@ fn file() -> Option<std::path::PathBuf> {
     }
 }
 
-/// Settings → Notifications.
+/// Settings: the grouped window (`prefs.rs`), opening on `start` (a page's key).
 #[component]
 pub fn SettingsDialog(on_close: EventHandler<()>, #[props(default)] start: String) -> Element {
+    rsx! { crate::prefs::SettingsWindow { on_close, start } }
+}
+
+/// Settings › This app › Notifications: when this computer tells you about a bot.
+#[component]
+pub fn NotificationSettings() -> Element {
     let mut prefs = use_context::<Signal<Prefs>>();
     let mut change = move |update: fn(&mut Prefs)| {
         update(&mut prefs.write());
         save(*prefs.peek());
     };
     let current = prefs();
-    // The page it opens on (the sidebar's Connect apps opens Apps).
-    let mut page = use_signal(move || match start.as_str() {
-        "chief" => "chief",
-        "team" => "team",
-        "skills" => "skills",
-        "email" => "email",
-        "pages" => "pages",
-        "apps" => "apps",
-        "computers" => "computers",
-        _ => "general",
-    });
-    let tab = |on: bool| if on { "rounded-lg bg-raised px-3 py-1.5 text-[13px] font-semibold text-ink" } else { "rounded-lg px-3 py-1.5 text-[13px] text-ink-secondary hover:bg-raised/60 hover:text-ink" };
     rsx! {
-        div { class: "fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4", onclick: move |_| on_close.call(()),
-            div {
-                role: "dialog",
-                "aria-label": "Settings",
-                "data-app-settings": true,
-                class: "flex max-h-[88vh] w-full max-w-[620px] flex-col gap-4 overflow-y-auto rounded-2xl bg-panel p-5 shadow-2xl",
-                onclick: move |e| e.stop_propagation(),
-                div { class: "flex items-center",
-                    span { class: "min-w-0 flex-1 text-[17px] font-semibold text-ink", "Settings" }
-                    button {
-                        r#type: "button",
-                        "aria-label": "Close",
-                        class: "flex size-8 items-center justify-center rounded-md text-ink-secondary hover:bg-control hover:text-ink",
-                        onclick: move |_| on_close.call(()),
-                        "×"
-                    }
+        div { class: "overflow-hidden rounded-xl bg-composer ring-1 ring-inset ring-ink/[0.07]", "data-notification-settings": true,
+            div { class: "flex items-center gap-3 px-4 py-3",
+                span { class: "flex min-w-0 flex-1 flex-col",
+                    span { class: "text-[14px] leading-5 text-ink", "When a bot finishes" }
+                    span { class: "text-[12px] leading-[17px] text-ink-secondary", "Shown while Catbot is open, except for the chat you're looking at." }
                 }
-                div { role: "tablist", class: "flex shrink-0 gap-1 overflow-x-auto whitespace-nowrap", "data-settings-pages": true,
-                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"general\"}", class: tab(page() == "general"), onclick: move |_| page.set("general"), "General" }
-                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"chief\"}", "data-settings-chief": true, class: tab(page() == "chief"), onclick: move |_| page.set("chief"), "Chief of Staff" }
-                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"team\"}", "data-settings-team": true, class: tab(page() == "team"), onclick: move |_| page.set("team"), "Team" }
-                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"skills\"}", "data-settings-skills": true, class: tab(page() == "skills"), onclick: move |_| page.set("skills"), "Skills" }
-                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"email\"}", "data-settings-email": true, class: tab(page() == "email"), onclick: move |_| page.set("email"), "Email" }
-                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"pages\"}", "data-settings-pages-list": true, class: tab(page() == "pages"), onclick: move |_| page.set("pages"), "Pages" }
-                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"apps\"}", "data-settings-apps": true, class: tab(page() == "apps"), onclick: move |_| page.set("apps"), "Apps" }
-                    button { r#type: "button", role: "tab", "aria-selected": "{page() == \"computers\"}", "data-settings-computers": true, class: tab(page() == "computers"), onclick: move |_| page.set("computers"), "Computers" }
+                crate::settings::Switch {
+                    checked: current.finished,
+                    disabled: false,
+                    label: "Notify when a bot finishes".to_string(),
+                    on_toggle: move |_| change(|p| p.finished = !p.finished),
                 }
-                if page() == "computers" {
-                    crate::computers::ComputersSettings {}
-                }
-                if page() == "apps" {
-                    crate::apps::AppsSettings {}
-                }
-                if page() == "pages" {
-                    crate::pages::PagesList {}
-                }
-                if page() == "email" {
-                    crate::email::EmailSettings {}
-                }
-                if page() == "skills" {
-                    crate::skills::SkillsLibrary {}
-                }
-                if page() == "team" {
-                    crate::teams::TeamFiles {}
-                }
-                if page() == "chief" {
-                    crate::chief::ChiefOptions {}
-                }
-                if page() == "general" && AVAILABLE { section { class: "flex flex-col gap-3", "data-notification-settings": true,
-                    h2 { class: "text-[13px] font-semibold uppercase tracking-wide text-ink-tertiary", "Notifications" }
-                    p { class: "text-[13px] text-ink-secondary", "Shown by this computer while Catbot is open, except for the chat you're looking at." }
-                    div { class: "flex items-center gap-3",
-                        span { class: "min-w-0 flex-1 text-[14px] text-ink", "When a bot finishes" }
-                        crate::settings::Switch {
-                            checked: current.finished,
-                            disabled: false,
-                            label: "Notify when a bot finishes".to_string(),
-                            on_toggle: move |_| change(|p| p.finished = !p.finished),
-                        }
-                    }
-                    div { class: "flex items-center gap-3",
-                        span { class: "min-w-0 flex-1 text-[14px] text-ink", "When a bot asks for approval" }
-                        crate::settings::Switch {
-                            checked: current.asking,
-                            disabled: false,
-                            label: "Notify when a bot asks for approval".to_string(),
-                            on_toggle: move |_| change(|p| p.asking = !p.asking),
-                        }
-                    }
-                } }
-                if page() == "general" {
-                    crate::handoffs::HandoffSettings {}
+            }
+            div { class: "flex items-center gap-3 border-t border-hairline/50 px-4 py-3",
+                span { class: "min-w-0 flex-1 text-[14px] leading-5 text-ink", "When a bot asks for approval" }
+                crate::settings::Switch {
+                    checked: current.asking,
+                    disabled: false,
+                    label: "Notify when a bot asks for approval".to_string(),
+                    on_toggle: move |_| change(|p| p.asking = !p.asking),
                 }
             }
         }

@@ -108,7 +108,7 @@ fn write(saved: &str) {
 
 /// Where the apps keep drafts.
 #[cfg(not(target_arch = "wasm32"))]
-fn file() -> Option<std::path::PathBuf> {
+pub(crate) fn file() -> Option<std::path::PathBuf> {
     use std::path::PathBuf;
     if let Some(file) = std::env::var_os("CATBOT_DRAFTS_FILE") {
         return Some(file.into());

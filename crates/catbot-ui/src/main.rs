@@ -40,6 +40,8 @@ mod memory;
 mod settings;
 mod usage;
 mod sidebar;
+mod looks;
+mod prefs;
 
 use dioxus::prelude::*;
 
@@ -76,15 +78,6 @@ fn main() {
     dioxus::launch(Root);
 }
 
-/// Follows the system's light or dark setting, live, as OpenMausBot does by default:
-/// Daylight when light, Midnight when dark (`src/lib/skins.ts`).
-const FOLLOW_SYSTEM_SKIN: &str = r#"
-    const dark = matchMedia("(prefers-color-scheme: dark)");
-    const apply = () => { document.documentElement.dataset.skin = dark.matches ? "midnight" : "daylight"; };
-    apply();
-    dark.addEventListener("change", apply);
-"#;
-
 /// Ctrl+Shift+N (⌘⇧N on a Mac) starts a new chat with the open bot, as in OpenMausBot, by
 /// pressing the chat header's New chat button. (A browser may keep the keys for itself: Chrome
 /// opens an incognito window; the desktop app gets them.)
@@ -100,8 +93,9 @@ const NEW_CHAT_KEY: &str = r#"
 
 #[component]
 fn Root() -> Element {
-    use_hook(|| {
-        document::eval(FOLLOW_SYSTEM_SKIN);
+    let looks = use_context_provider(|| Signal::new(looks::load()));
+    use_hook(move || {
+        looks::apply_skin(&looks.peek().skin);
         document::eval(mascots::MASCOT_LIFE);
         document::eval(NEW_CHAT_KEY);
     });

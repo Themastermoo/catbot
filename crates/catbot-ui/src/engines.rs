@@ -158,6 +158,36 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
     }
 }
 
+/// How to set up or manage one AI (stage 19.2, Settings › AI): the same box a bot's settings
+/// show for it, chosen by its kind.
+#[component]
+pub fn EngineSetup(engine: Value) -> Element {
+    match engine["kind"].as_str() {
+        Some("api") => rsx! { KeyBox { engine } },
+        Some("agent") => rsx! { AgentBox { engine } },
+        Some("codex") => rsx! { CodexBox { engine } },
+        Some("pi") => rsx! { PiBox { engine, listed: None } },
+        _ => {
+            let (install, sign_in) = (str_of(&engine, "install"), str_of(&engine, "signIn"));
+            rsx! {
+                div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink",
+                    if engine["ready"] == true {
+                        p { "Ready. Bots on it use this computer's own sign-in." }
+                    } else {
+                        p { "Install it on this computer, as the same user that runs Catbot:" }
+                        if !install.is_empty() {
+                            code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{install}" }
+                        }
+                        if !sign_in.is_empty() {
+                            p { class: "mt-1", "then sign it in: " code { class: "rounded bg-inset px-1 font-mono text-[12px]", "{sign_in}" } }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Pi (12.4.4): installed or not, and signed in to a provider of the person's own. Its models
 /// are the ones Pi has a sign-in or key for (`listed`, once Catbot has asked). Commands and edits
 /// stop for a yes on a card, through Catbot's extension.
