@@ -78,6 +78,16 @@ def update(session, u):
 def chunk(session, text, kind="agent_message_chunk"):
     update(session, {"sessionUpdate": kind, "content": {"type": "text", "text": text}})
 
+# Its thinking levels (ACP's thought_level config option); a level set is logged.
+def options(level):
+    return [{"id": "reasoning", "name": "Thinking", "category": "thought_level", "type": "select", "currentValue": level,
+             "options": [{"value": "low", "name": "Light"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "Deep"}]}]
+
+def logged(entry):
+    if os.environ.get("FAKE_ACP_LOG"):
+        with open(os.environ["FAKE_ACP_LOG"], "a") as log:
+            log.write(json.dumps(entry) + "\n")
+
 for line in sys.stdin:
     msg = json.loads(line)
     method, rid, params = msg.get("method"), msg.get("id"), msg.get("params", {})
@@ -94,10 +104,13 @@ for line in sys.stdin:
     elif method == "session/new" and os.environ.get("FAKE_ACP_META") and not os.path.exists(os.environ["FAKE_ACP_APPROVE"]):
         send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "log in to Muse before opening a session"}})
     elif method == "session/new":
-        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fake-session-1"}})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "fake-session-1", "configOptions": options("medium")}})
+    elif method == "session/set_config_option":
+        logged({"set": params.get("configId"), "value": params.get("value"), "session": params.get("sessionId")})
+        send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": options(params.get("value"))}})
     elif method == "session/load":
         if params.get("sessionId", "").startswith("fake-session"):
-            send({"jsonrpc": "2.0", "id": rid, "result": {}})
+            send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": options("medium")}})
         else:
             send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "no such session"}})
     elif method == "session/prompt":

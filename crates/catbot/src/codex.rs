@@ -183,6 +183,8 @@ async fn initialize(link: &Link) -> Result<(), String> {
 // ---- a turn ---------------------------------------------------------------------------------
 
 pub struct CodexTurn {
+    /// The reasoning effort for this turn (`turn/start`'s `effort`): None, the model's default.
+    pub effort: Option<String>,
     pub program: PathBuf,
     /// Catbot's Codex home, with the sign-in linked in.
     pub home: PathBuf,
@@ -351,6 +353,9 @@ async fn converse(turn: &CodexTurn, link: &Link, tx: &mpsc::Sender<Event>, mut d
     let mut ask = json!({ "threadId": thread, "input": input });
     if !turn.model.is_empty() {
         ask["model"] = json!(turn.model);
+    }
+    if let Some(effort) = &turn.effort {
+        ask["effort"] = json!(effort);
     }
     let started = link.call("turn/start", ask, Some(START_TIME)).await?;
     let id = started["turn"]["id"].as_str().unwrap_or_default().to_string();
@@ -659,19 +664,48 @@ pub async fn account(program: &Path) -> Result<Value, String> {
     })
 }
 
-/// The models Codex offers this account: `[{ id, label }]`.
+/// The models Codex offers this account: `[{ id, label, efforts, defaultEffort, isDefault }]`,
+/// `efforts` being the reasoning levels the model takes. Asked once every five minutes at most.
 pub async fn models(program: &Path, catbot_home: &Path) -> Result<Vec<Value>, String> {
+    static LISTED: Mutex<Option<(std::time::Instant, Vec<Value>)>> = Mutex::new(None);
+    if let Some((at, models)) = LISTED.lock().expect("models lock").as_ref()
+        && at.elapsed() < Duration::from_secs(300)
+    {
+        return Ok(models.clone());
+    }
     let home = bots_home(catbot_home);
     link_sign_in(&home).map_err(|e| e.to_string())?;
     let talk = Talk::open(program, &home).await?;
     let listed = talk.call("model/list", json!({})).await?;
-    Ok(listed["data"]
+    let models = list_models(&listed);
+    *LISTED.lock().expect("models lock") = Some((std::time::Instant::now(), models.clone()));
+    Ok(models)
+}
+
+/// `model/list`'s answer, as Catbot shows it. Its levels come as words or as
+/// `{ reasoningEffort, description }`.
+pub fn list_models(listed: &Value) -> Vec<Value> {
+    listed["data"]
         .as_array()
         .into_iter()
         .flatten()
         .filter(|m| m["hidden"] != true)
-        .filter_map(|m| Some(json!({ "id": m["id"].as_str()?, "label": m["displayName"].as_str().or(m["id"].as_str())? })))
-        .collect())
+        .filter_map(|m| {
+            let efforts: Vec<&str> = m["supportedReasoningEfforts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.as_str().or(e["reasoningEffort"].as_str()).or(e["effort"].as_str()))
+                .collect();
+            Some(json!({
+                "id": m["id"].as_str()?,
+                "label": m["displayName"].as_str().or(m["id"].as_str())?,
+                "efforts": efforts,
+                "defaultEffort": m["defaultReasoningEffort"],
+                "isDefault": m["isDefault"] == true,
+            }))
+        })
+        .collect()
 }
 
 /// A sign-in under way: what to show the person, and the talk that waits for it to finish.
@@ -740,6 +774,22 @@ mod tests {
     }
 
     #[test]
+    fn models_come_with_their_reasoning_levels() {
+        let listed = json!({ "data": [
+            { "id": "gpt-5.6-sol", "displayName": "GPT-5.6 Sol", "isDefault": true, "defaultReasoningEffort": "medium",
+              "supportedReasoningEfforts": [{ "reasoningEffort": "low", "description": "Fast" }, { "reasoningEffort": "medium" }, { "reasoningEffort": "xhigh" }] },
+            { "id": "old", "supportedReasoningEfforts": ["low", "high"] },
+            { "id": "secret", "hidden": true }
+        ] });
+        let models = list_models(&listed);
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0]["efforts"], json!(["low", "medium", "xhigh"]));
+        assert_eq!((models[0]["defaultEffort"].as_str(), models[0]["isDefault"].as_bool()), (Some("medium"), Some(true)));
+        assert_eq!(models[1]["efforts"], json!(["low", "high"]));
+        assert_eq!(models[1]["label"], "old");
+    }
+
+    #[test]
     fn a_new_thread_gets_the_conversation() {
         let turn = CodexTurn {
             program: PathBuf::from("codex"),
@@ -752,6 +802,7 @@ mod tests {
             pictures: Vec::new(),
             workspace: Workspace { folder: PathBuf::from("/tmp/b"), roots: vec![PathBuf::from("/tmp/b"), PathBuf::from("/tmp/vault")], mode: PermissionMode::Default, catbot: None },
             mcp: Some(json!({ "name": "catbot", "command": "/bin/catbot", "args": ["approval-mcp", "-"], "env": [{ "name": "K", "value": "v" }] })),
+            effort: None,
         };
         let prompt = first_prompt(&turn);
         assert!(prompt.starts_with("<conversation_so_far>\nPerson: Plant carrots?") && prompt.ends_with("And beans?"));

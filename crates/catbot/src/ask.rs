@@ -45,6 +45,7 @@ pub async fn run(options: Options) -> Result<bool, BoxError> {
         approval_helper: approvals_on.then(helper).transpose()?,
         extra_dirs: Vec::new(),
         catbot_tools: None,
+        effort: None,
     };
     let mut running = claude::start(&turn).await?;
     let transcript = console::drive(&mut running, approvals_on, options.json).await?;

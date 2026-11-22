@@ -726,6 +726,10 @@ async fn a_bot_on_an_agent_program_streams_asks_and_resumes() {
     let bot = made["bot"]["id"].as_str().unwrap().to_string();
     let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
     s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "grok-cli", "model": "grok-4" }, "approvalMode": "edits" }))).await;
+    // Whether it has thinking levels isn't known until it has run.
+    let (_, efforts) = s.call("GET", "/api/engines/grok-cli/efforts", None).await;
+    assert_eq!(efforts["levels"], json!([]));
+    assert!(efforts["note"].as_str().unwrap().contains("first uses it"));
 
     // A first message: a new session, given the bot's instructions.
     s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
@@ -738,12 +742,26 @@ async fn a_bot_on_an_agent_program_streams_asks_and_resumes() {
     let first: Value = serde_json::from_str(start.lines().next().unwrap()).unwrap();
     assert_eq!(first["args"], json!(["--permission-mode", "acceptEdits", "agent", "-m", "grok-4", "stdio"]));
     assert!(first["cwd"].as_str().unwrap().ends_with("bots/groky"));
+    assert!(!start.contains("\"set\""), "no level picked: the agent's own");
 
-    // The next message carries on the agent's session.
+    // Now its levels are known, in its own words; the bot picks one.
+    let (_, efforts) = s.call("GET", "/api/engines/grok-cli/efforts", None).await;
+    assert_eq!(efforts["levels"], json!([{ "id": "low", "label": "Light" }, { "id": "medium", "label": "Medium" }, { "id": "high", "label": "Deep" }]));
+    assert_eq!(efforts["default"], "medium");
+    let (_, patched) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "effort": "high" }))).await;
+    assert_eq!(patched["bot"]["effort"], "high");
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "effort": "high; rm -rf" }))).await.0, 400);
+
+    // The next message carries on the agent's session, at that level.
     s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "again", "threadId": thread }))).await;
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
     assert_eq!(reply["message"]["text"], "Echo: again (resumed)");
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let set: Vec<Value> = std::fs::read_to_string(&log).unwrap().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|l| l.get("set").is_some()).collect();
+    assert_eq!(set, [json!({ "set": "reasoning", "value": "high", "session": "fake-session-1" })]);
+    // Another model thinks in other words: the level goes back to its own.
+    let (_, moved) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "grok-cli", "model": "grok-4.7" } }))).await;
+    assert_eq!(moved["bot"]["effort"], Value::Null);
 
     // Asking: on "Ask for approval" an edit waits for a yes, then the file is written through Catbot.
     s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "approvalMode": "ask" }))).await;

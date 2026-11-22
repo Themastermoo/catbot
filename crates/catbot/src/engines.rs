@@ -565,6 +565,56 @@ pub fn find(id: &str) -> Option<&'static Engine> {
     ALL.iter().find(|engine| engine.id == id)
 }
 
+/// Every thinking level Catbot passes on by name. An agent program's own levels (ACP's
+/// `thought_level`) are its own words and come from it.
+pub const EFFORT_WORDS: [&str; 8] = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
+
+/// The thinking levels a fixed engine takes for a model, from least to most: None when it takes
+/// none, or when they're only known by asking the program (Codex, Pi, agent programs).
+///
+/// - Claude Code: `--effort`; a model without the level gets the nearest one below it.
+/// - OpenAI: `reasoning_effort` on its reasoning models (GPT-5: minimal…high; 5.1: none…high;
+///   5.2 and later add xhigh; o-series: low…high). Pro and chat models take none.
+/// - xAI: `reasoning_effort` on Grok 4.5 and later (xhigh from 4.6); older Groks refuse it.
+/// - gpt-oss anywhere (Groq, Cerebras, Ollama, LM Studio): low…high.
+pub fn effort_levels(engine: &Engine, model: &str) -> Option<Vec<&'static str>> {
+    let model = model.trim().to_lowercase();
+    let model = model.as_str();
+    if engine.kind == Kind::Claude {
+        return Some(vec!["low", "medium", "high", "xhigh", "max"]);
+    }
+    if engine.kind != Kind::Api {
+        return None;
+    }
+    if model.contains("gpt-oss") {
+        return Some(vec!["low", "medium", "high"]);
+    }
+    match engine.id {
+        "openai" => {
+            if model.contains("-pro") || model.contains("-chat") {
+                return None;
+            }
+            if ["o1", "o3", "o4"].iter().any(|o| model == *o || model.starts_with(&format!("{o}-"))) && model != "o1-mini" {
+                return Some(vec!["low", "medium", "high"]);
+            }
+            if model == "gpt-5" || model.starts_with("gpt-5-") {
+                return Some(vec!["minimal", "low", "medium", "high"]);
+            }
+            let minor: u32 = model.strip_prefix("gpt-5.")?.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()?;
+            Some(if minor >= 2 { vec!["none", "low", "medium", "high", "xhigh"] } else { vec!["none", "low", "medium", "high"] })
+        }
+        "xai" => {
+            let minor: u32 = model.strip_prefix("grok-4.")?.chars().take_while(char::is_ascii_digit).collect::<String>().parse().ok()?;
+            match minor {
+                0..=4 => None,
+                5 => Some(vec!["low", "medium", "high"]),
+                _ => Some(vec!["low", "medium", "high", "xhigh"]),
+            }
+        }
+        _ => None,
+    }
+}
+
 /// How an engine is reached: its address and key, from Settings or the environment. None when
 /// it needs a key and has none.
 #[derive(Debug, Clone)]
@@ -625,6 +675,27 @@ pub fn check_url(url: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn thinking_levels_where_an_engine_takes_them() {
+        let at = |engine: &str, model: &str| effort_levels(find(engine).unwrap(), model);
+        assert_eq!(at("claude", "").unwrap().last(), Some(&"max"));
+        assert_eq!(at("openai", "gpt-5-mini").unwrap()[0], "minimal");
+        assert_eq!(at("openai", "gpt-5.1").unwrap(), ["none", "low", "medium", "high"]);
+        assert_eq!(at("openai", "gpt-5.6-sol").unwrap().last(), Some(&"xhigh"));
+        assert_eq!(at("openai", "gpt-5-pro"), None);
+        assert_eq!(at("openai", "o4-mini").unwrap(), ["low", "medium", "high"]);
+        assert_eq!(at("openai", "gpt-4o"), None);
+        assert_eq!(at("xai", "grok-4.7").unwrap().last(), Some(&"xhigh"));
+        assert_eq!(at("xai", "grok-4.5").unwrap(), ["low", "medium", "high"]);
+        assert_eq!(at("xai", "grok-4"), None, "the old Groks refuse the setting");
+        assert_eq!(at("xai", "grok-4-fast"), None);
+        assert_eq!(at("groq", "openai/gpt-oss-120b").unwrap(), ["low", "medium", "high"]);
+        assert_eq!(at("ollama", "gpt-oss:20b").unwrap().len(), 3);
+        assert_eq!(at("deepseek", "deepseek-reasoner"), None);
+        assert_eq!(at("codex", ""), None, "Codex says for itself");
+        assert_eq!(at("gemini", ""), None);
+    }
 
     #[test]
     fn every_engine_has_a_unique_id_and_claude_comes_first() {

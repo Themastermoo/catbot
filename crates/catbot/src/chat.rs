@@ -82,6 +82,7 @@ pub fn bot_turn(
         approval_helper,
         extra_dirs: memory.into_iter().chain(codex).collect(),
         catbot_tools: None,
+        effort: bot.effort.clone().filter(|e| crate::engines::find(&bot.engine).and_then(|engine| crate::engines::effort_levels(engine, "")).is_some_and(|l| l.contains(&e.as_str()))),
     }
 }
 

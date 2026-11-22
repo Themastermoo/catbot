@@ -157,12 +157,17 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
             };
             match crate::pi::models(&program).await {
                 Ok(models) if !models.is_empty() => {
-                    let labels: Vec<Value> = models.iter().map(|(id, label)| json!({ "id": id, "label": label })).collect();
-                    Ok((StatusCode::OK, json!({ "models": models.iter().map(|(id, _)| id).collect::<Vec<_>>(), "labels": labels, "live": true })))
+                    let labels: Vec<Value> = models.iter().map(|(id, label, thinks)| json!({ "id": id, "label": label, "thinks": thinks })).collect();
+                    Ok((StatusCode::OK, json!({ "models": models.iter().map(|(id, _, _)| id).collect::<Vec<_>>(), "labels": labels, "live": true })))
                 }
                 Ok(_) => Ok((StatusCode::OK, json!({ "models": [], "live": false, "problem": "Pi has no models with a sign-in yet: run `pi auth login <provider>` on this computer" }))),
                 Err(problem) => Ok((StatusCode::OK, json!({ "models": [], "live": false, "problem": problem }))),
             }
+        }
+        (&Method::GET, [id, "efforts"]) => {
+            let engine = find(id)?;
+            let model = super::query_param(&req, "model").map(super::urlencoding_decode).unwrap_or_default();
+            Ok((StatusCode::OK, efforts(app, engine, &model).await))
         }
         (&Method::GET, [id, "models"]) => {
             let engine = find(id)?;
@@ -212,6 +217,63 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
 }
 
 /// What's under way for an agent (a download, a sign-in), or null.
+/// `GET /api/engines/:id/efforts?model=`: the thinking levels this engine takes with that model
+/// (empty: the model picks its own), `[{ id, label }]` from least to most, its default if
+/// known, and where they come from.
+async fn efforts(app: &Arc<App>, engine: &'static Engine, model: &str) -> Value {
+    let words = |levels: Vec<String>| levels.into_iter().map(|id| json!({ "label": effort_label(&id), "id": id })).collect::<Vec<_>>();
+    match engine.kind {
+        Kind::Claude | Kind::Api => {
+            let levels = engines::effort_levels(engine, model).unwrap_or_default();
+            json!({ "levels": words(levels.into_iter().map(str::to_string).collect()), "source": "catbot" })
+        }
+        Kind::Codex => {
+            let Some(program) = engines::agent_program(engine) else { return json!({ "levels": [], "problem": "Codex isn't installed" }) };
+            let Some(home) = app.with_store(|store| Ok(store.home().to_path_buf())) else { return json!({ "levels": [] }) };
+            match crate::codex::models(&program, &home).await {
+                Ok(models) => {
+                    let chosen = models.iter().find(|m| !model.is_empty() && m["id"] == model).or_else(|| models.iter().find(|m| m["isDefault"] == true));
+                    let levels: Vec<String> = chosen.and_then(|m| m["efforts"].as_array()).into_iter().flatten().filter_map(|e| e.as_str().map(str::to_string)).collect();
+                    json!({ "levels": words(levels), "default": chosen.map(|m| m["defaultEffort"].clone()), "source": "codex" })
+                }
+                Err(problem) => json!({ "levels": [], "problem": problem }),
+            }
+        }
+        Kind::Pi => {
+            let thinks = match engines::agent_program(engine) {
+                Some(program) if !model.is_empty() => crate::pi::models(&program).await.ok().and_then(|all| all.into_iter().find(|(id, _, _)| id == model)).map(|(_, _, thinks)| thinks),
+                _ => None,
+            };
+            // Pi fits the level to what the model can do, so its default model gets them all.
+            let levels = if thinks == Some(false) { Vec::new() } else { ["off", "minimal", "low", "medium", "high", "xhigh"].map(str::to_string).to_vec() };
+            json!({ "levels": words(levels), "source": "pi" })
+        }
+        Kind::Agent => match crate::acp::known_levels(engine) {
+            Some(known) => json!({
+                "levels": known.options.iter().map(|(id, label)| json!({ "id": id, "label": label })).collect::<Vec<_>>(),
+                "default": known.current,
+                "source": "agent",
+            }),
+            None => json!({ "levels": [], "note": format!("{} hasn't said yet whether it has thinking levels: it says when a bot first uses it.", engine.name) }),
+        },
+    }
+}
+
+/// A level's name in the menu.
+pub fn effort_label(id: &str) -> String {
+    match id {
+        "none" => "None".into(),
+        "off" => "Off".into(),
+        "minimal" => "Minimal".into(),
+        "low" => "Low".into(),
+        "medium" => "Medium".into(),
+        "high" => "High".into(),
+        "xhigh" => "X-High".into(),
+        "max" => "Max".into(),
+        other => other.to_string(),
+    }
+}
+
 fn work(app: &App, id: &str) -> Value {
     app.agent_work.lock().expect("agent work lock").get(id).map(|(state, _)| state.clone()).unwrap_or(Value::Null)
 }

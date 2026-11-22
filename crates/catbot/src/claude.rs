@@ -77,6 +77,8 @@ pub struct Turn {
     pub extra_dirs: Vec<PathBuf>,
     /// Catbot's own tools for this turn, served through the approval helper (`catbot_tools.rs`).
     pub catbot_tools: Option<crate::catbot_tools::Access>,
+    /// How hard to think (`--effort`): None leaves it to Claude Code and the model.
+    pub effort: Option<String>,
 }
 
 /// What a turn reports while it runs.
@@ -173,6 +175,9 @@ pub fn args(turn: &Turn) -> Vec<String> {
     }
     if let Some(model) = &turn.model {
         args.extend(["--model".into(), model.clone()]);
+    }
+    if let Some(effort) = &turn.effort {
+        args.extend(["--effort".into(), effort.clone()]);
     }
     for dir in &turn.extra_dirs {
         args.extend(["--add-dir".into(), dir.to_string_lossy().into_owned()]);
@@ -472,6 +477,7 @@ mod tests {
             approval_helper: None,
             extra_dirs: vec!["/home/moo/VaultCodex".into()],
             catbot_tools: None,
+            effort: None,
         }
     }
 
@@ -482,6 +488,8 @@ mod tests {
         assert!(a.contains("--permission-mode default"));
         assert!(a.contains("--strict-mcp-config --setting-sources project"));
         assert!(a.contains("--model sonnet"));
+        assert!(!a.contains("--effort"), "no level: Claude Code's own");
+        assert!(args(&Turn { effort: Some("high".into()), ..turn() }).join(" ").contains("--effort high"));
         assert!(a.contains("--add-dir /home/moo/VaultCodex"));
         assert!(a.contains("--append-system-prompt You are Assistant."));
         assert!(a.ends_with("--session-id 11111111-2222-4333-8444-555555555555"));

@@ -58,6 +58,8 @@ pub struct AcpTurn {
     pub mcp: Vec<Value>,
     /// What the program needs in its environment (`engines::agent_env`).
     pub env: Vec<(String, String)>,
+    /// The thinking level to pick, one of the agent's own `thought_level` values. None: its default.
+    pub effort: Option<String>,
 }
 
 /// Starts the program and the turn; its events arrive on the returned `Running`.
@@ -200,10 +202,12 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>) -> Resu
     let cwd = turn.workspace.folder.display().to_string();
     let can_load = init["agentCapabilities"]["loadSession"] == true;
     let mut session = None;
+    let mut options = Value::Null;
     if let (true, Some(id)) = (can_load, turn.session.as_ref())
-        && link.call("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": turn.mcp }), Some(START_TIME)).await.is_ok()
+        && let Ok(loaded) = link.call("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": turn.mcp }), Some(START_TIME)).await
     {
         session = Some(id.clone());
+        options = loaded["configOptions"].clone();
     }
     let prompt = match &session {
         Some(_) => turn.text.clone(),
@@ -213,13 +217,72 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>) -> Resu
         Some(id) => id,
         None => {
             let made = link.call("session/new", json!({ "cwd": cwd, "mcpServers": turn.mcp }), Some(START_TIME)).await?;
+            options = made["configOptions"].clone();
             made["sessionId"].as_str().map(str::to_string).ok_or("the agent made no session")?
         }
     };
+    // Its thinking levels, if it has them: kept for the model menu, and the bot's level picked.
+    if let Some(levels) = thought_levels(&options) {
+        remember_levels(turn.engine, &levels);
+        if let Some(wanted) = turn.effort.as_ref().filter(|e| levels.options.iter().any(|(value, _)| value == *e)) {
+            // Set before every prompt: some agents forget it between prompts.
+            let set = json!({ "sessionId": session, "configId": levels.id, "value": wanted });
+            if let Err(problem) = link.call("session/set_config_option", set, Some(START_TIME)).await {
+                eprintln!("catbot: {} didn't take the thinking level {wanted}: {problem}", turn.engine.name);
+            }
+        }
+    }
     let _ = tx.send(Event::Started { session_id: session.clone(), model: (!turn.model.is_empty()).then(|| turn.model.clone()) }).await;
     let answer = link.call("session/prompt", json!({ "sessionId": session, "prompt": [{ "type": "text", "text": prompt }] }), None).await?;
     let stop = answer["stopReason"].as_str().unwrap_or("end_turn").to_string();
     Ok((session, stop))
+}
+
+/// An agent's thinking levels (ACP's config option of category `thought_level`): its id, and
+/// its values with their names, flattened out of any groups.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ThoughtLevels {
+    pub id: String,
+    pub options: Vec<(String, String)>,
+    pub current: Option<String>,
+}
+
+/// The `thought_level` option among a session's `configOptions`, if it has one.
+pub fn thought_levels(options: &Value) -> Option<ThoughtLevels> {
+    let option = options.as_array()?.iter().find(|o| o["category"] == "thought_level")?;
+    let id = option["id"].as_str().or(option["configId"].as_str())?.to_string();
+    let mut values = Vec::new();
+    for entry in option["options"].as_array()? {
+        let listed = entry["options"].as_array().cloned().unwrap_or_else(|| vec![entry.clone()]);
+        for value in listed {
+            if let Some(v) = value["value"].as_str() {
+                values.push((v.to_string(), value["name"].as_str().unwrap_or(v).to_string()));
+            }
+        }
+    }
+    (!values.is_empty()).then(|| ThoughtLevels { id, options: values, current: option["currentValue"].as_str().map(str::to_string) })
+}
+
+/// Where an agent's thinking levels are kept between runs: `<agents dir>/<engine>/thinking.json`.
+fn levels_file(engine: &Engine) -> Option<PathBuf> {
+    crate::engines::agents_dir().map(|dir| dir.join(engine.id).join("thinking.json"))
+}
+
+fn remember_levels(engine: &Engine, levels: &ThoughtLevels) {
+    let Some(file) = levels_file(engine) else { return };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(levels) {
+        let _ = std::fs::write(file, text);
+    }
+}
+
+/// The thinking levels this agent offered last time it ran, if it offered any. Unknown until a
+/// bot has used it once.
+pub fn known_levels(engine: &Engine) -> Option<ThoughtLevels> {
+    let text = std::fs::read_to_string(levels_file(engine)?).ok()?;
+    serde_json::from_str(&text).ok()
 }
 
 /// A new session's first message: the bot's instructions, the conversation so far (the agent
@@ -627,6 +690,23 @@ mod tests {
     }
 
     #[test]
+    fn an_agent_says_how_hard_it_can_think() {
+        let options = json!([
+            { "id": "mode", "category": "mode", "type": "select", "currentValue": "ask", "options": [{ "value": "ask", "name": "Ask" }] },
+            { "id": "effort", "name": "Thinking", "category": "thought_level", "type": "select", "currentValue": "medium", "options": [
+                { "value": "low", "name": "Low" },
+                { "group": "more", "name": "More", "options": [{ "value": "medium", "name": "Medium" }, { "value": "high", "name": "High" }] }
+            ] }
+        ]);
+        let levels = thought_levels(&options).unwrap();
+        assert_eq!(levels.id, "effort");
+        assert_eq!(levels.options.iter().map(|(v, _)| v.as_str()).collect::<Vec<_>>(), ["low", "medium", "high"]);
+        assert_eq!(levels.current.as_deref(), Some("medium"));
+        assert_eq!(thought_levels(&json!([{ "id": "mode", "category": "mode", "options": [] }])), None);
+        assert_eq!(thought_levels(&Value::Null), None);
+    }
+
+    #[test]
     fn a_new_session_gets_instructions_and_the_conversation() {
         let turn = AcpTurn {
             engine: crate::engines::find("grok-cli").unwrap(),
@@ -638,6 +718,7 @@ mod tests {
             text: "And beans?".into(),
             workspace: Workspace { folder: PathBuf::from("/tmp"), roots: vec![PathBuf::from("/tmp")], mode: PermissionMode::Default, catbot: None },
             mcp: Vec::new(),
+            effort: None,
             env: Vec::new(),
         };
         let prompt = first_prompt(&turn);

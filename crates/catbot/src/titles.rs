@@ -87,6 +87,7 @@ pub async fn generate(cli: Vec<String>, cwd: PathBuf, model: String, text: &str)
         approval_helper: None,
         extra_dirs: Vec::new(),
         catbot_tools: None,
+        effort: None,
     };
     let reply = tokio::time::timeout(PATIENCE, async move {
         let mut running = claude::start(&turn).await.ok()?;

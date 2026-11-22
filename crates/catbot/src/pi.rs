@@ -62,6 +62,8 @@ pub struct PiTurn {
     pub workspace: Workspace,
     /// Catbot's tools as an MCP server: `{ name, command, args, env: [{ name, value }] }`.
     pub mcp: Option<Value>,
+    /// `--thinking`: Pi clamps it to what the model can do. None, the model's own level.
+    pub effort: Option<String>,
 }
 
 /// The extension's word for an approval level.
@@ -93,6 +95,9 @@ pub fn args(turn: &PiTurn) -> Vec<String> {
     args.extend(["--append-system-prompt".into(), turn.folder.join("instructions.md").display().to_string()]);
     if !turn.model.is_empty() {
         args.extend(["--model".into(), turn.model.clone()]);
+    }
+    if let Some(effort) = &turn.effort {
+        args.extend(["--thinking".into(), effort.clone()]);
     }
     args
 }
@@ -352,9 +357,9 @@ pub fn signed_in() -> Option<bool> {
     (saved || dir.join("models.json").is_file()).then_some(true)
 }
 
-/// The models Pi can use now (those with a sign-in or key), as `provider/model`, from
-/// `pi --list-models`.
-pub async fn models(program: &Path) -> Result<Vec<(String, String)>, String> {
+/// The models Pi can use now (those with a sign-in or key), as `provider/model`, with a label and
+/// whether it thinks, from `pi --list-models`.
+pub async fn models(program: &Path) -> Result<Vec<(String, String, bool)>, String> {
     let mut command = Command::new(program);
     command.arg("--list-models").env("PI_SKIP_VERSION_CHECK", "1").env("PI_OFFLINE", "1").stdin(Stdio::null()).kill_on_drop(true);
     #[cfg(windows)]
@@ -363,17 +368,19 @@ pub async fn models(program: &Path) -> Result<Vec<(String, String)>, String> {
     Ok(parse_models(&String::from_utf8_lossy(&output.stdout)))
 }
 
-/// `pi --list-models`' table: a header, then `provider model context …` a line.
-pub fn parse_models(table: &str) -> Vec<(String, String)> {
+/// `pi --list-models`' table: a header, then `provider model context … thinking …` a line.
+pub fn parse_models(table: &str) -> Vec<(String, String, bool)> {
     let mut lines = table.lines();
-    if !lines.next().is_some_and(|head| head.split_whitespace().take(2).eq(["provider", "model"])) {
+    let Some(head) = lines.next().filter(|head| head.split_whitespace().take(2).eq(["provider", "model"])) else {
         return Vec::new();
-    }
+    };
+    let thinking = head.split_whitespace().position(|w| w == "thinking");
     lines
         .filter_map(|line| {
-            let mut words = line.split_whitespace();
-            let (provider, model) = (words.next()?, words.next()?);
-            Some((format!("{provider}/{model}"), format!("{model} ({provider})")))
+            let words: Vec<&str> = line.split_whitespace().collect();
+            let (provider, model) = (*words.first()?, *words.get(1)?);
+            let thinks = thinking.and_then(|at| words.get(at)).is_some_and(|w| *w == "yes");
+            Some((format!("{provider}/{model}"), format!("{model} ({provider})"), thinks))
         })
         .collect()
 }
@@ -411,10 +418,11 @@ mod tests {
             pictures: Vec::new(),
             workspace: Workspace { folder: PathBuf::from("/b"), roots: vec![PathBuf::from("/b")], mode: PermissionMode::Default, catbot: None },
             mcp: None,
+            effort: Some("high".into()),
         };
         assert_eq!(
             args(&turn),
-            ["--mode", "rpc", "--no-approve", "--session-dir", "/c/pi/bot1/sessions", "--session-id", "s-1", "-e", "/c/pi/catbot-pi.ts", "--append-system-prompt", "/c/pi/bot1/instructions.md", "--model", "openai/gpt-5"]
+            ["--mode", "rpc", "--no-approve", "--session-dir", "/c/pi/bot1/sessions", "--session-id", "s-1", "-e", "/c/pi/catbot-pi.ts", "--append-system-prompt", "/c/pi/bot1/instructions.md", "--model", "openai/gpt-5", "--thinking", "high"]
         );
         assert!(first_prompt(&turn).starts_with("<conversation_so_far>\nPerson: Plant carrots?") && first_prompt(&turn).ends_with("And beans?"));
         assert_eq!((mode_word(PermissionMode::Default), mode_word(PermissionMode::AcceptEdits), mode_word(PermissionMode::BypassPermissions)), ("ask", "edits", "full"));
@@ -427,7 +435,7 @@ mod tests {
         assert_eq!(shown("mcp__catbot__page_publish", &json!({ "x": 1 })).0, "page_publish");
         assert!(explain("No API key for provider openai", "").contains("pi auth login"));
         let table = "provider  model  context  max-out  thinking  images\nstub      stub   128K     16.4K    no        no\nopenai    gpt-5  400K     128K     yes       yes\n";
-        assert_eq!(parse_models(table), [("stub/stub".to_string(), "stub (stub)".to_string()), ("openai/gpt-5".to_string(), "gpt-5 (openai)".to_string())]);
+        assert_eq!(parse_models(table), [("stub/stub".to_string(), "stub (stub)".to_string(), false), ("openai/gpt-5".to_string(), "gpt-5 (openai)".to_string(), true)]);
         assert!(parse_models("No models available. Use /login …").is_empty());
     }
 }

@@ -125,6 +125,9 @@ pub struct Bot {
     pub mark: Mark,
     /// Its colour, one of `COLORS`. None: picked from its id, so it never changes on its own.
     pub color: Option<String>,
+    /// How hard it thinks before answering, in its engine's words ("low", "high", an agent's own
+    /// value). None: the engine's (or model's) own default.
+    pub effort: Option<String>,
 }
 
 /// The colours a bot can wear: the interface's identity colours.
@@ -441,6 +444,10 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        if version < 9 {
+            // Version 9: a bot's thinking level.
+            conn.execute_batch("BEGIN; ALTER TABLE bots ADD COLUMN effort TEXT; PRAGMA user_version = 9; COMMIT;")?;
+        }
         Ok(Self { conn, home: home.to_path_buf() })
     }
 
@@ -628,6 +635,7 @@ impl Store {
             created_at: now(),
             mark: Mark::default(),
             color: None,
+            effort: None,
         };
         self.conn.execute(
             "INSERT INTO bots (id, name, instructions, model, mode, codex, folder, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -649,7 +657,7 @@ impl Store {
     }
 
     pub fn bots(&self) -> Result<Vec<Bot>, BoxError> {
-        let mut stmt = self.conn.prepare("SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine FROM bots ORDER BY name")?;
+        let mut stmt = self.conn.prepare("SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine, effort FROM bots ORDER BY name")?;
         let bots = stmt.query_map([], bot_from_row)?.collect::<Result<_, _>>()?;
         Ok(bots)
     }
@@ -659,7 +667,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine FROM bots WHERE name = ?1",
+                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine, effort FROM bots WHERE name = ?1",
                 [name.trim()],
                 bot_from_row,
             )
@@ -670,7 +678,7 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine FROM bots WHERE id = ?1",
+                "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine, effort FROM bots WHERE id = ?1",
                 [id],
                 bot_from_row,
             )
@@ -685,8 +693,8 @@ impl Store {
             return Err(format!("a bot named {} already exists", other.name).into());
         }
         self.conn.execute(
-            "UPDATE bots SET name = ?2, instructions = ?3, model = ?4, mode = ?5, codex = ?6, mark = ?7, color = ?8, engine = ?9 WHERE id = ?1",
-            params![bot.id, name, bot.instructions, bot.model, bot.mode.as_str(), bot.codex, bot.mark.as_str(), bot.color, bot.engine],
+            "UPDATE bots SET name = ?2, instructions = ?3, model = ?4, mode = ?5, codex = ?6, mark = ?7, color = ?8, engine = ?9, effort = ?10 WHERE id = ?1",
+            params![bot.id, name, bot.instructions, bot.model, bot.mode.as_str(), bot.codex, bot.mark.as_str(), bot.color, bot.engine, bot.effort],
         )?;
         Ok(())
     }
@@ -1110,6 +1118,7 @@ fn bot_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Bot> {
         mark: r.get::<_, Option<String>>(8)?.as_deref().and_then(Mark::parse).unwrap_or_default(),
         color: r.get::<_, Option<String>>(9)?.filter(|c| COLORS.contains(&c.as_str())),
         engine: r.get(10)?,
+        effort: r.get::<_, Option<String>>(11)?.filter(|e| !e.is_empty()),
     })
 }
 
@@ -1332,7 +1341,8 @@ mod tests {
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
         assert_eq!(bot.engine, "claude", "bots from before run on Claude");
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 8);
+        assert_eq!(version, 9);
+        assert_eq!(bot.effort, None, "and think at their engine's own level");
         // And keys for the chat APIs.
         assert_eq!(store.engine_key("xai").unwrap(), None);
         store.set_engine_key("xai", "xai-1", None).unwrap();

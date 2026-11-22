@@ -797,8 +797,26 @@ fn apply_changes(bot: &mut Bot, body: &Value) -> Result<(), (StatusCode, String)
         let known = crate::engines::find(&engine).ok_or_else(|| bad(format!("Catbot doesn't know the AI {engine}")))?;
         let model = selection["model"].as_str().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
         // A new engine without a model named starts on that engine's own default.
-        bot.model = if known.id != bot.engine && model.is_none() { None } else { model };
+        let model = if known.id != bot.engine && model.is_none() { None } else { model };
+        // Another AI or model thinks in other words: back to its own default, unless one is given.
+        if known.id != bot.engine || model != bot.model {
+            bot.effort = None;
+        }
+        bot.model = model;
         bot.engine = known.id.to_string();
+    }
+    match body.get("effort") {
+        Some(Value::Null) => bot.effort = None,
+        Some(Value::String(level)) => {
+            let level = level.trim();
+            let plain = !level.is_empty() && level.len() <= 64 && level.chars().all(|c| c.is_ascii_alphanumeric() || "-_.:".contains(c));
+            if !plain {
+                return Err(bad(format!("unknown thinking level {level}")));
+            }
+            bot.effort = Some(level.to_string());
+        }
+        Some(other) => return Err(bad(format!("unknown thinking level {other}"))),
+        None => {}
     }
     if let Some(level) = body["approvalMode"].as_str() {
         bot.mode = wire::mode_from_approval(level).ok_or_else(|| bad(format!("unknown approval level {level}")))?;

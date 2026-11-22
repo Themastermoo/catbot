@@ -325,6 +325,7 @@ mod tests {
             created_at: String::new(),
             mark: crate::store::Mark::CatHead,
             color: None,
+            effort: None,
         }
     }
 

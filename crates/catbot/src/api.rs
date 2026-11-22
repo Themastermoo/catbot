@@ -36,6 +36,8 @@ pub struct ApiTurn {
     /// Pictures attached to the person's newest message: (type, bytes), shown to the model.
     pub pictures: Vec<(String, Vec<u8>)>,
     pub workspace: Workspace,
+    /// `reasoning_effort`, only where the model takes it (`engines::effort_levels`).
+    pub effort: Option<String>,
 }
 
 /// What a bot on a chat API is told about working, after its own instructions.
@@ -236,6 +238,9 @@ impl std::fmt::Display for Failure {
 /// Sends the conversation and streams the answer, passing its text on as it comes.
 async fn ask(client: &reqwest::Client, turn: &ApiTurn, messages: &[Value], with_tools: bool, used: &Used, tx: &mpsc::Sender<Event>) -> Result<Round, Failure> {
     let mut body = json!({ "model": turn.model, "messages": messages, "stream": true });
+    if let Some(effort) = &turn.effort {
+        body["reasoning_effort"] = json!(effort);
+    }
     if !used.no_usage_option {
         // The usage comes in a last chunk of the stream.
         body["stream_options"] = json!({ "include_usage": true });

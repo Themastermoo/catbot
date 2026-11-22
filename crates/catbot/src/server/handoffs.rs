@@ -276,6 +276,7 @@ mod tests {
             created_at: String::new(),
             mark: crate::store::Mark::CatHead,
             color: None,
+            effort: None,
         };
         let all = [bot("a", "Scout"), bot("b", "Kiwi"), bot("c", "Moss")];
         assert!(named("As @Kiwi said, beans.\n\nThat's all.", &all, "a").is_empty());

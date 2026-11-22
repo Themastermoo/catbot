@@ -449,7 +449,8 @@ fn start_api(app: &Arc<App>, bot: &Bot, thread: &str, codex: Option<std::path::P
     system.push_str(&api::tool_guide(&bot.folder));
     let roots = std::iter::once(bot.folder.clone()).chain(app.memory.clone()).chain(codex).collect();
     let workspace = crate::tools::Workspace { folder: bot.folder.clone(), roots, mode: bot.mode, catbot: tools.map(|t| (t.access.clone(), t.tools.clone())) };
-    Ok(api::start(api::ApiTurn { engine, access, model, system, history, pictures, workspace }))
+    let effort = bot.effort.clone().filter(|e| engines::effort_levels(engine, &model).is_some_and(|l| l.contains(&e.as_str())));
+    Ok(api::start(api::ApiTurn { engine, access, model, system, history, pictures, workspace, effort }))
 }
 
 /// Starts a turn on an agent program: the program found on this computer, the session to carry
@@ -479,7 +480,8 @@ fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
     };
     let model = bot.model.clone().unwrap_or_default();
     let mcp = tools.and_then(|t| super::bot_tools::acp_server(app, t)).into_iter().collect();
-    crate::acp::start(crate::acp::AcpTurn { engine, program, model, session, instructions, earlier: history, text, workspace, mcp, env }).map_err(|e| e.to_string())
+    let effort = bot.effort.clone();
+    crate::acp::start(crate::acp::AcpTurn { engine, program, model, session, instructions, earlier: history, text, workspace, mcp, env, effort }).map_err(|e| e.to_string())
 }
 
 /// Starts a turn on Codex: the program, Catbot's Codex home with the person's sign-in linked in,
@@ -505,7 +507,8 @@ fn start_codex(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
     let home = app.with_store(|store| Ok(crate::codex::bots_home(store.home()))).ok_or("no Catbot home")?;
     let model = bot.model.clone().unwrap_or_default();
     let mcp = tools.and_then(|t| super::bot_tools::acp_server(app, t));
-    crate::codex::start(crate::codex::CodexTurn { program, home, model, session, instructions, earlier: history, text, pictures, workspace, mcp })
+    let effort = bot.effort.clone();
+    crate::codex::start(crate::codex::CodexTurn { program, home, model, session, instructions, earlier: history, text, pictures, workspace, mcp, effort })
 }
 
 /// Starts a turn on Pi: the program, Catbot's folder for this bot's Pi sessions, the session (a new
@@ -530,7 +533,8 @@ fn start_pi(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex: O
     let home = app.with_store(|store| Ok(store.home().join("pi"))).ok_or("no Catbot home")?;
     let model = bot.model.clone().unwrap_or_default();
     let mcp = tools.and_then(|t| super::bot_tools::acp_server(app, t));
-    crate::pi::start(crate::pi::PiTurn { program, folder: home.join(&bot.id), extension: home.join("catbot-pi.ts"), model, session, new, instructions, earlier: history, text, pictures, workspace, mcp })
+    let effort = bot.effort.clone().filter(|e| crate::engines::EFFORT_WORDS.contains(&e.as_str()));
+    crate::pi::start(crate::pi::PiTurn { program, folder: home.join(&bot.id), extension: home.join("catbot-pi.ts"), model, session, new, instructions, earlier: history, text, pictures, workspace, mcp, effort })
 }
 
 /// Marks an approval card answered (`dismissed` when nobody answered it) and shows the change.

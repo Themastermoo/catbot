@@ -146,6 +146,8 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         "mascotBody": "cursor",
         "unread": false,
         "modelSelection": model_selection(bot),
+        // Catbot's own: how hard it thinks, in its engine's words (null: the engine's default).
+        "effort": bot.effort,
         // Catbot's own: the AIs that take over when this one is at a limit, in order.
         "backups": super::backups::wire(store, &bot.id),
         "createdAt": created,
