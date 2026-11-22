@@ -15,11 +15,13 @@ pub struct Looks {
     /// Whether the Chief of Staff shows in the sidebar (hidden, it keeps working and search
     /// still finds it).
     pub show_chief: bool,
+    /// Whether your own messages wear the bot's colour (their default), or stay grey.
+    pub color_mine: bool,
 }
 
 impl Default for Looks {
     fn default() -> Self {
-        Looks { skin: "system".into(), tint: String::new(), show_chief: true }
+        Looks { skin: "system".into(), tint: String::new(), show_chief: true, color_mine: true }
     }
 }
 

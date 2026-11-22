@@ -63,7 +63,8 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                 });"#,
             );
             while keys.recv::<String>().await.is_ok() {
-                open.set(Some(Open::Settings("general")));
+                let mut prefs = ui.prefs;
+                prefs.set(Some("general".into()));
             }
         });
     });
@@ -205,16 +206,23 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                     }
                 }
             }
-            Footer { bot_count: bots.read().iter().filter(|b| b.channel.is_none()).count(), on_open: move |o| open.set(Some(o)) }
+            Footer { bot_count: bots.read().iter().filter(|b| b.channel.is_none()).count(), on_open: move |o| match o {
+                // Settings belongs to the app (the chat opens it too).
+                Open::Settings(page) => { let mut prefs = ui.prefs; prefs.set(Some(page.to_string())); }
+                other => open.set(Some(other)),
+            } }
             match open() {
                 Some(Open::NewBot) => rsx! { crate::settings::NewBotDialog { on_close: move |_| open.set(None) } },
                 Some(Open::NewChannel) => rsx! { crate::channels::NewChannelDialog { on_close: move |_| open.set(None) } },
                 Some(Open::Devices) => rsx! { crate::devices::DevicesDialog { on_close: move |_| open.set(None) } },
-                Some(Open::Settings(page)) => rsx! { crate::notify::SettingsDialog { start: page.to_string(), on_close: move |_| open.set(None) } },
+                Some(Open::Settings(_)) => rsx! {},
                 Some(Open::Triggers) => rsx! { crate::triggers::TriggersDialog { on_close: move |_| open.set(None) } },
                 Some(Open::Memory) => rsx! { crate::memory::MemoryDialog { on_close: move |_| open.set(None) } },
                 Some(Open::Usage) => rsx! { crate::usage::UsageDialog { on_close: move |_| open.set(None) } },
                 None => rsx! {},
+            }
+            if let Some(page) = (ui.prefs)() {
+                crate::notify::SettingsDialog { start: page, on_close: move |_| { let mut prefs = ui.prefs; prefs.set(None); } }
             }
         }
     }

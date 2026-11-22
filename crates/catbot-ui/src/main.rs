@@ -42,6 +42,7 @@ mod usage;
 mod sidebar;
 mod looks;
 mod prefs;
+mod model_menu;
 
 use dioxus::prelude::*;
 
@@ -146,7 +147,8 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let settings_open = use_signal(|| false);
     // On a phone, the bot list and a chat take turns filling the screen.
     let showing_chat = use_signal(|| false);
-    let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat });
+    let prefs = use_signal(|| None::<String>);
+    let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat, prefs });
     let notify_prefs = use_context_provider(|| Signal::new(notify::load()));
     use_future(move || notify::follow_clicks(state, ui));
     // Talking to home through the link, and home has removed this device.

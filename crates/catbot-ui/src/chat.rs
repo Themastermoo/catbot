@@ -23,6 +23,12 @@ const PAGE: usize = 50;
 const LOAD_EARLIER_AT: f64 = 160.0;
 /// Their elevated card look (`ELEVATED_CARD`, `ELEVATED_FLOAT`).
 const ELEVATED_FLOAT: &str = "bg-composer ring-[0.5px] ring-ink/10 shadow-(--shadow-float)";
+/// Their composer: the floating surface on its own softer lift.
+const ELEVATED_COMPOSER: &str = "bg-composer ring-[0.5px] ring-ink/10 shadow-(--shadow-composer) [transition:border-radius_300ms,box-shadow_150ms]";
+/// Their simple bubble's width: at most 560px, 80% of the column, and 82px short of it.
+const SIMPLE_BUBBLE_MAX: &str = "max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct),calc(100%-82px))]";
+/// Their small round controls in the message box (`SIMPLE_CONTROL`).
+const SIMPLE_CONTROL: &str = "flex size-7 shrink-0 items-center justify-center rounded-full bg-ink/[0.06] text-ink-tertiary ring-[0.5px] ring-inset ring-ink/[0.08] hover:bg-ink/[0.09] hover:text-ink disabled:opacity-40";
 
 /// One message of the transcript.
 #[derive(Clone, Debug, PartialEq)]
@@ -632,7 +638,7 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                     div { "aria-hidden": "true", class: "pointer-events-none absolute -left-5 -right-5 -bottom-3 top-1/2 bg-app" }
                     div {
                         "data-composer": true,
-                        class: "relative z-[1] rounded-2xl px-2 py-1.5 {ELEVATED_FLOAT}",
+                        class: "composer-shell relative z-[1] rounded-[22px] p-2 has-[textarea:focus]:ring-ink/[0.22] hover:ring-ink/[0.22] {ELEVATED_COMPOSER}",
                         ondragover: move |e| e.prevent_default(),
                         ondrop: move |e| {
                             e.prevent_default();
@@ -705,20 +711,20 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                                 }
                             }
                         }
-                        div { class: "flex items-end gap-1",
+                        div { class: "flex items-end gap-2",
                             input { id: "composer-file", r#type: "file", multiple: true, class: "hidden", onchange: pick }
+                            // Their +: with one thing to add (files), it adds it straight away.
+                            span { class: "flex h-8 shrink-0 items-center",
                             button {
                                 r#type: "button",
-                                "aria-label": "Attach files",
-                                title: "Attach files",
+                                "aria-label": "Add photos & files",
+                                title: "Add photos & files",
                                 "data-attach": true,
                                 disabled: waiting_on_you,
-                                class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink disabled:opacity-40",
+                                class: "{SIMPLE_CONTROL}",
                                 onclick: move |_| { document::eval(r#"document.getElementById("composer-file")?.click();"#); },
-                                // Lucide `Paperclip` (ISC).
-                                svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
-                                    path { d: "m16 6-8.414 8.586a2 2 0 0 0 2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551" }
-                                }
+                                crate::sidebar::Icon { name: "plus", size: 16 }
+                            }
                             }
                             textarea {
                                 id: "composer-box",
@@ -729,7 +735,7 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                                 disabled: waiting_on_you,
                                 placeholder: "{placeholder}",
                                 "aria-label": "Message {bot.name}",
-                                class: "block max-h-[9rem] min-h-6 w-full resize-none overflow-y-auto bg-transparent px-1 py-1 text-[15px] leading-6 placeholder:text-ink-tertiary focus:outline-none",
+                                class: "block max-h-[9rem] min-h-8 w-full resize-none overflow-y-auto bg-transparent px-0.5 py-1 text-[15px] leading-6 placeholder:text-ink-tertiary focus:outline-none",
                                 oninput: move |e| {
                                     text.set(e.value());
                                     document::eval(RESIZE_BOX);
@@ -741,24 +747,29 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                                     }
                                 },
                             }
-                            div { class: "flex items-center gap-1",
+                            div { class: "flex h-8 items-center gap-2",
+                                if bot.channel.is_none() {
+                                    crate::model_menu::UsageGauge { bot: bot.clone(), working }
+                                }
                                 if working {
                                     button {
                                         r#type: "button",
                                         "aria-label": "Stop this turn",
                                         title: "Stop",
-                                        class: "flex size-8 shrink-0 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                                        class: "{SIMPLE_CONTROL}",
                                         onclick: move |_| stop(()),
-                                        svg { width: "14", height: "14", view_box: "0 0 24 24", fill: "currentColor", rect { x: "4", y: "4", width: "16", height: "16", rx: "2" } }
+                                        svg { width: "11", height: "11", view_box: "0 0 24 24", fill: "currentColor", rect { x: "3", y: "3", width: "18", height: "18", rx: "3" } }
                                     }
                                 }
-                                if has_text && !waiting_on_you {
+                                if !waiting_on_you {
                                     button {
                                         r#type: "button",
                                         "aria-label": if working { "Send when this turn finishes" } else { "Send" },
                                         title: if working { "Sends when this turn finishes" } else { "Send" },
                                         style: if working { "" } else { "{button_style}" },
-                                        class: if working { "flex size-8 shrink-0 items-center justify-center rounded-full bg-raised text-ink-secondary hover:bg-raised-hover" } else { "bot-button flex size-8 shrink-0 items-center justify-center rounded-full" },
+                                        class: if working { "flex size-8 shrink-0 items-center justify-center rounded-full bg-raised text-ink-secondary hover:bg-raised-hover disabled:opacity-40" } else { "bot-button flex size-8 shrink-0 items-center justify-center rounded-full disabled:opacity-40" },
+                                        disabled: !has_text,
+                                        "data-send": true,
                                         onclick: move |_| submit(),
                                         if working {
                                             svg { width: "15", height: "15", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
@@ -860,12 +871,18 @@ fn ChatHead(bot: Bot) -> Element {
                     path { d: "m15 18-6-6 6-6" }
                 }
             }
+            // The right side (their header): the model pill, the bot's computer, a new chat.
+            div { class: "absolute right-4 top-1/2 flex -translate-y-1/2 items-center gap-2",
+                if bot.channel.is_none() {
+                    crate::model_menu::ModelPill { bot: bot.clone() }
+                    ComputerButton { bot_id: bot.id.clone(), name: bot.name.clone() }
+                }
             button {
                 r#type: "button",
                 "data-new-chat": true,
                 "aria-label": "New chat with {bot.name}",
                 title: "New chat (Ctrl+Shift+N)",
-                class: "absolute right-4 top-1/2 flex size-8 -translate-y-1/2 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
+                class: "flex size-8 items-center justify-center rounded-full text-ink-secondary hover:bg-raised hover:text-ink",
                 onclick: move |_| crate::chats::start(state, ui, bot_id.clone()),
                 // Lucide `SquarePen` (ISC).
                 svg { "aria-hidden": "true", width: "17", height: "17", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
@@ -873,6 +890,43 @@ fn ChatHead(bot: Bot) -> Element {
                     path { d: "M18.375 2.625a1 1 0 0 1 3 3l-9.013 9.014a2 2 0 0 1-.853.505l-2.873.84a.5.5 0 0 1-.62-.62l.84-2.873a2 2 0 0 1 .506-.852z" }
                 }
             }
+            }
+        }
+    }
+}
+
+/// The round computer button in the chat's header: the bot's screen, live, when it has a
+/// computer; otherwise Settings › Computers & secrets, where one is given.
+#[component]
+fn ComputerButton(bot_id: String, name: String) -> Element {
+    let ui = use_context::<crate::settings::Ui>();
+    let mut showing = use_signal(|| None::<bool>);
+    let id = bot_id.clone();
+    rsx! {
+        button {
+            r#type: "button",
+            "data-open-computer": true,
+            "aria-label": "{name}'s computer",
+            title: "{name}'s computer",
+            class: "flex size-9 shrink-0 items-center justify-center rounded-full bg-composer text-ink/90 ring-1 ring-inset ring-ink/[0.07] shadow-(--shadow-float) hover:bg-[color-mix(in_srgb,var(--color-composer),var(--color-ink)_7%)] max-md:hidden",
+            onclick: move |_| {
+                let id = id.clone();
+                spawn(async move {
+                    let list = crate::api::get("/api/computers").await.ok();
+                    let entry = list.as_ref().and_then(|l| l["computers"].as_array().or(l.as_array())).and_then(|all| all.iter().find(|e| e["botId"] == id.as_str()).cloned());
+                    match entry {
+                        Some(entry) => showing.set(Some(entry["kind"] == "boat")),
+                        None => {
+                            let mut prefs = ui.prefs;
+                            prefs.set(Some("computers".into()));
+                        }
+                    }
+                });
+            },
+            crate::sidebar::Icon { name: "monitor", size: 16 }
+        }
+        if let Some(at_boat) = showing() {
+            crate::computers::ComputerView { bot_id: bot_id.clone(), name: name.clone(), at_boat, on_close: move |_| showing.set(None) }
         }
     }
 }
@@ -883,7 +937,7 @@ fn EmptyChat(bot: Bot) -> Element {
         div { class: "flex flex-col items-center gap-3 py-24 text-center",
             BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
             p { class: "text-[15px] font-semibold text-ink", "{bot.name}" }
-            p { class: "text-[13px] text-ink-secondary", "No messages yet." }
+            p { class: "text-[13px] text-ink-secondary", "Send a message to start the conversation." }
         }
     }
 }
@@ -903,6 +957,14 @@ fn Row(
 ) -> Element {
     let when = clock(message.at);
     let full_time = full_date(message.at);
+    // Your own messages wear the bot's colour (their default; Settings › Appearance turns it off).
+    let looks = use_context::<Signal<crate::looks::Looks>>();
+    let colour = use_context::<Signal<State>>().read().bots.iter().find(|b| b.id == bot_id).map(|b| b.color.clone());
+    // In simple mode theirs is one even fill (no sheen), with white ink on every colour.
+    let (own_class, own_style) = match colour.filter(|_| looks.read().color_mine) {
+        Some(c) => ("text-ink antialiased user-bubble-colored".to_string(), format!("background-color: var(--identity-{c}); --color-bubble-user: var(--identity-{c}); --color-ink: #ffffff; --color-ink-secondary: rgb(255 255 255 / 0.82); --color-ink-tertiary: rgb(255 255 255 / 0.7)")),
+        None => ("bg-bubble-user text-ink".to_string(), String::new()),
+    };
     match &message.body {
         Body::Person(text) => rsx! {
             div { class: "group flex w-full flex-col items-end gap-1.5 animate-msg-in",
@@ -911,7 +973,10 @@ fn Row(
                 div { class: "flex w-full items-center justify-end gap-1.5",
                     span { class: "order-first mr-2 self-end pb-1 text-[11px] tabular-nums text-ink-tertiary opacity-0 transition-opacity group-hover:opacity-100", "{when}" }
                     div {
-                        class: "w-fit max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct))] rounded-2xl bg-bubble-user px-4 py-2.5 text-[15px] leading-relaxed whitespace-pre-wrap [overflow-wrap:anywhere] text-ink",
+                        class: "w-fit min-w-9 {SIMPLE_BUBBLE_MAX} rounded-[18px] px-3 py-[7px] text-[15px] leading-[22px] whitespace-pre-wrap [overflow-wrap:anywhere] {own_class}",
+                        style: "{own_style}",
+                        "data-own-bubble": true,
+                        "data-chat-bubble": "simple",
                         title: "{full_time}",
                         div { class: "chat-text", "{text}" }
                     }
@@ -943,7 +1008,7 @@ fn Row(
             let shape = if markdown::is_formatted(text) {
                 "w-full max-w-[min(var(--chat-prose-max),var(--chat-card-pct))] rounded-2xl px-1 text-[15px] leading-relaxed text-ink"
             } else {
-                "w-fit max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct))] rounded-2xl bg-card px-4 py-2.5 text-[15px] leading-relaxed text-ink"
+                "w-fit min-w-9 max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct),calc(100%-82px))] rounded-[18px] bg-card bubble-finish px-3 py-[7px] text-[15px] leading-[22px] text-ink"
             };
             let html = markdown::to_html(text);
             let speaker = match (&speakers, &message.bot_id) {

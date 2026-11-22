@@ -472,5 +472,11 @@ fn AppearancePage() -> Element {
                 {choice(id, name, "", current == *id)}
             }
         }
+        h3 { class: SECTION, "Chat" }
+        div { class: CARD,
+            Row { label: "Your messages in the bot's colour".to_string(), line: "Off, they stay grey.".to_string(),
+                crate::settings::Switch { checked: look().color_mine, disabled: false, label: "Your messages in the bot's colour".to_string(), on_toggle: move |_| { looks::change(look, |l| l.color_mine = !l.color_mine); } }
+            }
+        }
     }
 }

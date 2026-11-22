@@ -27,6 +27,8 @@ pub struct Ui {
     pub settings_open: Signal<bool>,
     /// On a phone (narrow screens), whether the open chat fills the screen rather than the list.
     pub showing_chat: Signal<bool>,
+    /// The Settings window, open on this page (a page's key), from anywhere in the app.
+    pub prefs: Signal<Option<String>>,
 }
 
 /// Their approval levels, in their words.
@@ -43,7 +45,7 @@ const FIELD: &str = "mt-1 w-full rounded-lg bg-inset px-3 py-2 text-[14px] text-
 const ICON_BUTTON: &str = "flex size-10 items-center justify-center rounded-md text-ink-secondary hover:bg-control hover:text-ink";
 
 /// Saves a change and takes the bot the server sends back.
-async fn save(mut state: Signal<State>, bot_id: &str, change: Value) -> Result<(), String> {
+pub(crate) async fn save(mut state: Signal<State>, bot_id: &str, change: Value) -> Result<(), String> {
     let answer = api::call("PATCH", &format!("/api/bots/{bot_id}"), Some(&change)).await?;
     state.write().apply(&json!({ "kind": "bot", "bot": answer["bot"] }));
     Ok(())
