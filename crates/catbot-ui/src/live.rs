@@ -61,6 +61,8 @@ pub struct State {
     pub apps_changed: u64,
     pub computers_changed: u64,
     pub devices_changed: u64,
+    /// Counts `inbox` frames: the Inbox's list changed (read it again).
+    pub inbox_changed: u64,
 }
 
 /// What a frame asks of the app beyond changing `State`.
@@ -128,6 +130,7 @@ impl State {
             Some("triggers") => self.triggers_changed += 1,
             Some("apps") => self.apps_changed += 1,
             Some("computers") => self.computers_changed += 1,
+            Some("inbox") => self.inbox_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();
                 self.bots.retain(|b| b.id != id);

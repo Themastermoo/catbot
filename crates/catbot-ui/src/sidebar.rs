@@ -169,6 +169,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                     }
                 }
             }
+            if q.is_empty() {
+                crate::inbox::InboxRow {}
+            }
             div { class: "min-h-0 flex-1 overflow-y-auto",
                 if let Some(chief) = chief {
                     div { "data-sidebar-tiles": true, class: "flex flex-wrap justify-center gap-x-1 gap-y-3 px-3 pb-4 pt-2.5",
@@ -633,6 +636,15 @@ pub fn Icon(name: &'static str, size: u32, #[props(default)] filled: bool) -> El
         "handoff" => &["M18 8L22 12L18 16", "M2 12H22", "M6 4v16"],
         "palette" => &["M12 22a1 1 0 0 1 0-20 10 9 0 0 1 10 9 5 5 0 0 1-5 5h-2.25a1.75 1.75 0 0 0-1.4 2.8l.3.4a1.75 1.75 0 0 1-1.4 2.8z", "M14 7.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z", "M18 11.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z", "M7 10.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z", "M9 6.5a.5.5 0 1 1-1 0 .5.5 0 0 1 1 0z"],
         "chevron-right" => &["m9 18 6-6-6-6"],
+        "chevron-left" => &["m15 18-6-6 6-6"],
+        "chevron-up" => &["m18 15-6-6-6 6"],
+        "chevron-down" => &["m6 9 6 6 6-6"],
+        "inbox" => &["M22 12h-6l-2 3h-4l-2-3H2", "M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"],
+        "maximize" => &["M15 3h6v6", "m21 3-7 7", "m3 21 7-7", "M9 21H3v-6"],
+        "minimize" => &["m14 10 7-7", "M20 10h-6V4", "m3 21 7-7", "M4 14h6v6"],
+        "reply" => &["M20 20v-7a4 4 0 0 0-4-4H4", "M9 14 4 9l5-5"],
+        "external" => &["M15 3h6v6", "M10 14 21 3", "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"],
+        "check-circle" => &["M21.801 10A10 10 0 1 1 17 3.335", "m9 11 3 3L22 4"],
         _ => &[],
     };
     let fill = if filled { "currentColor" } else { "none" };

@@ -42,6 +42,7 @@ mod usage;
 mod sidebar;
 mod looks;
 mod prefs;
+mod inbox;
 mod model_menu;
 mod panel;
 mod pets;
@@ -164,6 +165,36 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let find = use_signal(|| None::<String>);
     let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat, prefs, find });
     let notify_prefs = use_context_provider(|| Signal::new(notify::load()));
+    let inbox = use_context_provider(inbox::Inbox::new);
+    // The Inbox's list, read at start and again whenever the server says it changed.
+    use_effect(move || {
+        let _ = state.read().inbox_changed;
+        inbox.refresh();
+    });
+    // The Inbox and a bot's panel share the right side: opening one closes the other.
+    use_effect(move || {
+        if (ui.settings_open)() {
+            let mut open = inbox.open;
+            if *open.peek() {
+                open.set(false);
+            }
+        }
+    });
+    // The chat in front of the person is read: tell Catbot, once per answer.
+    use_effect(move || {
+        let Some(id) = selected() else { return };
+        let bots = state.read();
+        let Some(bot) = bots.bots.iter().find(|b| b.id == id) else { return };
+        let unread = if bot.channel.is_some() { bot.unread } else { bot.open_chat().is_some_and(|c| c.unread) };
+        if !unread {
+            return;
+        }
+        let (bot_id, thread) = (bot.id.clone(), bot.thread_id.clone());
+        drop(bots);
+        spawn(async move {
+            let _ = api::post(&format!("/api/bots/{bot_id}/read"), &serde_json::json!({ "threadId": thread })).await;
+        });
+    });
     // Closing the window lets the desktop pets out, if any bot is one.
     #[cfg(feature = "desktop")]
     {
@@ -247,6 +278,9 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
             div { class: "relative flex min-h-0 flex-1",
                 Sidebar { bots, selected }
                 Main { bots, selected, problem }
+                if (inbox.open)() {
+                    inbox::InboxPanel {}
+                }
             }
         }
     }
@@ -269,6 +303,7 @@ fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, proble
 #[component]
 fn MainView(open: Option<Bot>, problem: Option<String>) -> Element {
     let ui = use_context::<settings::Ui>();
+    let inbox = use_context::<inbox::Inbox>();
     match (problem, open) {
         (Some(err), _) => rsx! {
             main { class: "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center bg-app",
@@ -281,7 +316,7 @@ fn MainView(open: Option<Bot>, problem: Option<String>) -> Element {
             for bot in std::iter::once(bot) {
                 // Keyed by bot and chat, so opening another chat starts the view fresh too.
                 chat::Chat { key: "{bot.id}-{bot.thread_id}", bot: bot.in_open_chat() }
-                if (ui.settings_open)() {
+                if (ui.settings_open)() && !(inbox.open)() {
                     if bot.channel.is_some() {
                         settings::SettingsPanel { key: "settings-{bot.id}", bot }
                     } else {

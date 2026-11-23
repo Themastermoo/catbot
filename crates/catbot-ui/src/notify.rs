@@ -1,5 +1,5 @@
 //! Desktop notifications, in the Linux and Windows apps only (Moo's choice): a bot finished a
-//! turn, or a bot is asking for approval. Each can be switched on or off in Settings →
+//! turn, a bot is asking for approval, or a bot sent the person a message (its Inbox line). Each can be switched on or off in Settings →
 //! Notifications (kept on this device). None is shown for the chat already open in front of
 //! the person. Clicking one opens its chat (on Linux; Windows only shows them).
 
@@ -17,11 +17,18 @@ pub struct Prefs {
     pub finished: bool,
     /// When a bot asks for approval.
     pub asking: bool,
+    /// When a bot sends the person a message (it lands in the Inbox).
+    #[serde(default = "yes")]
+    pub messages: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for Prefs {
     fn default() -> Prefs {
-        Prefs { finished: true, asking: true }
+        Prefs { finished: true, asking: true, messages: true }
     }
 }
 
@@ -32,10 +39,14 @@ pub const AVAILABLE: bool = cfg!(all(feature = "desktop", not(target_os = "andro
 pub enum Kind {
     Finished,
     Asking,
+    Message,
 }
 
 /// The notification a live frame could call for, and its chat.
 pub fn wanted(frame: &Value) -> Option<(Kind, String)> {
+    if frame["kind"] == "inbox" && frame["line"]["kind"] == "message" {
+        return Some((Kind::Message, frame["line"]["origin"]["threadId"].as_str()?.to_string()));
+    }
     if frame["kind"] != "runtime" {
         return None;
     }
@@ -55,6 +66,7 @@ pub fn words(kind: Kind, frame: &Value, bot_name: &str, chat: Option<&str>, last
     let place = chat.filter(|c| !c.trim().is_empty()).map(|c| format!(" · {c}")).unwrap_or_default();
     match kind {
         Kind::Asking => (format!("{bot_name} is asking{place}"), format!("Approve: {}", event["summary"].as_str().or(event["tool"].as_str()).unwrap_or("a step"))),
+        Kind::Message => (format!("{bot_name} sent you a message{place}"), short(frame["line"]["text"].as_str().unwrap_or_default())),
         Kind::Finished if event["ok"] == false => (format!("{bot_name} ran into a problem{place}"), short(last)),
         Kind::Finished => (format!("{bot_name} finished{place}"), short(last)),
     }
@@ -73,6 +85,7 @@ pub fn on_frame(frame: &Value, prefs: Prefs, state: Signal<State>, ui: Ui) {
     let allowed = match kind {
         Kind::Finished => prefs.finished,
         Kind::Asking => prefs.asking,
+        Kind::Message => prefs.messages,
     };
     if !AVAILABLE || !allowed {
         return;
@@ -84,7 +97,8 @@ pub fn on_frame(frame: &Value, prefs: Prefs, state: Signal<State>, ui: Ui) {
         return;
     }
     let chat = bot.chats.iter().find(|c| c.id == thread).map(|c| c.title.as_str());
-    let (title, body) = words(kind, frame, &bot.name, chat, &bot.preview());
+    let name = frame["line"]["from"]["name"].as_str().unwrap_or(&bot.name).to_string();
+    let (title, body) = words(kind, frame, &name, chat, &bot.preview());
     show(&title, &body, bot.id.clone(), thread);
 }
 
@@ -214,6 +228,18 @@ pub fn NotificationSettings() -> Element {
                     on_toggle: move |_| change(|p| p.asking = !p.asking),
                 }
             }
+            div { class: "flex items-center gap-3 border-t border-hairline/50 px-4 py-3",
+                span { class: "flex min-w-0 flex-1 flex-col",
+                    span { class: "text-[14px] leading-5 text-ink", "When a bot sends you a message" }
+                    span { class: "text-[12px] leading-[17px] text-ink-secondary", "It's in your Inbox too." }
+                }
+                crate::settings::Switch {
+                    checked: current.messages,
+                    disabled: false,
+                    label: "Notify when a bot sends you a message".to_string(),
+                    on_toggle: move |_| change(|p| p.messages = !p.messages),
+                }
+            }
         }
     }
 }
@@ -232,6 +258,11 @@ mod tests {
         let asking = json!({ "kind": "runtime", "event": { "type": "request.opened", "threadId": "t2", "tool": "Bash", "summary": "Bash rm old.txt" } });
         assert_eq!(wanted(&asking), Some((Kind::Asking, "t2".into())));
         assert_eq!(wanted(&json!({ "kind": "message" })), None);
+        let message = json!({ "kind": "inbox", "line": { "kind": "message", "text": "Build is green", "origin": { "threadId": "t3" }, "from": { "name": "Scout" } } });
+        assert_eq!(wanted(&message), Some((Kind::Message, "t3".into())));
+        assert_eq!(wanted(&json!({ "kind": "inbox" })), None);
+        let (title, body) = words(Kind::Message, &message, "Scout", None, "");
+        assert_eq!((title.as_str(), body.as_str()), ("Scout sent you a message", "Build is green"));
 
         let (title, body) = words(Kind::Asking, &asking, "Scout", Some("Garden"), "");
         assert_eq!((title.as_str(), body.as_str()), ("Scout is asking · Garden", "Approve: Bash rm old.txt"));
@@ -241,8 +272,8 @@ mod tests {
 
     #[test]
     fn both_are_on_until_switched_off() {
-        assert_eq!(Prefs::default(), Prefs { finished: true, asking: true });
+        assert_eq!(Prefs::default(), Prefs { finished: true, asking: true, messages: true });
         let saved: Prefs = serde_json::from_str(r#"{"finished":false,"asking":true}"#).unwrap();
-        assert!(!saved.finished && saved.asking);
+        assert!(!saved.finished && saved.asking && saved.messages, "messages are on for those saved before");
     }
 }

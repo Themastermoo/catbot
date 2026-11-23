@@ -93,6 +93,8 @@ pub struct Chat {
     /// When it was last used, in ms since the epoch.
     pub updated: f64,
     pub archived: bool,
+    /// The bot answered here since the person last looked.
+    pub unread: bool,
 }
 
 impl Chat {
@@ -103,6 +105,7 @@ impl Chat {
             activity: Activity::from_wire(wire),
             updated: wire["updatedAt"].as_f64().unwrap_or(0.0),
             archived: wire.get("archivedAt").is_some_and(|a| !a.is_null()),
+            unread: wire["unread"] == true,
         })
     }
 }
