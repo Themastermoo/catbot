@@ -84,6 +84,17 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
         .collect();
     let empty = all.is_empty();
     drop(all);
+    // Grouped by department once there are any (not while searching): each heading, then its bots;
+    // General last, headed only when there are departments.
+    let depts = use_context::<Signal<crate::departments::Depts>>();
+    let mut department_dialog = use_signal(|| None::<crate::departments::Open>);
+    let dragging = use_signal(|| None::<String>);
+    let folded = look.read().folded.clone();
+    let grouped: Vec<(Option<String>, Vec<Bot>)> = if depts.read().list.is_empty() || !q.is_empty() {
+        vec![(None, shown.clone())]
+    } else {
+        crate::departments::groups(&shown, &depts.read()).into_iter().map(|(name, bots)| (Some(name), bots)).collect()
+    };
     // On a phone the list gives way to the open chat.
     let phone = if (ui.showing_chat)() { "max-md:hidden" } else { "" };
     let pick = move |id: String| {
@@ -136,6 +147,14 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                                 span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "bot", size: 16 } }
                                 span { class: "flex-1", "New bot" }
                             }
+                            button { r#type: "button", role: "menuitem", "data-open-new-department": true, class: MENU_ROW,
+                                onclick: move |_| { adding.set(false); department_dialog.set(Some(crate::departments::Open::New(Vec::new()))); },
+                                span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "users", size: 16 } }
+                                div { class: "flex min-w-0 flex-1 flex-col",
+                                    span { "New department" }
+                                    span { class: "truncate text-[12px] leading-4 text-ink-secondary", "Group bots that work together" }
+                                }
+                            }
                             button { r#type: "button", role: "menuitem", "data-open-new-channel": true, class: MENU_ROW,
                                 onclick: move |_| { adding.set(false); open.set(Some(Open::NewChannel)); },
                                 span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "hash", size: 16 } }
@@ -186,29 +205,55 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                     } else if shown.is_empty() && !q.is_empty() {
                         div { class: "px-2 py-6 text-center text-[13px] text-ink-secondary", "Nothing matches “{query}”" }
                     }
-                    for bot in shown {
-                        BotRow {
-                            key: "{bot.id}",
-                            selected: selected.read().as_deref() == Some(bot.id.as_str()),
-                            // Open by the arrow, or while a search finds one of its chats.
-                            unfolded: unfolded.read().contains(&bot.id) || chat_found(&bot, &query.read()),
-                            query: query.read().clone(),
-                            bot,
-                            on_select: pick,
-                            on_fold: move |id: String| {
-                                let mut open = unfolded.write();
-                                if !open.remove(&id) {
-                                    open.insert(id);
+                    for (group, members) in grouped {
+                        if let Some(name) = group.clone() {
+                            crate::departments::Header {
+                                key: "dept-{name}",
+                                name: name.clone(),
+                                bots: members.clone(),
+                                folded: folded.contains(&name),
+                                dragging,
+                                on_toggle: {
+                                    let name = name.clone();
+                                    move |_| crate::looks::change(look, |l| {
+                                        if let Some(at) = l.folded.iter().position(|f| *f == name) { l.folded.remove(at); } else { l.folded.push(name.clone()); }
+                                    })
+                                },
+                                on_open: move |o| department_dialog.set(Some(o)),
+                            }
+                        }
+                        if group.as_ref().is_some_and(|name| name != crate::departments::GENERAL && !folded.contains(name)) && members.is_empty() {
+                            div { "data-department-empty": true, class: "px-2 pb-1 text-[12px] leading-4 text-ink-tertiary", "No bots yet. Drag one here, or right-click a bot." }
+                        }
+                        if group.as_ref().is_none_or(|name| !folded.contains(name)) {
+                            for bot in members {
+                                BotRow {
+                                    key: "{bot.id}",
+                                    selected: selected.read().as_deref() == Some(bot.id.as_str()),
+                                    // Open by the arrow, or while a search finds one of its chats.
+                                    unfolded: unfolded.read().contains(&bot.id) || chat_found(&bot, &query.read()),
+                                    query: query.read().clone(),
+                                    bot,
+                                    on_select: pick,
+                                    on_fold: move |id: String| {
+                                        let mut open = unfolded.write();
+                                        if !open.remove(&id) {
+                                            open.insert(id);
+                                        }
+                                    },
+                                    on_new_chat: move |id: String| {
+                                        unfolded.write().insert(id.clone());
+                                        chats::start(state, ui, id);
+                                    },
+                                    dragging,
+                                    on_departments: move |o| department_dialog.set(Some(o)),
                                 }
-                            },
-                            on_new_chat: move |id: String| {
-                                unfolded.write().insert(id.clone());
-                                chats::start(state, ui, id);
-                            },
+                            }
                         }
                     }
                 }
             }
+            crate::departments::Dialogs { open: department_dialog }
             Footer { bot_count: bots.read().iter().filter(|b| b.channel.is_none()).count(), on_open: move |o| match o {
                 // Settings belongs to the app (the chat opens it too).
                 Open::Settings(page) => { let mut prefs = ui.prefs; prefs.set(Some(page.to_string())); }
@@ -304,8 +349,15 @@ fn BotRow(
     on_select: EventHandler<String>,
     on_fold: EventHandler<String>,
     on_new_chat: EventHandler<String>,
+    /// The bot being dragged to another department, if one is.
+    dragging: Signal<Option<String>>,
+    on_departments: EventHandler<crate::departments::Open>,
 ) -> Element {
     let (id, key_id, fold_id, new_id) = (bot.id.clone(), bot.id.clone(), bot.id.clone(), bot.id.clone());
+    let drag_id = bot.id.clone();
+    // Right-click: move it to another department.
+    let mut moving = use_signal(|| false);
+    let is_bot = bot.channel.is_none();
     let waiting = bot.activity == Activity::WaitingOnYou;
     let working = bot.activity == Activity::Working;
     // The arrow shows once there's more than one chat to choose between.
@@ -333,6 +385,10 @@ fn BotRow(
                 tabindex: 0,
                 "aria-current": if selected && !expanded { "page" },
                 "data-sidebar-bot-row": "{bot.id}",
+                draggable: if is_bot { "true" } else { "false" },
+                ondragstart: move |_| if is_bot { dragging.set(Some(drag_id.clone())) },
+                ondragend: move |_| dragging.set(None),
+                oncontextmenu: move |e| if is_bot { e.prevent_default(); moving.set(true); },
                 // The cat's eyes follow the pointer anywhere on its row (see `MASCOT_LIFE`).
                 "data-cat-follow": true,
                 class: "flex w-full items-center gap-2.5 rounded-xl p-2 text-left transition-colors duration-150 md:h-[54px] md:py-0 max-md:rounded-2xl max-md:py-2.5 {ROW_FOCUS} {surface}",
@@ -355,6 +411,8 @@ fn BotRow(
                             span { class: "truncate", "{bot.name}" }
                             if bot.chief {
                                 span { class: "shrink-0 text-accent", role: "img", "aria-label": "Chief of Staff", "data-chief-crown": true, Icon { name: "crown", size: 13 } }
+                            } else if bot.department_chief {
+                                span { class: "shrink-0 text-ink-tertiary", role: "img", "aria-label": "Leads {bot.department}", title: "Leads {bot.department}", "data-lead-crown": true, Icon { name: "crown", size: 12 } }
                             }
                         }
                     }
@@ -407,6 +465,9 @@ fn BotRow(
             }
             if expanded {
                 ChatList { bot: bot.clone(), current: selected, query }
+            }
+            if moving() {
+                crate::departments::MoveMenu { bot: bot.clone(), on_close: move |_| moving.set(false), on_open: move |o| on_departments.call(o) }
             }
         }
     }
@@ -639,6 +700,8 @@ pub fn Icon(name: &'static str, size: u32, #[props(default)] filled: bool) -> El
         "chevron-left" => &["m15 18-6-6 6-6"],
         "chevron-up" => &["m18 15-6-6-6 6"],
         "chevron-down" => &["m6 9 6 6 6-6"],
+        "more" => &["M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0", "M18 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0", "M4 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0"],
+        "users" => &["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0z", "M22 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"],
         "inbox" => &["M22 12h-6l-2 3h-4l-2-3H2", "M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"],
         "maximize" => &["M15 3h6v6", "m21 3-7 7", "m3 21 7-7", "M9 21H3v-6"],
         "minimize" => &["m14 10 7-7", "M20 10h-6V4", "m3 21 7-7", "M4 14h6v6"],

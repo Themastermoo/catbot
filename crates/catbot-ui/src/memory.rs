@@ -24,10 +24,10 @@ await new Promise(() => {});
 "#;
 
 /// The folders in the list, in this order; anything else comes after.
-const FOLDERS: [(&str, &str); 4] = [("", "Vault"), ("Bots", "Bots"), ("Projects", "Projects"), ("Journal", "Journal")];
+const FOLDERS: [(&str, &str); 5] = [("", "Vault"), ("Bots", "Bots"), ("Departments", "Departments"), ("Projects", "Projects"), ("Journal", "Journal")];
 
 #[component]
-pub fn MemoryDialog(on_close: EventHandler<()>) -> Element {
+pub fn MemoryDialog(on_close: EventHandler<()>, #[props(default)] start: String) -> Element {
     let mut overview = use_signal(|| None::<Value>);
     let mut note = use_signal(|| None::<Value>);
     let mut problem = use_signal(|| None::<String>);
@@ -55,13 +55,17 @@ pub fn MemoryDialog(on_close: EventHandler<()>) -> Element {
     // The list, when the viewer opens and on Refresh; Home.md first if nothing's open.
     use_effect(move || {
         let _ = refreshed();
+        let start = start.clone();
         spawn(async move {
             match api::get("/api/memory").await {
                 Ok(answer) => {
-                    let first = note.peek().is_none() && answer["notes"].as_array().is_some_and(|n| n.iter().any(|n| n["path"] == "Home.md"));
+                    let has = |path: &str| answer["notes"].as_array().is_some_and(|n| n.iter().any(|n| n["path"] == path));
+                    // Opened on a note (a department's): that one, if it's there yet.
+                    let wanted = if !start.is_empty() && has(&start) { Some(start.clone()) } else if has("Home.md") { Some("Home.md".into()) } else { None };
+                    let first = note.peek().is_none();
                     overview.set(Some(answer));
-                    if first {
-                        open("path=Home.md".into(), false);
+                    if let Some(path) = wanted.filter(|_| first) {
+                        open(format!("path={}", markdown::encode(&path)), !start.is_empty());
                     }
                 }
                 Err(err) => problem.set(Some(format!("Couldn't load the memory vault: {err}"))),

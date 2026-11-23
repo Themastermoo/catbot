@@ -72,6 +72,10 @@ pub struct Bot {
     pub codex: bool,
     /// Whether it's the Chief of Staff (starred in the sidebar).
     pub chief: bool,
+    /// Its department; empty for General.
+    pub department: String,
+    /// Whether it leads its department.
+    pub department_chief: bool,
     /// The skills it uses, from the library.
     pub skills: Vec<String>,
     /// The folder it works in, on the computer running Catbot.
@@ -184,6 +188,8 @@ impl Bot {
             folder: wire["folder"].as_str().unwrap_or_default().to_string(),
             pet: wire["pet"].as_bool().unwrap_or(false),
             chief: wire["chief"].as_bool().unwrap_or(false),
+            department: wire["department"].as_str().unwrap_or_default().to_string(),
+            department_chief: wire["departmentChief"].as_bool().unwrap_or(false),
             skills: wire["skills"].as_array().map(|s| s.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
             activity,
             unread: wire["unread"] == true,

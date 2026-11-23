@@ -42,6 +42,7 @@ mod usage;
 mod sidebar;
 mod looks;
 mod prefs;
+mod departments;
 mod inbox;
 mod model_menu;
 mod panel;
@@ -166,6 +167,12 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat, prefs, find });
     let notify_prefs = use_context_provider(|| Signal::new(notify::load()));
     let inbox = use_context_provider(inbox::Inbox::new);
+    let depts = use_context_provider(|| Signal::new(departments::Depts::default()));
+    // The departments, read at start and whenever they change.
+    use_effect(move || {
+        let _ = state.read().departments_changed;
+        departments::refresh(depts);
+    });
     // The Inbox's list, read at start and again whenever the server says it changed.
     use_effect(move || {
         let _ = state.read().inbox_changed;
