@@ -30,8 +30,16 @@ tokio = { version = "1", features = ["time"] }
 # Desktop notifications (Linux and Windows apps only).
 notify-rust = { version = "4", optional = true }
 
+# The desktop pets see where the windows are: through a KWin script on KDE Plasma (D-Bus), and
+# from Windows itself (pet_tops.rs). Both already in the build, through notify-rust and tao.
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = { version = "6", optional = true, default-features = false, features = ["default-rt", "service"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging"] }
+
 [features]
 default = ["web"]
 web = ["dioxus/web"]
-desktop = ["dioxus/desktop", "dep:notify-rust"]
+desktop = ["dioxus/desktop", "dep:notify-rust", "dep:zbus", "dep:windows-sys"]
 mobile = ["dioxus/mobile"]

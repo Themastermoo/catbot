@@ -159,6 +159,7 @@ pub fn launch() {
         std::thread::sleep(Duration::from_millis(1500));
         crate::local::start();
     }
+    crate::pet_tops::start();
     dioxus::LaunchBuilder::desktop().with_cfg(window_config()).launch(Pets);
 }
 
@@ -206,7 +207,57 @@ enum Act {
     Fall(f64),
     /// Being carried: where it was last tick, and since when it's held still (seconds).
     Carried(i32, i32, f64),
+    /// Leaping up onto a window (or across), from one window position to another, `t` of the
+    /// way (0..1).
+    Leap((i32, i32), (i32, i32), f64),
+    /// Landing, for this much longer (seconds).
+    Land(f64),
     Chat,
+}
+
+/// How long a leap takes, and a landing.
+const LEAP: f64 = 0.7;
+const LANDING: f64 = 0.35;
+
+/// Where a leap is `t` of the way: straight across, up and over in an arc at least `lift` high.
+fn arc(from: (i32, i32), to: (i32, i32), t: f64, lift: f64) -> (i32, i32) {
+    let t = t.clamp(0.0, 1.0);
+    let x = from.0 as f64 + (to.0 - from.0) as f64 * t;
+    let rise = (from.1 - to.1).max(0) as f64 * 0.3 + lift;
+    let y = from.1 as f64 + (to.1 - from.1) as f64 * t - 4.0 * rise * t * (1.0 - t);
+    (x.round() as i32, y.round() as i32)
+}
+
+/// Where a pet stands: a window's top edge (by the window's id), or the bottom of the screen.
+#[derive(Clone, Debug, PartialEq)]
+struct Perch {
+    id: String,
+    left: i32,
+    right: i32,
+    /// Where its feet go.
+    feet: i32,
+}
+
+/// The first surface under a pet's feet at `x` (its middle), from `feet` down, if any.
+fn below(surfaces: &[crate::pet_tops::Surface], x: i32, feet: i32) -> Option<Perch> {
+    surfaces
+        .iter()
+        .filter(|s| s.left <= x && x <= s.right && s.y >= feet)
+        .min_by_key(|s| s.y)
+        .map(|s| Perch { id: s.id.clone(), left: s.left, right: s.right, feet: s.y })
+}
+
+/// A window top within a leap of a pet whose middle is at `x`, feet at `feet`: up to `reach`
+/// across and at least 40 up, picked by `roll` (0..1). Gives where to land (the pet's middle) and
+/// the surface.
+fn leap_to(surfaces: &[crate::pet_tops::Surface], x: i32, feet: i32, reach: i32, half: i32, roll: f64) -> Option<(i32, Perch)> {
+    let near: Vec<&crate::pet_tops::Surface> = surfaces
+        .iter()
+        .filter(|s| s.right - s.left >= half * 2 + 10 && s.y < feet - 40 && feet - s.y < reach * 2 && (x.clamp(s.left + half, s.right - half) - x).abs() <= reach)
+        .collect();
+    let s = near.get(((near.len() as f64) * roll) as usize % near.len().max(1))?;
+    let land = x.clamp(s.left + half, s.right - half);
+    Some((land, Perch { id: s.id.clone(), left: s.left, right: s.right, feet: s.y }))
 }
 
 /// The pet's pose for its picture (`data-pet` on Fable's cat; the stand-in cat maps it).
@@ -215,7 +266,8 @@ fn pose(act: Act, mood: &str) -> &'static str {
         Act::Walk => "walk",
         Act::Sit => "sit",
         Act::Sleep => "sleep",
-        Act::Fall(_) => "jump",
+        Act::Fall(_) | Act::Leap(..) => "jump",
+        Act::Land(_) => "land",
         Act::Carried(..) => "drag",
         Act::Chat | Act::Idle => match mood {
             "working" => "working",
@@ -243,6 +295,14 @@ fn screen(desktop: &dioxus::desktop::DesktopContext) -> (i32, i32, i32) {
     let (pos, size, scale) = (monitor.position(), monitor.size(), monitor.scale_factor());
     let ground = pos.y + size.height as i32 - (TASKBAR * scale) as i32 - window.outer_size().height as i32;
     (pos.x, pos.x + size.width as i32, ground)
+}
+
+/// How wide the desktop is, across all its screens (what the window tops are measured against).
+fn span(desktop: &dioxus::desktop::DesktopContext) -> f64 {
+    let monitors: Vec<_> = desktop.window.available_monitors().collect();
+    let left = monitors.iter().map(|m| m.position().x).min().unwrap_or(0);
+    let right = monitors.iter().map(|m| m.position().x + m.size().width as i32).max().unwrap_or(0);
+    (right - left).max(0) as f64
 }
 
 /// Sets the window's size, its limits moving with it.
@@ -304,26 +364,75 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
         }
     });
 
-    // Moving: a step every tick, and now and then a change of mind.
+    // Moving: a step every tick, and now and then a change of mind. The pet stands on the bottom
+    // of the screen or on a window's top edge (`pet_tops`), and follows that window if it moves.
     let mover = desktop.clone();
     use_future(move || {
         let desktop = mover.clone();
         async move {
             let mut seed = 0x9E37_79B9_7F4A_7C15u64 ^ (index as u64 + 1).wrapping_mul(0x2545_F491_4F6C_DD1D);
             let mut left_for = 4.0 + chance(&mut seed) * 6.0;
-            let dt = TICK.as_secs_f64();
+            // Steps go by the time that actually passed (a busy computer ticks late), so the
+            // walk keeps pace with the paws.
+            let mut ticked = std::time::Instant::now();
+            let mut perch: Option<Perch> = None;
+            let mut surfaces = Vec::new();
+            // Part-pixels walked, carried to the next step.
+            let mut walked = 0.0f64;
+            let mut looked = 0.0;
             loop {
                 crate::events::pause(TICK.as_millis() as u32).await;
+                let dt = ticked.elapsed().as_secs_f64().min(0.2);
+                ticked = std::time::Instant::now();
                 let window = &desktop.window;
                 let scale = window.scale_factor();
                 let Ok(at) = window.outer_position() else { continue };
+                let size = window.outer_size();
+                let (w, h) = (size.width as i32, size.height as i32);
                 let (left, right, ground) = screen(&desktop);
+                // Where the windows are, twice a second.
+                looked -= dt;
+                if looked <= 0.0 {
+                    looked = 0.5;
+                    surfaces = crate::pet_tops::surfaces(span(&desktop));
+                }
                 let now = *act.peek();
                 // A bot at work or waiting holds the pet where it stands.
                 let busy = *mood.peek() != "idle";
+                // The window it stands on moved or went: follow it, or fall.
+                if let Some(p) = perch.clone() {
+                    let middle = at.x + w / 2;
+                    let same = surfaces.iter().filter(|s| s.id == p.id).min_by_key(|s| (s.y - p.feet).abs() + (s.left - p.left).abs());
+                    match same {
+                        Some(s) if !matches!(now, Act::Carried(..) | Act::Chat | Act::Leap(..) | Act::Fall(_)) => {
+                            let (dx, dy) = (s.left - p.left, s.y - p.feet);
+                            if (dx, dy) != (0, 0) && s.right - s.left == p.right - p.left {
+                                window.set_outer_position(PhysicalPosition::new(at.x + dx, at.y + dy));
+                            } else if middle < s.left || middle > s.right {
+                                perch = None;
+                                act.set(Act::Fall(0.0));
+                                continue;
+                            }
+                            perch = Some(Perch { id: s.id.clone(), left: s.left, right: s.right, feet: s.y });
+                        }
+                        Some(_) => {}
+                        None => {
+                            perch = None;
+                            if !matches!(now, Act::Carried(..) | Act::Chat | Act::Leap(..)) {
+                                act.set(Act::Fall(0.0));
+                                continue;
+                            }
+                        }
+                    }
+                }
+                let (lo, hi, top) = match &perch {
+                    Some(p) => (p.left, p.right, p.feet - h),
+                    None => (left, right, ground),
+                };
                 match now {
                     Act::Chat => continue,
                     Act::Carried(x, y, still) => {
+                        perch = None;
                         let held = if (at.x, at.y) == (x, y) { still + dt } else { 0.0 };
                         if held > 0.35 && pressed.peek().is_none() {
                             act.set(Act::Fall(0.0));
@@ -335,9 +444,13 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                     Act::Fall(speed) => {
                         let speed = speed + 2400.0 * scale * dt;
                         let y = at.y + (speed * dt) as i32;
-                        if y >= ground {
-                            window.set_outer_position(PhysicalPosition::new(at.x, ground));
-                            act.set(Act::Idle);
+                        // Onto the first window top under it, or the ground.
+                        let floor = below(&surfaces, at.x + w / 2, at.y + h).filter(|p| p.feet - h <= ground);
+                        let stop = floor.as_ref().map(|p| p.feet - h).unwrap_or(ground);
+                        if y >= stop {
+                            window.set_outer_position(PhysicalPosition::new(at.x, stop));
+                            perch = floor;
+                            act.set(Act::Land(LANDING));
                             left_for = 1.5;
                         } else {
                             window.set_outer_position(PhysicalPosition::new(at.x, y));
@@ -345,37 +458,73 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         }
                         continue;
                     }
+                    Act::Leap(from, to, t) => {
+                        let t = t + dt / LEAP;
+                        let (x, y) = arc(from, to, t, 70.0 * scale);
+                        window.set_outer_position(PhysicalPosition::new(x, y));
+                        act.set(if t >= 1.0 { Act::Land(LANDING) } else { Act::Leap(from, to, t) });
+                        continue;
+                    }
+                    Act::Land(left) => {
+                        act.set(if left - dt <= 0.0 { Act::Idle } else { Act::Land(left - dt) });
+                        continue;
+                    }
                     _ => {}
                 }
-                // Off the ground (the screen changed, say): back down.
-                if at.y < ground - 2 || at.y > ground + 2 {
+                // Not where it should stand (the screen changed, say): down it goes.
+                if (at.y - top).abs() > 2 {
+                    perch = None;
                     act.set(Act::Fall(0.0));
                     continue;
                 }
                 left_for -= dt;
                 if now == Act::Walk && !busy {
-                    let step = (WALK * scale * dt).max(1.0) as i32;
-                    let width = window.outer_size().width as i32;
+                    walked += WALK * scale * dt;
+                    let step = walked.floor() as i32;
+                    walked -= step as f64;
                     let mut x = if *facing_left.peek() { at.x - step } else { at.x + step };
-                    if x <= left {
-                        x = left;
+                    let edge = x <= lo || x + w >= hi;
+                    if edge && perch.is_some() && chance(&mut seed) < 0.35 {
+                        // Off the edge of a window: down it hops.
+                        perch = None;
+                        act.set(Act::Fall(0.0));
+                        continue;
+                    }
+                    if x <= lo {
+                        x = lo;
                         facing_left.set(false);
-                    } else if x + width >= right {
-                        x = right - width;
+                    } else if x + w >= hi {
+                        x = hi - w;
                         facing_left.set(true);
                     }
-                    window.set_outer_position(PhysicalPosition::new(x, ground));
+                    window.set_outer_position(PhysicalPosition::new(x, top));
                 }
                 if busy && now != Act::Idle {
                     act.set(Act::Idle);
                 }
                 if left_for <= 0.0 && !busy {
-                    // What next: mostly walking, sometimes a rest, rarely a nap.
+                    // What next: mostly walking, sometimes a rest, now and then up onto a window
+                    // (or down from one), rarely a nap.
                     let roll = chance(&mut seed);
+                    if roll < 0.15 && now != Act::Sleep {
+                        let middle = at.x + w / 2;
+                        if let Some((land, onto)) = leap_to(&surfaces, middle, at.y + h, (420.0 * scale) as i32, w / 2, chance(&mut seed)) {
+                            facing_left.set(land < middle);
+                            act.set(Act::Leap((at.x, at.y), (land - w / 2, onto.feet - h), 0.0));
+                            perch = Some(onto);
+                            left_for = 3.0 + chance(&mut seed) * 4.0;
+                            continue;
+                        }
+                        if perch.is_some() {
+                            perch = None;
+                            act.set(Act::Fall(0.0));
+                            continue;
+                        }
+                    }
                     let next = match now {
                         Act::Sleep if roll < 0.7 => Act::Sleep,
-                        _ if roll < 0.55 => Act::Walk,
-                        _ if roll < 0.8 => Act::Idle,
+                        _ if roll < 0.6 => Act::Walk,
+                        _ if roll < 0.82 => Act::Idle,
                         _ if roll < 0.95 => Act::Sit,
                         _ => Act::Sleep,
                     };
@@ -581,6 +730,21 @@ mod tests {
         let rolls: Vec<f64> = (0..100).map(|_| chance(&mut seed)).collect();
         assert!(rolls.iter().all(|r| (0.0..1.0).contains(r)));
         assert!(rolls.iter().any(|r| *r < 0.2) && rolls.iter().any(|r| *r > 0.8), "spread out");
+        assert_eq!(pose(Act::Leap((0, 0), (1, 1), 0.5), "idle"), "jump");
+        // A leap starts and ends where it should and rises in between.
+        assert_eq!(arc((0, 500), (200, 300), 0.0, 70.0), (0, 500));
+        assert_eq!(arc((0, 500), (200, 300), 1.0, 70.0), (200, 300));
+        assert!(arc((0, 500), (200, 300), 0.5, 70.0).1 < 300, "over the top");
+        let tops = vec![
+            crate::pet_tops::Surface { id: "a".into(), left: 100, right: 600, y: 400 },
+            crate::pet_tops::Surface { id: "b".into(), left: 300, right: 900, y: 200 },
+        ];
+        assert_eq!(below(&tops, 350, 100).unwrap().id, "b", "the first top under it");
+        assert_eq!(below(&tops, 150, 300).unwrap().id, "a");
+        assert_eq!(below(&tops, 950, 100), None);
+        let (land, onto) = leap_to(&tops, 150, 700, 420, 50, 0.0).unwrap();
+        assert_eq!((onto.id.as_str(), land), ("a", 150));
+        assert_eq!(leap_to(&tops, 2000, 700, 420, 50, 0.0), None, "too far");
         let cat = pet_markup("walk", "visor", "teal");
         assert!(cat.contains(r#"data-pet="walk" data-face="visor""#) && cat.contains("--identity-teal") && cat.contains("pet-leg-fr"));
         assert_eq!(PetInfo::from_wire(&json!({ "botId": "b1", "name": "Kiwi", "color": "purple", "mark": "cat-visor" })).unwrap().mark, "cat-visor");

@@ -46,6 +46,8 @@ mod model_menu;
 mod panel;
 mod pets;
 #[cfg(feature = "desktop")]
+mod pet_tops;
+#[cfg(feature = "desktop")]
 mod pet_window;
 
 use dioxus::prelude::*;
