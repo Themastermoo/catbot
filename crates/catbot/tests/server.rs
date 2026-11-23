@@ -296,6 +296,31 @@ async fn a_turn_streams_asks_and_is_kept() {
 }
 
 #[tokio::test]
+async fn bots_become_desktop_pets_when_ticked() {
+    let s = setup().await;
+    let (_, pets) = s.call("GET", "/api/pets", None).await;
+    assert_eq!((pets["pets"].clone(), pets["tutorialSeen"].clone()), (json!([]), json!(false)), "off until a bot is ticked");
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    assert_eq!(made["bot"]["pet"], false);
+    let (_, other) = s.call("POST", "/api/bots", Some(json!({ "name": "Quill" }))).await;
+    let quill = other["bot"]["id"].as_str().unwrap().to_string();
+
+    let (_, patched) = s.call("PATCH", &format!("/api/bots/{scout}"), Some(json!({ "pet": true }))).await;
+    assert_eq!(patched["bot"]["pet"], true);
+    s.call("PATCH", &format!("/api/bots/{quill}"), Some(json!({ "pet": true }))).await;
+    let (_, pets) = s.call("GET", "/api/pets", None).await;
+    let names: Vec<&str> = pets["pets"].as_array().unwrap().iter().filter_map(|p| p["name"].as_str()).collect();
+    assert_eq!(names, ["Scout", "Quill"], "in the order they were ticked");
+    assert!(pets["pets"][0]["mark"].is_string() && pets["pets"][0]["color"].is_string());
+
+    s.call("PATCH", &format!("/api/bots/{scout}"), Some(json!({ "pet": false }))).await;
+    s.call("DELETE", &format!("/api/bots/{quill}"), None).await;
+    let (_, pets) = s.call("PUT", "/api/pets", Some(json!({ "tutorialSeen": true }))).await;
+    assert_eq!((pets["pets"].clone(), pets["tutorialSeen"].clone()), (json!([]), json!(true)));
+}
+
+#[tokio::test]
 async fn stopping_closes_the_card_and_says_so() {
     let s = setup().await;
     let mut events = s.events().await;
@@ -2013,9 +2038,20 @@ async fn a_bot_sets_up_its_own_triggers_at_once_and_leaves_a_card() {
     // Run by hand from its chat with the person: the run goes to the trigger's own chat.
     let ran = ask(&mut events, &scout, &format!(r#"catbot-tool: trigger {{"action": "run_now", "trigger_id": "{id}"}}"#)).await;
     assert!(ran.contains("Started “Morning inbox”"), "{ran}");
-    until(&mut events, "the run's reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
-    until(&mut events, "the run done", |f| runtime(f, "turn.completed")).await;
-    let own = s.call("GET", &format!("/api/triggers/{id}"), None).await.1["trigger"]["threadId"].as_str().unwrap().to_string();
+    // (The run and the asking turn overlap, so their frames come in either order: look at the
+    // run's chat instead.)
+    let mut own = String::new();
+    for _ in 0..200 {
+        if let Some(found) = s.call("GET", &format!("/api/triggers/{id}"), None).await.1["trigger"]["threadId"].as_str() {
+            own = found.to_string();
+            let (_, page) = s.call("GET", &format!("/api/threads/{own}/messages?limit=10"), None).await;
+            if page["messages"].as_array().is_some_and(|m| m.iter().any(|m| m["role"] == "bot" && m["kind"] == "text")) {
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(!own.is_empty(), "the run has its own chat");
     assert_ne!(own, thread);
 
     // Deleted, with a card that can bring it back.

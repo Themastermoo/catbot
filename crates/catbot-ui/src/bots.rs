@@ -76,6 +76,8 @@ pub struct Bot {
     pub skills: Vec<String>,
     /// The folder it works in, on the computer running Catbot.
     pub folder: String,
+    /// Whether it comes out onto the desktop as a pet when the app's window closes.
+    pub pet: bool,
     pub activity: Activity,
     pub unread: bool,
     /// Its newest message worth a preview, if it has one.
@@ -177,6 +179,7 @@ impl Bot {
             codex: wire["codex"].as_bool().unwrap_or(true),
             effort: wire["effort"].as_str().unwrap_or_default().to_string(),
             folder: wire["folder"].as_str().unwrap_or_default().to_string(),
+            pet: wire["pet"].as_bool().unwrap_or(false),
             chief: wire["chief"].as_bool().unwrap_or(false),
             skills: wire["skills"].as_array().map(|s| s.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
             activity,

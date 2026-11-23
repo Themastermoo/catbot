@@ -44,6 +44,7 @@ mod looks;
 mod prefs;
 mod model_menu;
 mod panel;
+mod pets;
 
 use dioxus::prelude::*;
 

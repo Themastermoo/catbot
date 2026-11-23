@@ -417,6 +417,8 @@ fn AppPage() -> Element {
         div { class: CARD,
             Row { label: format!("Catbot {version}"), line: "Your helper builds each new stage and restarts Catbot; reopen this window to get it.".to_string() }
         }
+        h3 { class: SECTION, "Desktop pets" }
+        div { class: CARD, crate::pets::PetsSettings {} }
         if crate::notify::AVAILABLE {
             h3 { class: SECTION, "Notifications" }
             crate::notify::NotificationSettings {}

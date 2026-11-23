@@ -30,6 +30,7 @@ pub mod email;
 pub mod engines;
 pub mod images;
 pub mod page_hosts;
+pub mod pets;
 pub mod pages;
 pub mod events;
 pub mod hooks;
@@ -352,6 +353,17 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "memory", rest @ ..] if method == Method::GET => respond(memory::route(&app, rest, &req)),
         ["api", "attachments", id] if method == Method::GET => attachments::serve(&app, id).await,
         ["api", "usage", rest @ ..] if method == Method::GET => usage_route(&app, rest, usage_query(&req)).await,
+        ["api", "pets"] if method == Method::GET || method == Method::PUT => {
+            let body = if method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(pets::route(&app, body))
+        }
         ["api", "limits"] if method == Method::GET || method == Method::PUT => {
             let body = if method == Method::PUT {
                 match json_body(req).await {
@@ -775,6 +787,9 @@ pub(super) fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
     }
     if let Some(list) = body.get("skills") {
         app.try_store(|store| skills::set(store, &bot.id, list).map_err(Into::into)).map_err(bad)?;
+    }
+    if let Some(pet) = body["pet"].as_bool() {
+        app.try_store(|store| pets::set(store, &bot.id, pet)).map_err(bad)?;
     }
     if let Some(memory) = &app.memory
         && let Err(err) = crate::memory::rename_bot(memory, &before, &bot)

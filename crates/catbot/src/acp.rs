@@ -268,7 +268,12 @@ fn levels_file(engine: &Engine) -> Option<PathBuf> {
     crate::engines::agents_dir().map(|dir| dir.join(engine.id).join("thinking.json"))
 }
 
+/// The levels seen since Catbot started, by engine (ahead of the file, which other Catbots in
+/// the same process, such as tests, may point elsewhere).
+static SEEN: std::sync::Mutex<Option<std::collections::HashMap<String, ThoughtLevels>>> = std::sync::Mutex::new(None);
+
 fn remember_levels(engine: &Engine, levels: &ThoughtLevels) {
+    SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(engine.id.to_string(), levels.clone());
     let Some(file) = levels_file(engine) else { return };
     if let Some(dir) = file.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -281,6 +286,9 @@ fn remember_levels(engine: &Engine, levels: &ThoughtLevels) {
 /// The thinking levels this agent offered last time it ran, if it offered any. Unknown until a
 /// bot has used it once.
 pub fn known_levels(engine: &Engine) -> Option<ThoughtLevels> {
+    if let Some(seen) = SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|s| s.get(engine.id)) {
+        return Some(seen.clone());
+    }
     let text = std::fs::read_to_string(levels_file(engine)?).ok()?;
     serde_json::from_str(&text).ok()
 }

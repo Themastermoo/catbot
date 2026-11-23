@@ -240,6 +240,10 @@ pub fn BotSettings(bot: Bot) -> Element {
                             p { class: "mt-2 text-[12px] text-warning", "{bot.name} acts without asking, anywhere it can reach." }
                         }
                     }
+                    // Desktop pet.
+                    if !channel {
+                        div { class: CARD, crate::pets::PetSwitch { bot: bot.clone() } }
+                    }
                     // Codex.
                     div { class: "flex items-center justify-between gap-4 {CARD}", hidden: channel,
                         div { class: "min-w-0",

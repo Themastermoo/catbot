@@ -145,6 +145,8 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         "chief": super::chief::is_chief_in(store, &bot.id),
         // Catbot's own: the skills it uses, from the library.
         "skills": super::skills::of(store, &bot.id),
+        // Catbot's own: whether it comes out onto the desktop as a pet when the app's window closes.
+        "pet": super::pets::is_pet(store, &bot.id),
         "mascotBody": "cursor",
         "unread": false,
         "modelSelection": model_selection(bot),
