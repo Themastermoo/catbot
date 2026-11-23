@@ -2,7 +2,9 @@
 //! layout has them (`ModelPicker.tsx`, `SimpleModelMenu.tsx`, `EngineUsage.tsx`, Apache-2.0, see
 //! NOTICE): the plan's usage when the AI has one ("5-hour · 98% left · resets 10:10 PM"), the
 //! model the bot uses, the AI's other models, other AIs that are ready, and Manage AI accounts.
-//! Choosing changes the bot's model for all its chats.
+//! Choosing changes the bot's model for all its chats. Under the model, a Thinking row folds open
+//! to the levels the bot's AI takes with that model (Auto leaves it to the AI), only for AIs
+//! that take them: the server knows which (`GET /api/engines/:id/efforts`).
 
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -199,6 +201,7 @@ fn ModelMenu(bot: Bot, engines: Vec<Value>, plan: Option<Value>, on_done: EventH
                 }
                 span { class: "shrink-0 text-ink", Icon { name: "check", size: 15 } }
             }
+            Thinking { key: "{bot.engine}-{bot.model}", bot: bot.clone() }
             if !models.is_empty() {
                 div { role: "separator", class: "mx-1.5 h-px shrink-0 bg-hairline/50" }
                 div { class: "flex items-center gap-2 px-2 pb-0.5 pt-1.5 text-[12px] font-medium text-ink-secondary",
@@ -265,6 +268,104 @@ fn ModelMenu(bot: Bot, engines: Vec<Value>, plan: Option<Value>, on_done: EventH
                 span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "settings", size: 15 } }
                 span { class: "flex-1", "Manage AI accounts" }
                 span { class: "shrink-0 text-ink-secondary", Icon { name: "chevron-right", size: 14 } }
+            }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "px-2 py-1 text-[12px] text-danger", "{err}" }
+            }
+        }
+    }
+}
+
+/// What a thinking level does, for the line under the steps.
+fn effort_hint(level: &str, label: &str) -> String {
+    match level {
+        "none" | "off" => "No extra thinking. The fastest replies.".into(),
+        "minimal" => "Barely any thinking. Very quick replies.".into(),
+        "low" => "A little thinking. Quick replies for simple asks.".into(),
+        "medium" => "Some thinking. A good balance for most work.".into(),
+        "high" => "Careful thinking for harder problems. Slower.".into(),
+        "xhigh" => "Very careful, for tricky multi-step work. Slower still.".into(),
+        "max" => "Thinks as long as it needs. Slowest, for the hardest jobs.".into(),
+        _ => format!("{label} thinking. Higher is slower but more careful."),
+    }
+}
+
+/// The Thinking row (MausBot's `Thinking` in `SimpleModelMenu.tsx`): folded, it names the level;
+/// open, Auto and the levels as pills, with what the chosen one does. Absent when the AI takes
+/// no level with this model.
+#[component]
+fn Thinking(bot: Bot) -> Element {
+    let state = use_context::<Signal<State>>();
+    let mut open = use_signal(|| false);
+    let mut levels = use_signal(Vec::<(String, String)>::new);
+    let mut problem = use_signal(|| None::<String>);
+    let (engine, model) = (bot.engine.clone(), bot.model.clone());
+    use_hook(move || {
+        spawn(async move {
+            let model = crate::markdown::encode(&model);
+            if let Ok(answer) = api::get(&format!("/api/engines/{engine}/efforts?model={model}")).await {
+                let found = answer["levels"].as_array().into_iter().flatten().filter_map(|l| Some((l["id"].as_str()?.to_string(), l["label"].as_str()?.to_string())));
+                levels.set(found.collect());
+            }
+        });
+    });
+    let list = levels();
+    if list.is_empty() {
+        return rsx! {};
+    }
+    let current = list.iter().find(|(id, _)| *id == bot.effort).cloned();
+    let shown = current.as_ref().map(|(_, label)| label.clone()).unwrap_or_else(|| "Auto".into());
+    let hint = match &current {
+        Some((id, label)) => effort_hint(id, label),
+        None => "The AI decides how hard to think.".to_string(),
+    };
+    let bot_id = bot.id.clone();
+    let choose = move |level: Option<String>| {
+        let id = bot_id.clone();
+        spawn(async move {
+            problem.set(None);
+            if let Err(err) = crate::settings::save(state, &id, json!({ "effort": level })).await {
+                problem.set(Some(err));
+            }
+        });
+    };
+    let pill = |on: bool| if on { "h-8 min-w-0 truncate rounded-full px-1.5 text-[13px] leading-4 bg-ink/[0.1] font-medium text-ink" } else { "h-8 min-w-0 truncate rounded-full px-1.5 text-[13px] leading-4 text-ink-secondary transition-colors hover:text-ink" };
+    let columns = list.len() + 1;
+    let auto = current.is_none();
+    let reset = choose.clone();
+    rsx! {
+        div { class: "flex flex-col", "data-thinking": true,
+            button { r#type: "button", class: "{MENU_ROW}", "aria-expanded": "{open()}", "data-thinking-toggle": true, onclick: move |_| open.toggle(),
+                span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "lightbulb", size: 15 } }
+                span { class: "min-w-0 flex-1 truncate", "Thinking" }
+                if !open() {
+                    span { class: "shrink-0 text-ink-secondary", "data-thinking-level": true, "{shown}" }
+                }
+                span { class: if open() { "shrink-0 rotate-180 text-ink-tertiary" } else { "shrink-0 text-ink-tertiary" },
+                    svg { "aria-hidden": "true", width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", path { d: "m6 9 6 6 6-6" } }
+                }
+            }
+            if open() {
+                div { role: "group", "aria-label": "Thinking", "data-effort-steps": true, class: "m-1 grid rounded-full bg-ink/[0.05] p-[3px]", style: "grid-template-columns: repeat({columns}, auto)",
+                    button { r#type: "button", "data-effort-pill": "auto", "aria-pressed": "{auto}", title: "The AI decides how hard to think.", class: pill(auto),
+                        onclick: move |_| reset(None),
+                        "Auto"
+                    }
+                    for (id, label) in list.clone() {
+                        {
+                            let on = current.as_ref().is_some_and(|(c, _)| *c == id);
+                            let pick = choose.clone();
+                            let level = id.clone();
+                            rsx! {
+                                button { key: "{id}", r#type: "button", "data-effort-pill": "{id}", "aria-pressed": "{on}", title: "{label} thinking", class: pill(on),
+                                    onclick: move |_| pick(Some(level.clone())),
+                                    "{label}"
+                                }
+                            }
+                        }
+                    }
+                }
+                p { class: "px-2 pb-1 text-[12px] leading-4 text-ink-tertiary", "data-effort-hint": true, "{hint}" }
             }
             if let Some(err) = problem() {
                 p { role: "alert", class: "px-2 py-1 text-[12px] text-danger", "{err}" }
@@ -350,5 +451,11 @@ mod tests {
         let plan = json!({ "windows": [{ "usedPercent": 2.0 }, { "usedPercent": 54.0 }] });
         assert_eq!(left_of(&plan), Some(46.0));
         assert_eq!(left_of(&json!({})), None);
+    }
+
+    #[test]
+    fn each_level_says_what_it_does() {
+        assert!(effort_hint("xhigh", "X-High").starts_with("Very careful"));
+        assert_eq!(effort_hint("deep", "Deep"), "Deep thinking. Higher is slower but more careful.");
     }
 }

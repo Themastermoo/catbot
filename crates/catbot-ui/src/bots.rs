@@ -60,6 +60,8 @@ pub struct Bot {
     pub engine: String,
     /// The model it asks for; empty for its engine's default.
     pub model: String,
+    /// How hard it thinks, in its engine's words; empty for the engine's own default.
+    pub effort: String,
     /// The AIs that take over when its own is at a limit, in order: (engine, model).
     pub backups: Vec<(String, String)>,
     /// Set when this "bot" is a channel: a group chat of several bots.
@@ -171,6 +173,7 @@ impl Bot {
                 .unwrap_or_default(),
             approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
             codex: wire["codex"].as_bool().unwrap_or(true),
+            effort: wire["effort"].as_str().unwrap_or_default().to_string(),
             chief: wire["chief"].as_bool().unwrap_or(false),
             skills: wire["skills"].as_array().map(|s| s.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
             activity,
