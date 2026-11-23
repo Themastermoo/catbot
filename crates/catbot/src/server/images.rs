@@ -172,6 +172,7 @@ fn update(app: &App, thread: &str, id: i64, detail: &Value) {
     if let Some(wire) = wire {
         app.hub.send(json!({ "kind": "message.patch", "threadId": thread, "message": wire }));
     }
+    super::inbox::changed(app);
 }
 
 fn spawn_drawing(app: Arc<App>, bot: Bot, thread: String, id: i64, mut detail: Value) {

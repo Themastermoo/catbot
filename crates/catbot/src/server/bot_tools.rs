@@ -35,7 +35,8 @@ impl Drop for Open {
 /// The tools a bot has: publishing pages, its triggers, its mailbox if it may use one, the
 /// connected apps it's ticked for, and its own computer if it has one.
 pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
-    let mut tools = super::pages::tools();
+    let mut tools = super::inbox::tools();
+    tools.extend(super::pages::tools());
     tools.extend(super::triggers::tools());
     tools.extend(super::email::tools_for(app, bot_id));
     tools.extend(super::apps::tools_for(app, bot_id));
@@ -81,6 +82,7 @@ pub async fn route(app: &Arc<App>, call: bool, req: Request) -> Answer {
         return Ok((StatusCode::OK, super::computers::call(app, &grant, name, &args).await));
     }
     let answer = match name {
+        "message_person" => super::inbox::message_person(app, &grant, &args),
         "page_publish" => super::pages::propose(app, &grant, &args).await,
         "secrets_list" => super::secrets::call(app, &grant, &args).await,
         "trigger_info" | "trigger" | "delete_trigger" => super::triggers::call(app, &grant, name, &args).await,

@@ -75,7 +75,7 @@ pub fn channel_wire(app: &App, store: &Store, channel: &Channel, messages: Optio
         "color": channel.color,
         "mark": "channel",
         "codex": true,
-        "unread": false,
+        "unread": conversation.unread,
         "modelSelection": { "instanceId": "channel", "model": "" },
         "backups": [],
         "createdAt": super::wire::epoch_ms(&channel.created_at),
@@ -123,7 +123,12 @@ pub async fn route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             let lead = lead_bot(app, &channel).map_err(fail)?;
             super::images::ask(app, &lead, &json_body(req).await?)
         }
-        (Method::POST, ["read"]) => Ok((StatusCode::OK, json!({ "ok": true }))),
+        (Method::POST, ["read"]) => {
+            if let Some(conversation) = app.with_store(|store| store.channel_conversation(&channel.id)).flatten() {
+                super::inbox::read_chat(app, &conversation.id);
+            }
+            Ok((StatusCode::OK, json!({ "ok": true })))
+        }
         (Method::POST, ["interrupt"]) => {
             if let Some(conversation) = app.with_store(|store| store.channel_conversation(&channel.id)).flatten() {
                 app.turns.interrupt(&conversation.id);

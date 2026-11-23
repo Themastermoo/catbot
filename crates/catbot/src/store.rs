@@ -194,6 +194,8 @@ pub struct Conversation {
     pub archived_at: Option<String>,
     /// The channel whose transcript this is; none for a bot's own chat.
     pub channel_id: Option<String>,
+    /// A bot answered since the person last looked (stage 19.5).
+    pub unread: bool,
 }
 
 /// A device paired to reach Catbot from away (`server::remote`).
@@ -207,7 +209,7 @@ pub struct Device {
 }
 
 /// A conversation's columns, in the order `conversation_from_row` reads them.
-const CONVERSATION: &str = "id, bot_id, session_id, created_at, updated_at, title, title_by_person, archived_at, channel_id";
+const CONVERSATION: &str = "id, bot_id, session_id, created_at, updated_at, title, title_by_person, archived_at, channel_id, unread";
 
 /// Who a stored message is from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -511,6 +513,10 @@ impl Store {
                  PRAGMA user_version = 10;
                  COMMIT;",
             )?;
+        }
+        if version < 11 {
+            // Version 11: a chat a bot answered in since the person last looked (the Inbox's unread).
+            conn.execute_batch("BEGIN; ALTER TABLE conversations ADD COLUMN unread INTEGER NOT NULL DEFAULT 0; PRAGMA user_version = 11; COMMIT;")?;
         }
         Ok(Self { conn, home: home.to_path_buf() })
     }
@@ -1084,6 +1090,7 @@ impl Store {
             title_by_person: false,
             archived_at: None,
             channel_id: None,
+            unread: false,
         };
         self.conn.execute(
             "INSERT INTO conversations (id, bot_id, session_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -1199,6 +1206,30 @@ impl Store {
             .optional()?)
     }
 
+    /// Marks a chat read, or answered since the person last looked. True if that changed it.
+    pub fn set_unread(&self, conversation_id: &str, unread: bool) -> Result<bool, BoxError> {
+        Ok(self.conn.execute("UPDATE conversations SET unread = ?2 WHERE id = ?1 AND unread != ?2", params![conversation_id, unread])? > 0)
+    }
+
+    /// Every chat a bot answered in since the person last looked, newest first.
+    pub fn unread_conversations(&self) -> Result<Vec<Conversation>, BoxError> {
+        let mut stmt = self.conn.prepare(&format!("SELECT {CONVERSATION} FROM conversations WHERE unread = 1 AND archived_at IS NULL ORDER BY updated_at DESC"))?;
+        let rows = stmt.query_map([], conversation_from_row)?.collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Cards still waiting on the person in any chat (a change to approve, a picture to choose),
+    /// newest first, each with its chat.
+    pub fn asking_cards(&self, limit: usize) -> Result<Vec<(String, Message)>, BoxError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, role, body, detail, at, conversation_id FROM messages
+             WHERE detail IS NOT NULL AND json_valid(detail) AND json_extract(detail, '$.state') IN ('asking', 'choosing')
+             ORDER BY id DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |r| Ok((r.get::<_, String>(5)?, message_from_row(r)?)))?.collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// How many conversations a bot has had.
     pub fn conversation_count(&self, bot_id: &str) -> Result<usize, BoxError> {
         let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM conversations WHERE bot_id = ?1 AND channel_id IS NULL", [bot_id], |r| r.get(0))?;
@@ -1250,6 +1281,7 @@ fn conversation_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Conversation
         title_by_person: r.get(6)?,
         archived_at: r.get(7)?,
         channel_id: r.get(8)?,
+        unread: r.get(9)?,
     })
 }
 
@@ -1443,7 +1475,7 @@ mod tests {
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
         assert_eq!(bot.engine, "claude", "bots from before run on Claude");
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 10);
+        assert_eq!(version, 11);
         assert_eq!(bot.effort, None, "and think at their engine's own level");
         // And keys for the chat APIs.
         assert_eq!(store.engine_key("xai").unwrap(), None);

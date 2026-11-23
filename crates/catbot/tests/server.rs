@@ -321,6 +321,75 @@ async fn bots_become_desktop_pets_when_ticked() {
 }
 
 #[tokio::test]
+async fn the_inbox_lists_asks_news_and_unread_chats() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    assert_eq!((inbox["rows"].clone(), inbox["count"].clone()), (json!([]), json!(0)), "empty to start");
+
+    // An approval a turn waits on needs the person, and is answered where it was asked.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "approve", "threadId": thread }))).await;
+    until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    until(&mut events, "inbox", |f| f["kind"] == "inbox").await;
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    let ask = inbox["rows"][0].clone();
+    assert_eq!((ask["kind"].as_str(), ask["tab"].as_str(), ask["unread"].as_bool(), inbox["count"].as_i64()), (Some("ask"), Some("needs-you"), Some(true), Some(1)), "{inbox}");
+    assert_eq!((ask["from"]["name"].as_str(), ask["origin"]["threadId"].as_str(), ask["card"]["type"].as_str()), (Some("Scout"), Some(thread.as_str()), Some("approval")));
+    assert_eq!(ask["text"], "Bash echo hi");
+    let id = ask["id"].as_str().unwrap().to_string();
+    assert_eq!(s.call("POST", &format!("/api/inbox/{id}/done"), None).await.0, 409, "an ask is answered, not put away");
+    let (_, read) = s.call("POST", &format!("/api/inbox/{id}/read"), None).await;
+    assert_eq!((read["rows"][0]["unread"].as_bool(), read["count"].as_i64()), (Some(false), Some(1)), "read, but it still waits");
+    let request = ask["card"]["requestId"].as_str().unwrap();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    assert_eq!(inbox["rows"], json!([]), "answered: gone");
+
+    // The bot answered, so its chat is unread until the person looks.
+    let (_, got) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+    assert_eq!(got["bot"]["unread"], true);
+    assert_eq!(got["bot"]["tasks"][0]["unread"], true);
+    s.call("POST", &format!("/api/bots/{bot}/read"), Some(json!({ "threadId": thread }))).await;
+    let (_, got) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+    assert_eq!((got["bot"]["unread"].as_bool(), got["bot"]["tasks"][0]["unread"].as_bool()), (Some(false), Some(false)));
+
+    // A bot messages the person: a line in its chat and in the Inbox, with a frame to notify by.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": r#"catbot-tool: message_person {"text": "The build is green."}"#, "threadId": thread }))).await;
+    let frame = until(&mut events, "inbox line", |f| f["kind"] == "inbox" && f["line"].is_object()).await;
+    assert_eq!((frame["line"]["kind"].as_str(), frame["line"]["text"].as_str()), (Some("message"), Some("The build is green.")));
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    let news = inbox["rows"][0].clone();
+    assert_eq!((news["kind"].as_str(), news["tab"].as_str(), news["unread"].as_bool(), inbox["count"].as_i64()), (Some("message"), Some("info"), Some(true), Some(1)), "{inbox}");
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=20"), None).await;
+    assert!(page["messages"].as_array().unwrap().iter().any(|m| m["text"] == "The build is green." && m["role"] == "bot"), "kept in the chat too");
+    // Opening the chat reads it; writing there answers it.
+    s.call("POST", &format!("/api/bots/{bot}/read"), Some(json!({ "threadId": thread }))).await;
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    assert_eq!((inbox["rows"][0]["unread"].as_bool(), inbox["rows"][0]["tab"].as_str(), inbox["count"].as_i64()), (Some(false), Some("info"), Some(0)));
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Thanks", "threadId": thread }))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    assert_eq!(inbox["rows"][0]["tab"], "done", "{inbox}");
+
+    // Done and read-all; an unknown line is refused.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": r#"catbot-tool: message_person {"text": "One more thing."}"#, "threadId": thread }))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    let line = inbox["rows"][0]["id"].as_str().unwrap().to_string();
+    let (_, all) = s.call("POST", "/api/inbox/read-all", None).await;
+    assert_eq!(all["count"], 0);
+    let (_, done) = s.call("POST", &format!("/api/inbox/{line}/done"), None).await;
+    assert!(done["rows"].as_array().unwrap().iter().all(|r| r["tab"] == "done"), "{done}");
+    assert_eq!(s.call("POST", "/api/inbox/in-nothing/read", None).await.0, 404);
+}
+
+#[tokio::test]
 async fn stopping_closes_the_card_and_says_so() {
     let s = setup().await;
     let mut events = s.events().await;
@@ -1957,11 +2026,24 @@ async fn a_schedule_runs_its_bot_in_the_trigger_s_own_chat() {
     let done = done.expect("the run finished");
     assert_eq!((done["status"].as_str(), done["source"].as_str(), done["threadId"].as_str()), (Some("done"), Some("schedule"), Some(chat.as_str())), "{done}");
     assert!(done["output"].as_str().is_some_and(|o| !o.is_empty()));
+    // Its result is news in the Inbox.
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    let result = inbox["rows"].as_array().unwrap().iter().find(|r| r["kind"] == "result").cloned().expect("a result line");
+    assert!(result["text"].as_str().unwrap().starts_with("Morning inbox: "), "{result}");
+    assert_eq!((result["tab"].as_str(), result["origin"]["threadId"].as_str()), (Some("info"), Some(chat.as_str())));
 
     // Run by hand: the same chat again.
     let (_, ran) = s.call("POST", &format!("/api/triggers/{id}/run"), Some(json!({}))).await;
     assert_eq!((ran["run"]["source"].as_str(), ran["run"]["threadId"].as_str()), (Some("manual"), Some(chat.as_str())), "{ran}");
     until(&mut events, "done again", |f| runtime(f, "turn.completed")).await;
+    for _ in 0..50 {
+        if s.call("GET", &format!("/api/triggers/{id}/runs"), None).await.1["runs"][0]["status"] != "working" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    assert_eq!(inbox["rows"].as_array().unwrap().iter().filter(|r| r["kind"] == "result").count(), 1, "one trigger keeps one unread row: {inbox}");
 
     // Paused: its time passes with nothing run, and it has no next time.
     let (_, paused) = s.call("PUT", &format!("/api/triggers/{id}"), Some(json!({ "enabled": false }))).await;

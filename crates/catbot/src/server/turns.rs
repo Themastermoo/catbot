@@ -23,6 +23,8 @@ use crate::{
 /// A turn in progress, as the web side sees it.
 struct Handle {
     turn_id: String,
+    /// The bot taking the turn (in a channel, whichever member it is).
+    bot_id: String,
     answerer: Option<Answerer>,
     cancel: Arc<Notify>,
     /// Approval cards still waiting for the person: request id → the card's message id.
@@ -58,6 +60,17 @@ impl Turns {
     /// Takes a card off the open list, returning its message id.
     fn close_card(&self, thread_id: &str, request_id: &str) -> Option<i64> {
         self.running.lock().expect("turns lock").get_mut(thread_id)?.open_cards.remove(request_id)
+    }
+
+    /// Every approval card waiting now: its chat, the bot asking, the request and the card's message.
+    pub fn all_open_cards(&self) -> Vec<(String, String, String, i64)> {
+        let running = self.running.lock().expect("turns lock");
+        let mut cards: Vec<(String, String, String, i64)> = running
+            .iter()
+            .flat_map(|(thread, h)| h.open_cards.iter().map(move |(request, message)| (thread.clone(), h.bot_id.clone(), request.clone(), *message)))
+            .collect();
+        cards.sort_by_key(|c| c.3);
+        cards
     }
 
     fn open_cards(&self, thread_id: &str) -> Vec<String> {
@@ -97,7 +110,7 @@ impl Turns {
 
 /// Starts a turn on a conversation. Fails if one is already running there.
 pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i64, text: String) -> Result<String, &'static str> {
-    let (turn_id, cancel) = register(&app, &conversation.id)?;
+    let (turn_id, cancel) = register(&app, &conversation.id, &bot.id)?;
     let id = turn_id.clone();
     tokio::spawn(async move {
         let thread_id = conversation.id.clone();
@@ -120,7 +133,7 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
 /// hand-offs), and gives back its reply. A `guest` is a bot answering in another bot's chat: it
 /// starts afresh, shown the chat, and leaves that bot's session alone.
 pub async fn run_through(app: &Arc<App>, bot: &Bot, conversation: Conversation, request_id: i64, text: &str, guest: bool) -> Result<Option<String>, &'static str> {
-    let (turn_id, cancel) = register(app, &conversation.id)?;
+    let (turn_id, cancel) = register(app, &conversation.id, &bot.id)?;
     let thread_id = conversation.id.clone();
     let reply = run(app, bot, conversation, request_id, text, &turn_id, cancel, guest).await;
     app.turns.finish(&thread_id);
@@ -128,14 +141,14 @@ pub async fn run_through(app: &Arc<App>, bot: &Bot, conversation: Conversation, 
 }
 
 /// Marks a conversation busy with a new turn: its id and its stop signal.
-fn register(app: &App, thread: &str) -> Result<(String, Arc<Notify>), &'static str> {
+fn register(app: &App, thread: &str, bot_id: &str) -> Result<(String, Arc<Notify>), &'static str> {
     let turn_id = uuid::Uuid::new_v4().to_string();
     let cancel = Arc::new(Notify::new());
     let mut running = app.turns.running.lock().expect("turns lock");
     if running.contains_key(thread) {
         return Err("this bot is still working on the last message");
     }
-    running.insert(thread.to_string(), Handle { turn_id: turn_id.clone(), answerer: None, cancel: cancel.clone(), open_cards: HashMap::new() });
+    running.insert(thread.to_string(), Handle { turn_id: turn_id.clone(), bot_id: bot_id.to_string(), answerer: None, cancel: cancel.clone(), open_cards: HashMap::new() });
     Ok((turn_id, cancel))
 }
 
@@ -274,6 +287,7 @@ async fn run(
             "duration_ms": outcome.and_then(|o| o.duration_ms),
         });
         save_and_send(app, thread, Role::Bot, &result.reply, Some(&detail));
+        super::inbox::answered_in(app, thread);
     }
     for prompt in pictures {
         super::images::card(app, thread, &prompt, &bot.name);
@@ -417,6 +431,7 @@ async fn drive(
                 {
                     app.turns.add_card(thread, &id, message_id);
                     app.announce_bot(&bot.id);
+                    super::inbox::changed(app);
                 }
             }
             Event::Error { message } => {
@@ -561,6 +576,7 @@ pub fn settle_card(app: &App, thread: &str, request_id: &str, behavior: &str, di
     if let Some(wire) = wire {
         app.hub.send(json!({ "kind": "message.patch", "threadId": thread, "message": wire }));
     }
+    super::inbox::changed(app);
 }
 
 fn save_step(app: &Arc<App>, thread: &str, step: &Step) {
@@ -661,5 +677,13 @@ pub fn save_and_send(app: &App, thread: &str, role: Role, body: &str, detail: Op
         Ok(wire::message(&message, parent))
     })?;
     app.hub.send(json!({ "kind": "message", "threadId": thread, "message": wire }));
+    // The person wrote (not a trigger, not Catbot): what the chat sent them is answered.
+    if role == Role::Person && detail.is_none_or(|d| d["fromCatbot"].is_null()) {
+        super::inbox::person_spoke(app, thread);
+    }
+    // A card now asks the person something: it's in the Inbox.
+    if detail.is_some_and(|d| d["state"] == "asking" || d["state"] == "choosing") {
+        super::inbox::changed(app);
+    }
     Some(wire)
 }

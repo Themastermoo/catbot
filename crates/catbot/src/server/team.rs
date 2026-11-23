@@ -363,6 +363,7 @@ fn update(app: &App, thread: &str, id: i64, detail: &Value) {
     if let Some(wire) = wire {
         app.hub.send(json!({ "kind": "message.patch", "threadId": thread, "message": wire }));
     }
+    super::inbox::changed(app);
 }
 
 /// Keeps a line for the Chief to hear with the person's next message in this chat.

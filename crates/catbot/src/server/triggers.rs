@@ -789,7 +789,7 @@ pub fn start(app: &Arc<App>, trigger: &Trigger, source: &str, scheduled_for: Opt
     let said = format!("{text}{}", super::team::untold_note(app, &conversation.id));
     change(app, &trigger.id, |t| t.runs += 1);
     add_run(app, run.clone());
-    let (app, run_id, thread) = (app.clone(), run.id.clone(), conversation.id.clone());
+    let (app, run_id, thread, trigger_id) = (app.clone(), run.id.clone(), conversation.id.clone(), trigger.id.clone());
     tokio::spawn(async move {
         let reply = super::turns::run_through(&app, &runner, conversation, request_id, &said, false).await;
         app.announce_bot(&bot.id);
@@ -804,6 +804,9 @@ pub fn start(app: &Arc<App>, trigger: &Trigger, source: &str, scheduled_for: Opt
                 return;
             }
         };
+        let name = list(&app).into_iter().find(|t| t.id == trigger_id).map(|t| t.name).unwrap_or_else(|| "A trigger".into());
+        let said = reply.as_deref().ok_or("it stopped without a reply (the chat shows why)");
+        super::inbox::trigger_ran(&app, &trigger_id, &name, &bot.id, &thread, said);
         change_run(&app, &run_id, |r| {
             r.finished_at = Some(now());
             match &reply {

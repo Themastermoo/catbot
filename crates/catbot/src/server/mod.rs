@@ -29,6 +29,7 @@ pub mod devices;
 pub mod email;
 pub mod engines;
 pub mod images;
+pub mod inbox;
 pub mod page_hosts;
 pub mod pets;
 pub mod pages;
@@ -353,6 +354,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "memory", rest @ ..] if method == Method::GET => respond(memory::route(&app, rest, &req)),
         ["api", "attachments", id] if method == Method::GET => attachments::serve(&app, id).await,
         ["api", "usage", rest @ ..] if method == Method::GET => usage_route(&app, rest, usage_query(&req)).await,
+        ["api", "inbox", rest @ ..] => respond(inbox::route(&app, &method, rest)),
         ["api", "pets"] if method == Method::GET || method == Method::PUT => {
             let body = if method == Method::PUT {
                 match json_body(req).await {
@@ -758,7 +760,17 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
         (Method::PATCH, ["tasks", thread]) => change_chat(app, bot, thread, json_body(req).await?),
         (Method::POST, ["tasks", thread, "branch"]) => branch_chat(app, bot, thread, json_body(req).await?),
         (Method::DELETE, ["tasks", thread]) => delete_chat(app, bot, thread),
-        (Method::POST, ["read"]) => Ok((StatusCode::OK, json!({ "ok": true }))),
+        (Method::POST, ["read"]) => {
+            let body = json_body(req).await.unwrap_or(Value::Null);
+            let thread = match body["threadId"].as_str() {
+                Some(thread) => app.try_store(|store| store.conversation(thread)).map_err(fail)?.filter(|c| c.bot_id == bot.id).map(|c| c.id),
+                None => app.try_store(|store| store.current_conversation(&bot.id)).map_err(fail)?.map(|c| c.id),
+            };
+            if let Some(thread) = thread {
+                inbox::read_chat(app, &thread);
+            }
+            Ok((StatusCode::OK, json!({ "ok": true })))
+        }
         (Method::GET, ["runs", rest @ ..]) => runs::route(app, &bot, rest),
         (Method::POST, ["interrupt"]) => {
             let body = json_body(req).await?;

@@ -97,7 +97,7 @@ pub fn task(bot: &Bot, conversation: &Conversation, activity: &'static str) -> V
         "createdAt": epoch_ms(&conversation.created_at),
         "updatedAt": updated,
         "lastThreadOrderAt": updated,
-        "unread": false,
+        "unread": conversation.unread,
         "activity": activity,
         "busy": activity != "idle",
         "modelSelection": model_selection(bot),
@@ -148,7 +148,7 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         // Catbot's own: whether it comes out onto the desktop as a pet when the app's window closes.
         "pet": super::pets::is_pet(store, &bot.id),
         "mascotBody": "cursor",
-        "unread": false,
+        "unread": super::inbox::unread_of(&conversations),
         "modelSelection": model_selection(bot),
         // Catbot's own: how hard it thinks, in its engine's words (null: the engine's default).
         "effort": bot.effort,
