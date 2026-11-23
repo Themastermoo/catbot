@@ -187,6 +187,8 @@ async fn run(
     if let Some(chief) = super::chief::chief(app).filter(|c| c.id == bot.id) {
         dressed.instructions.push_str(&super::chief::note(app, &chief));
     }
+    // Its department: teammates, who leads it, the person's shared instructions, its memory note.
+    dressed.instructions.push_str(&super::departments::note(app, bot));
     // The bot's skills, in its folder for this turn (and told where, for AIs that don't look).
     let told = super::skills::place(app, &dressed, &dressed.folder);
     dressed.instructions.push_str(&told);

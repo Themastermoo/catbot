@@ -25,6 +25,7 @@ pub mod limits;
 pub mod reactions;
 pub mod secrets;
 pub mod usage;
+pub mod departments;
 pub mod devices;
 pub mod email;
 pub mod engines;
@@ -355,6 +356,20 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "attachments", id] if method == Method::GET => attachments::serve(&app, id).await,
         ["api", "usage", rest @ ..] if method == Method::GET => usage_route(&app, rest, usage_query(&req)).await,
         ["api", "inbox", rest @ ..] => respond(inbox::route(&app, &method, rest)),
+        ["api", "departments", rest @ ..] | ["api", "team-map", rest @ ..] => {
+            let map = segments[1] == "team-map";
+            let rest: Vec<String> = rest.iter().map(|s| urlencoding_decode(s)).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::GET || method == Method::DELETE {
+                None
+            } else {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            };
+            if map { respond(departments::map_route(&app, &method, &rest, body).await) } else { respond(departments::route(&app, &method, &rest, body)) }
+        }
         ["api", "pets"] if method == Method::GET || method == Method::PUT => {
             let body = if method == Method::PUT {
                 match json_body(req).await {

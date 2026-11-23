@@ -1399,6 +1399,10 @@ async fn a_bot_hands_work_on_within_the_limits_set() {
     // Kiwi was a guest: Scout's chat keeps Scout's own session.
     let (_, scout) = s.call("GET", &format!("/api/bots/{}", ids[0]), None).await;
     assert_eq!(scout["bot"]["tasks"].as_array().unwrap().len(), 1);
+    // The Team map draws who handed work to whom, both ways.
+    let (_, map) = s.call("GET", "/api/team-map", None).await;
+    let edges: Vec<(String, String, String)> = map["edges"].as_array().unwrap().iter().map(|e| (e["from"].as_str().unwrap().to_string(), e["to"].as_str().unwrap().to_string(), e["state"].as_str().unwrap().to_string())).collect();
+    assert!(edges.contains(&(ids[0].clone(), ids[1].clone(), "connected".into())) && edges.contains(&(ids[1].clone(), ids[0].clone(), "connected".into())), "{map}");
 
     // Fewer replies allowed: Scout, Kiwi, Scout, then the limit.
     let (status, _) = s.call("PUT", "/api/handoffs", Some(json!({ "depth": 10, "replies": 3 }))).await;
@@ -1460,6 +1464,75 @@ async fn a_chief_of_staff_is_made_or_chosen_and_told_the_team() {
     assert_eq!(s.call("PUT", "/api/chief", Some(json!({ "botId": "nobody" }))).await.0, 400);
     let (_, cleared) = s.call("PUT", "/api/chief", Some(json!({ "botId": null }))).await;
     assert_eq!(cleared["chief"]["botId"], Value::Null);
+}
+
+#[tokio::test]
+async fn departments_group_bots_share_instructions_and_take_map_messages() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let id = async |name: &str| s.call("POST", "/api/bots", Some(json!({ "name": name }))).await.1["bot"]["id"].as_str().unwrap().to_string();
+    let (scout, quill, kiwi) = (id("Scout").await, id("Quill").await, id("Kiwi").await);
+
+    // Made with two bots; a bad or taken name is refused.
+    assert_eq!(s.call("POST", "/api/departments", Some(json!({ "name": "general" }))).await.0, 400);
+    let (status, made) = s.call("POST", "/api/departments", Some(json!({ "name": " Garden ", "botIds": [scout, quill] }))).await;
+    assert_eq!(status, 201, "{made}");
+    assert_eq!(made["departments"][0]["name"], "Garden");
+    let mut members: Vec<&str> = made["departments"][0]["members"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    members.sort();
+    let mut both = [scout.as_str(), quill.as_str()];
+    both.sort();
+    assert_eq!(members, both);
+    assert_eq!(made["general"], json!([kiwi]));
+    assert_eq!(s.call("POST", "/api/departments", Some(json!({ "name": "garden" }))).await.0, 409);
+    let (_, got) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    assert_eq!((got["bot"]["department"].as_str(), got["bot"]["departmentChief"].as_bool()), (Some("Garden"), Some(false)));
+
+    // Shared instructions and a lead: its bots are told every turn.
+    assert_eq!(s.call("PATCH", "/api/departments/Garden", Some(json!({ "chief": kiwi }))).await.0, 400, "the lead is one of its own");
+    let (_, set) = s.call("PATCH", "/api/departments/Garden", Some(json!({ "instructions": "Water before noon.", "chief": quill }))).await;
+    assert_eq!((set["departments"][0]["chief"].as_str(), set["departments"][0]["instructions"].as_str()), (Some(quill.as_str()), Some("Water before noon.")));
+    assert!(set["departments"][0]["updatedAt"].is_i64());
+    s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": "what are your instructions?" }))).await;
+    let told = until(&mut events, "told", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    let told = told["message"]["text"].as_str().unwrap().to_string();
+    assert!(told.contains("You're in the Garden department. Its other bots: Quill.") && told.contains("Quill leads it") && told.contains("Water before noon."), "{told}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // A message from the map goes to whoever it tags: a department brings its bots.
+    let (status, sent) = s.call("POST", "/api/team-map/message", Some(json!({ "text": "@Garden check the beds" }))).await;
+    assert_eq!(status, 200, "{sent}");
+    let mut names: Vec<&str> = sent["sent"].as_array().unwrap().iter().filter_map(|b| b["name"].as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["Quill", "Scout"]);
+    let asked = until(&mut events, "asked", |f| f["kind"] == "message" && f["message"]["role"] == "user").await;
+    assert_eq!(asked["message"]["text"], "(To the Garden department.) check the beds");
+    assert_eq!(s.call("POST", "/api/team-map/message", Some(json!({ "text": "hello" }))).await.0, 400, "nobody tagged");
+    assert_eq!(s.call("POST", "/api/team-map/message", Some(json!({ "text": "@Nobody hi" }))).await.0, 400);
+    for _ in 0..2 {
+        until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    }
+    // @everyone goes to the Chief, who passes it on.
+    s.call("PUT", "/api/chief", Some(json!({ "botId": kiwi }))).await;
+    let (_, sent) = s.call("POST", "/api/team-map/message", Some(json!({ "text": "@everyone stand-up at 9" }))).await;
+    assert_eq!((sent["via"].as_str(), sent["sent"].as_array().unwrap().len()), (Some("Kiwi"), 1), "{sent}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Moved, renamed, deleted: the bots go back to General.
+    let (_, moved) = s.call("PUT", "/api/departments/General/members", Some(json!({ "add": [quill] }))).await;
+    assert_eq!((moved["departments"][0]["chief"].clone(), moved["departments"][0]["members"].clone()), (Value::Null, json!([scout])), "leaving, the lead stops leading");
+    let (_, renamed) = s.call("PATCH", "/api/departments/Garden", Some(json!({ "name": "Allotment" }))).await;
+    assert_eq!(renamed["departments"][0]["name"], "Allotment");
+    let (_, got) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    assert_eq!(got["bot"]["department"], "Allotment");
+    let (_, map) = s.call("PUT", "/api/team-map/layout", Some(json!({ "departments": { "Allotment": { "x": 10, "y": 20 } } }))).await;
+    assert_eq!(map["layout"]["departments"]["Allotment"]["x"], 10);
+    let (_, gone) = s.call("DELETE", "/api/departments/Allotment", None).await;
+    assert_eq!((gone["departments"].clone(), gone["general"].as_array().unwrap().len()), (json!([]), 3));
+    let (_, map) = s.call("GET", "/api/team-map", None).await;
+    assert!(map["layout"]["departments"].as_object().unwrap().is_empty(), "{map}");
+    assert_eq!(s.call("DELETE", "/api/departments/Allotment", None).await.0, 404);
 }
 
 #[tokio::test]

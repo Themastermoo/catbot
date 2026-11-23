@@ -220,6 +220,7 @@ pub fn note(app: &App, chief: &Bot) -> String {
     let (bots, channels) = app
         .with_store(|store| Ok((store.bots()?, store.channels()?)))
         .unwrap_or_default();
+    let departments = super::departments::departments(app);
     let team: Vec<String> = bots
         .iter()
         .filter(|b| b.id != chief.id)
@@ -233,7 +234,7 @@ pub fn note(app: &App, chief: &Bot) -> String {
                 _ => "asks before acting",
             };
             let about = if about.is_empty() { "no instructions yet".to_string() } else { about };
-            format!("- {} (on {}, {mode}): {about}", b.name, b.engine)
+            format!("- {} (on {}, {mode}{}): {about}", b.name, b.engine, super::departments::label(&departments, &b.id))
         })
         .collect();
     let names = |ids: &[String]| ids.iter().filter_map(|id| bots.iter().find(|b| &b.id == id)).map(|b| b.name.clone()).collect::<Vec<_>>();
@@ -252,6 +253,30 @@ pub fn note(app: &App, chief: &Bot) -> String {
     );
     note.push_str("\n\nYour team:\n");
     note.push_str(&if team.is_empty() { "- No other bots yet.".to_string() } else { team.join("\n") });
+    if !departments.list.is_empty() {
+        let list: Vec<String> = departments
+            .list
+            .iter()
+            .map(|d| match d.chief.as_ref().and_then(|c| bots.iter().find(|b| &b.id == c)) {
+                Some(lead) => format!("{} (led by {})", d.name, lead.name),
+                None => d.name.clone(),
+            })
+            .collect();
+        note.push_str(&format!(
+            "\n\nThe team is in departments: {}. Bots in none are in General. A department's lead shares out its work: hand work for a department to its lead.",
+            list.join(", ")
+        ));
+    }
+    if !departments.list.is_empty() {
+        let list: Vec<String> = departments.list.iter().map(|d| match d.chief.as_ref().and_then(|c| bots.iter().find(|b| &b.id == c)) {
+            Some(lead) => format!("{} (led by {})", d.name, lead.name),
+            None => d.name.clone(),
+        }).collect();
+        note.push_str(&format!(
+            "\n\nThe team is in departments: {}. Bots in none are in General. A department's lead shares out its work: hand work for a department to its lead.",
+            list.join(", ")
+        ));
+    }
     if !rooms.is_empty() {
         note.push_str("\n\nChannels (group chats):\n");
         note.push_str(&rooms.join("\n"));

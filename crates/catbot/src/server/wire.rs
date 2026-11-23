@@ -123,6 +123,7 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
     let activity = busiest(conversations.iter().map(|c| activity(&c.id)));
     let busy = activity != "idle";
     let created = epoch_ms(&bot.created_at);
+    let department = super::departments::wire_of(store, &bot.id);
     let mut wire = json!({
         "id": bot.id,
         // Marks Catbot's own bots, so Catbot's interface can tell them from the reference server's.
@@ -143,6 +144,9 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         "codex": bot.codex,
         // Catbot's own: the Chief of Staff wears a star.
         "chief": super::chief::is_chief_in(store, &bot.id),
+        // Catbot's own: its department ("" for General), and whether it leads it.
+        "department": department.0,
+        "departmentChief": department.1,
         // Catbot's own: the skills it uses, from the library.
         "skills": super::skills::of(store, &bot.id),
         // Catbot's own: whether it comes out onto the desktop as a pet when the app's window closes.

@@ -182,6 +182,10 @@ fn hand(app: &App, thread: &str, rules: &Rules, queue: &mut VecDeque<Turn>, done
         return;
     }
     turns::save_and_send(app, thread, Role::Note, &format!("{from} handed this to {}.", turn.bot.name), None);
+    // The Team map draws who hands work to whom.
+    if let Some(giver) = app.with_store(|store| store.bot(&from)).flatten() {
+        super::departments::handed(app, &giver.id, &turn.bot.id, thread);
+    }
     queue.push_back(turn);
 }
 
@@ -246,6 +250,7 @@ pub async fn follow(app: &Arc<App>, key: &str, thread: &str, request_id: i64, mu
             }
         };
         done += 1;
+        super::departments::hand_done(app, &turn.bot.id, thread);
         app.announce_bot(match &place {
             Place::Channel(id) => id,
             Place::Chat(owner) => owner,
