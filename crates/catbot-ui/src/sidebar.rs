@@ -98,6 +98,8 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     // On a phone the list gives way to the open chat.
     let phone = if (ui.showing_chat)() { "max-md:hidden" } else { "" };
     let pick = move |id: String| {
+        let mut map = ui.map;
+        map.set(false);
         selected.set(Some(id));
         let mut showing = ui.showing_chat;
         showing.set(true);
@@ -190,6 +192,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             }
             if q.is_empty() {
                 crate::inbox::InboxRow {}
+                TeamMapRow {}
             }
             div { class: "min-h-0 flex-1 overflow-y-auto",
                 if let Some(chief) = chief {
@@ -271,6 +274,29 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             }
             if let Some(page) = (ui.prefs)() {
                 crate::notify::SettingsDialog { start: page, on_close: move |_| { let mut prefs = ui.prefs; prefs.set(None); } }
+            }
+        }
+    }
+}
+
+/// The Team map's row under the Inbox: opens the map in place of the chat.
+#[component]
+fn TeamMapRow() -> Element {
+    let ui = use_context::<Ui>();
+    let open = (ui.map)();
+    rsx! {
+        div { class: "px-3 pb-1",
+            button { r#type: "button", "data-sidebar-team-map": true, "aria-pressed": "{open}", title: "Team map",
+                class: "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left outline-none hover:bg-raised/60 focus-visible:ring-2 focus-visible:ring-accent/60",
+                onclick: move |_| {
+                    let (mut map, mut showing) = (ui.map, ui.showing_chat);
+                    map.set(!open);
+                    showing.set(!open);
+                },
+                span { class: if open { "grid size-9 shrink-0 place-items-center rounded-full bg-ink/[0.16] text-ink" } else { "grid size-9 shrink-0 place-items-center rounded-full bg-raised text-ink-secondary" },
+                    Icon { name: "users", size: 16 }
+                }
+                span { class: "min-w-0 flex-1 truncate text-[14px] font-medium leading-5 text-ink", "Team map" }
             }
         }
     }
@@ -700,6 +726,10 @@ pub fn Icon(name: &'static str, size: u32, #[props(default)] filled: bool) -> El
         "chevron-left" => &["m15 18-6-6 6-6"],
         "chevron-up" => &["m18 15-6-6-6 6"],
         "chevron-down" => &["m6 9 6 6 6-6"],
+        "message" => &["M7.9 20A9 9 0 1 0 4 16.1L2 22z"],
+        "minus" => &["M5 12h14"],
+        "arrow-right" => &["M5 12h14", "m12 5 7 7-7 7"],
+        "arrow-up" => &["m5 12 7-7 7 7", "M12 19V5"],
         "more" => &["M11 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0", "M18 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0", "M4 12a1 1 0 1 0 2 0a1 1 0 1 0-2 0"],
         "users" => &["M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2", "M13 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0z", "M22 21v-2a4 4 0 0 0-3-3.87", "M16 3.13a4 4 0 0 1 0 7.75"],
         "inbox" => &["M22 12h-6l-2 3h-4l-2-3H2", "M5.45 5.11 2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z"],

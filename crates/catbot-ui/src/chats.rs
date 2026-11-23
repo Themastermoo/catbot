@@ -19,6 +19,7 @@ const MENU_ITEM: &str = "flex w-full items-center gap-2 rounded-md px-2 py-1.5 t
 
 /// Shows a chat in this window, and has the bot open to it next time.
 pub fn open(mut state: Signal<State>, mut ui: Ui, bot_id: &str, thread: &str) {
+    ui.map.set(false);
     if let Some(bot) = state.write().bots.iter_mut().find(|b| b.id == bot_id) {
         bot.thread_id = thread.to_string();
     }

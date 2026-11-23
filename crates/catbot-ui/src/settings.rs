@@ -31,6 +31,8 @@ pub struct Ui {
     pub prefs: Signal<Option<String>>,
     /// Find in conversation: the words looked for in the open chat, while the find bar is open.
     pub find: Signal<Option<String>>,
+    /// The Team map shows in place of the chat.
+    pub map: Signal<bool>,
 }
 
 /// Their approval levels, in their words.
