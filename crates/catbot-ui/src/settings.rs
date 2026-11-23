@@ -29,6 +29,8 @@ pub struct Ui {
     pub showing_chat: Signal<bool>,
     /// The Settings window, open on this page (a page's key), from anywhere in the app.
     pub prefs: Signal<Option<String>>,
+    /// Find in conversation: the words looked for in the open chat, while the find bar is open.
+    pub find: Signal<Option<String>>,
 }
 
 /// Their approval levels, in their words.
@@ -51,8 +53,36 @@ pub(crate) async fn save(mut state: Signal<State>, bot_id: &str, change: Value) 
     Ok(())
 }
 
+/// A channel's settings, in the panel on the right (a bot's are in its panel, `panel.rs`).
 #[component]
 pub fn SettingsPanel(bot: Bot) -> Element {
+    let mut ui = use_context::<Ui>();
+    let close = move |_| ui.settings_open.set(false);
+    let channel = bot.channel.is_some();
+    rsx! {
+        aside {
+            "aria-label": "Bot settings",
+            class: "animate-panel-in absolute inset-0 z-40 flex h-full min-w-0 flex-col border-l border-hairline/40 bg-panel md:relative md:z-20 md:w-[400px] md:shrink-0",
+            div { class: "flex items-center justify-between px-4 py-3",
+                button { r#type: "button", "aria-label": "Collapse bot settings", class: ICON_BUTTON, onclick: close,
+                    Glyph { d: "m15 18-6-6 6-6", size: 18 }
+                }
+                span { class: "text-[15px] font-semibold text-ink", if channel { "Channel settings" } else { "Bot settings" } }
+                button { r#type: "button", "aria-label": "Close bot settings", class: ICON_BUTTON, onclick: close,
+                    Glyph { d: "M18 6 6 18M6 6l12 12", size: 18 }
+                }
+            }
+            div { class: "flex-1 overflow-y-auto px-5 pb-5",
+                BotSettings { bot }
+            }
+        }
+    }
+}
+
+/// A bot's (or channel's) settings as cards: picture and colour, name, instructions, its AI,
+/// approval level, Codex access and deleting. Each change saved as it's made.
+#[component]
+pub fn BotSettings(bot: Bot) -> Element {
     let state = use_context::<Signal<State>>();
     let mut ui = use_context::<Ui>();
     let mut saving = use_signal(|| false);
@@ -94,23 +124,9 @@ pub fn SettingsPanel(bot: Bot) -> Element {
         });
     };
 
-    let close = move |_| ui.settings_open.set(false);
     let full = bot.approval_mode == "full";
     let channel = bot.channel.is_some();
     rsx! {
-        aside {
-            "aria-label": "Bot settings",
-            class: "animate-panel-in absolute inset-0 z-40 flex h-full min-w-0 flex-col border-l border-hairline/40 bg-panel md:relative md:z-20 md:w-[400px] md:shrink-0",
-            div { class: "flex items-center justify-between px-4 py-3",
-                button { r#type: "button", "aria-label": "Collapse bot settings", class: ICON_BUTTON, onclick: close,
-                    Glyph { d: "m15 18-6-6 6-6", size: 18 }
-                }
-                span { class: "text-[15px] font-semibold text-ink", if channel { "Channel settings" } else { "Bot settings" } }
-                button { r#type: "button", "aria-label": "Close bot settings", class: ICON_BUTTON, onclick: close,
-                    Glyph { d: "M18 6 6 18M6 6l12 12", size: 18 }
-                }
-            }
-            div { class: "flex-1 overflow-y-auto px-5 pb-5",
                 div { class: "flex flex-col gap-4 pt-4",
                     // Picture, colour and name.
                     div { class: CARD,
@@ -255,8 +271,6 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                         div { role: "alert", class: "text-[12px] text-danger", "{err}" }
                     }
                 }
-            }
-        }
     }
 }
 

@@ -43,6 +43,7 @@ mod sidebar;
 mod looks;
 mod prefs;
 mod model_menu;
+mod panel;
 
 use dioxus::prelude::*;
 
@@ -148,7 +149,8 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     // On a phone, the bot list and a chat take turns filling the screen.
     let showing_chat = use_signal(|| false);
     let prefs = use_signal(|| None::<String>);
-    let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat, prefs });
+    let find = use_signal(|| None::<String>);
+    let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat, prefs, find });
     let notify_prefs = use_context_provider(|| Signal::new(notify::load()));
     use_future(move || notify::follow_clicks(state, ui));
     // Talking to home through the link, and home has removed this device.
@@ -255,7 +257,11 @@ fn MainView(open: Option<Bot>, problem: Option<String>) -> Element {
                 // Keyed by bot and chat, so opening another chat starts the view fresh too.
                 chat::Chat { key: "{bot.id}-{bot.thread_id}", bot: bot.in_open_chat() }
                 if (ui.settings_open)() {
-                    settings::SettingsPanel { key: "settings-{bot.id}", bot }
+                    if bot.channel.is_some() {
+                        settings::SettingsPanel { key: "settings-{bot.id}", bot }
+                    } else {
+                        panel::BotPanel { key: "panel-{bot.id}", bot }
+                    }
                 }
             }
         },

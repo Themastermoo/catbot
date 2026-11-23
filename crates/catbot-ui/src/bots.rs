@@ -74,6 +74,8 @@ pub struct Bot {
     pub chief: bool,
     /// The skills it uses, from the library.
     pub skills: Vec<String>,
+    /// The folder it works in, on the computer running Catbot.
+    pub folder: String,
     pub activity: Activity,
     pub unread: bool,
     /// Its newest message worth a preview, if it has one.
@@ -174,6 +176,7 @@ impl Bot {
             approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
             codex: wire["codex"].as_bool().unwrap_or(true),
             effort: wire["effort"].as_str().unwrap_or_default().to_string(),
+            folder: wire["folder"].as_str().unwrap_or_default().to_string(),
             chief: wire["chief"].as_bool().unwrap_or(false),
             skills: wire["skills"].as_array().map(|s| s.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
             activity,

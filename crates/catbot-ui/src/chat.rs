@@ -326,6 +326,7 @@ pub fn Chat(bot: Bot) -> Element {
     rsx! {
         main { class: "relative flex h-full min-w-0 flex-1 flex-col bg-app",
             ChatHead { bot: bot.clone() }
+            FindBar { key: "{bot.thread_id}" }
             div {
                 id: "chat-scroll",
                 class: "glass-scroller min-h-0 flex-1 overflow-x-hidden overflow-y-auto overscroll-y-contain px-5 [overflow-anchor:none]",
@@ -895,6 +896,102 @@ fn ChatHead(bot: Bot) -> Element {
     }
 }
 
+/// The find bar's search (in the page, so it can mark text): marks every match in the chat with
+/// the browser's highlights and scrolls to one; `step` 0 starts at the newest, -1 and 1 move.
+/// Returns `[which, of]`, counted from the oldest.
+const FIND_JS: &str = r#"if (!window.catbotFind) window.catbotFind = function (q, step) {
+  const root = document.getElementById('chat-scroll');
+  const hl = (typeof CSS !== 'undefined' && CSS.highlights && typeof Highlight !== 'undefined') ? CSS.highlights : null;
+  if (hl) { hl.delete('catbot-find'); hl.delete('catbot-find-now'); }
+  document.querySelectorAll('[data-find-now]').forEach(e => e.removeAttribute('data-find-now'));
+  q = (q || '').trim().toLowerCase();
+  if (!root || !q) { window.catbotFindAt = 0; return [0, 0]; }
+  const ranges = [];
+  const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode(n) {
+    const p = n.parentElement;
+    return !p || p.closest('button, [aria-hidden="true"], .sr-only') ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+  } });
+  let n;
+  while ((n = walk.nextNode())) {
+    const t = n.nodeValue.toLowerCase();
+    for (let i = t.indexOf(q); i >= 0; i = t.indexOf(q, i + q.length)) {
+      const r = new Range(); r.setStart(n, i); r.setEnd(n, i + q.length); ranges.push(r);
+    }
+  }
+  const of = ranges.length;
+  if (!of) { window.catbotFindAt = 0; return [0, 0]; }
+  let at = window.catbotFindAt || 0;
+  if (step === 0 || at < 1 || at > of) at = of; else { at += step; if (at < 1) at = of; if (at > of) at = 1; }
+  window.catbotFindAt = at;
+  const now = ranges[at - 1];
+  if (hl) { hl.set('catbot-find', new Highlight(...ranges)); hl.set('catbot-find-now', new Highlight(now)); }
+  const el = now.startContainer.parentElement;
+  if (el) { if (!hl) el.setAttribute('data-find-now', ''); el.scrollIntoView({ block: 'center' }); }
+  return [at, of];
+};"#;
+
+/// Find in conversation: a bar under the header that marks the words wherever they're shown in
+/// the chat (the browser's highlights) and steps through them, the newest first.
+#[component]
+fn FindBar() -> Element {
+    let mut ui = use_context::<crate::settings::Ui>();
+    let mut found = use_signal(|| (0usize, 0usize));
+    let Some(query) = (ui.find)() else {
+        return rsx! {};
+    };
+    let look = move |step: i32| {
+        let q = (ui.find)().unwrap_or_default();
+        spawn(async move {
+            let script = format!("{FIND_JS}\nreturn catbotFind({}, {step});", serde_json::to_string(&q).unwrap_or_default());
+            if let Ok(answer) = document::eval(&script).await {
+                let at = answer.get(0).and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+                let of = answer.get(1).and_then(serde_json::Value::as_u64).unwrap_or(0) as usize;
+                found.set((at, of));
+            }
+        });
+    };
+    let mut close = move || {
+        let _ = document::eval("window.catbotFind && catbotFind('', 0);");
+        ui.find.set(None);
+    };
+    let (at, of) = found();
+    rsx! {
+        div { class: "relative z-[24] mx-auto mb-1 flex w-[min(520px,calc(100%-2.5rem))] items-center gap-2 rounded-full bg-composer px-3 py-1.5 ring-1 ring-inset ring-ink/[0.07] shadow-(--shadow-float)", "data-find-bar": true,
+            span { class: "shrink-0 text-ink-tertiary", crate::sidebar::Icon { name: "search", size: 15 } }
+            input {
+                r#type: "text",
+                "aria-label": "Find in conversation",
+                placeholder: "Find in conversation",
+                autofocus: true,
+                class: "min-w-0 flex-1 bg-transparent text-[14px] text-ink placeholder:text-ink-tertiary focus:outline-none",
+                value: "{query}",
+                oninput: move |e| {
+                    ui.find.set(Some(e.value()));
+                    look(0);
+                },
+                onkeydown: move |e| match e.key() {
+                    Key::Enter => look(if e.modifiers().shift() { 1 } else { -1 }),
+                    Key::Escape => close(),
+                    _ => {}
+                },
+                onmounted: move |e| async move { let _ = e.set_focus(true).await; },
+            }
+            span { class: "shrink-0 text-[12px] tabular-nums text-ink-tertiary", "data-find-count": true,
+                if query.trim().is_empty() { "" } else if of == 0 { "None" } else { "{at} of {of}" }
+            }
+            button { r#type: "button", "aria-label": "Earlier", title: "Earlier (Enter)", class: "flex size-6 items-center justify-center rounded-full text-ink-secondary hover:bg-ink/[0.06] disabled:opacity-40", disabled: of == 0, onclick: move |_| look(-1),
+                svg { "aria-hidden": "true", width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", path { d: "m18 15-6-6-6 6" } }
+            }
+            button { r#type: "button", "aria-label": "Later", title: "Later (Shift+Enter)", class: "flex size-6 items-center justify-center rounded-full text-ink-secondary hover:bg-ink/[0.06] disabled:opacity-40", disabled: of == 0, onclick: move |_| look(1),
+                svg { "aria-hidden": "true", width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", path { d: "m6 9 6 6 6-6" } }
+            }
+            button { r#type: "button", "aria-label": "Close find", class: "flex size-6 items-center justify-center rounded-full text-ink-secondary hover:bg-ink/[0.06]", onclick: move |_| close(),
+                crate::sidebar::Icon { name: "x", size: 14 }
+            }
+        }
+    }
+}
+
 /// The round computer button in the chat's header: the bot's screen, live, when it has a
 /// computer; otherwise Settings › Computers & secrets, where one is given.
 #[component]
@@ -913,7 +1010,7 @@ fn ComputerButton(bot_id: String, name: String) -> Element {
                 let id = id.clone();
                 spawn(async move {
                     let list = crate::api::get("/api/computers").await.ok();
-                    let entry = list.as_ref().and_then(|l| l["computers"].as_array().or(l.as_array())).and_then(|all| all.iter().find(|e| e["botId"] == id.as_str()).cloned());
+                    let entry = list.as_ref().and_then(|l| l["bots"].as_array()).and_then(|all| all.iter().find(|e| e["botId"] == id.as_str()).cloned());
                     match entry {
                         Some(entry) => showing.set(Some(entry["kind"] == "boat")),
                         None => {

@@ -3640,3 +3640,19 @@ button:disabled.bg-danger {
 .trace-step-box { background: color-mix(in srgb, #8b7cf6 14%, var(--color-card)); border-color: color-mix(in srgb, #8b7cf6 30%, var(--color-card)); }
 .trace-step-ink { color: color-mix(in srgb, #7c6cf0 85%, var(--color-ink)); }
 .trace-tool-ink { color: color-mix(in srgb, #1f9a8c 80%, var(--color-ink)); }
+
+/* Find in conversation (chat.rs `FIND_JS`): every match, and the one shown. */
+::highlight(catbot-find) {
+  background-color: color-mix(in srgb, #f5c518 40%, transparent);
+  color: inherit;
+}
+::highlight(catbot-find-now) {
+  background-color: #f5a623;
+  color: #1a1a18;
+}
+/* Where the browser has no highlights: the shown match's line gets a ring. */
+[data-find-now] {
+  border-radius: 4px;
+  outline: 2px solid #f5a623;
+  outline-offset: 2px;
+}

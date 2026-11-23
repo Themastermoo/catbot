@@ -133,6 +133,8 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         "title": "",
         "description": "",
         "soul": bot.instructions,
+        // Catbot's own: the folder it works in.
+        "folder": bot.folder.display().to_string(),
         "soulHash": sha256(&bot.instructions),
         "notifications": true,
         "color": color(bot),

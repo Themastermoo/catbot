@@ -118,6 +118,36 @@ pub fn ModelPill(bot: Bot) -> Element {
     }
 }
 
+/// The bot panel's Model row (their `ModelPicker`, contained): the model's name, opening the same
+/// menu as the header's pill.
+#[component]
+pub fn ModelRow(bot: Bot) -> Element {
+    let known = use_known();
+    let mut open = use_signal(|| false);
+    let k = known();
+    let engine = k.engines.iter().find(|e| e["id"] == bot.engine.as_str()).cloned();
+    let name = model_name(engine.as_ref(), &bot.model);
+    let plan = k.plans.iter().find(|p| p["engine"] == bot.engine.as_str() && p["ok"] == true).cloned();
+    let engine_name = engine.as_ref().and_then(|e| e["name"].as_str()).unwrap_or("AI").to_string();
+    rsx! {
+        div { class: "relative",
+            button { r#type: "button", class: "{MENU_ROW}", "data-panel-row": "model", "aria-haspopup": "menu", "aria-expanded": "{open()}", onclick: move |_| open.toggle(),
+                span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "sparkles", size: 15 } }
+                span { class: "min-w-0 flex-1 truncate", "Model" }
+                span { class: "flex min-w-0 max-w-[60%] items-center gap-1.5 text-ink-secondary",
+                    EngineMark { id: bot.engine.clone(), name: engine_name.clone(), size: 14 }
+                    span { class: "truncate", "{name}" }
+                }
+                span { class: "shrink-0 text-ink-tertiary", Icon { name: "chevron-right", size: 15 } }
+            }
+            if open() {
+                div { class: "fixed inset-0 z-40", onclick: move |_| open.set(false) }
+                ModelMenu { bot: bot.clone(), engines: k.engines.clone(), plan, on_done: move |_| open.set(false) }
+            }
+        }
+    }
+}
+
 #[component]
 fn ModelMenu(bot: Bot, engines: Vec<Value>, plan: Option<Value>, on_done: EventHandler<()>) -> Element {
     let state = use_context::<Signal<State>>();
@@ -294,7 +324,7 @@ fn effort_hint(level: &str, label: &str) -> String {
 /// open, Auto and the levels as pills, with what the chosen one does. Absent when the AI takes
 /// no level with this model.
 #[component]
-fn Thinking(bot: Bot) -> Element {
+pub fn Thinking(bot: Bot) -> Element {
     let state = use_context::<Signal<State>>();
     let mut open = use_signal(|| false);
     let mut levels = use_signal(Vec::<(String, String)>::new);
