@@ -31,6 +31,14 @@ const NOTE: &str = "px-2 text-[12px] leading-4 text-ink-tertiary";
 /// The Chief's example asks (theirs, for their helper bot): a click sends one in the open chat.
 const ASKS: [&str; 4] = ["What are my bots up to?", "Set up a bot for my inbox", "Make me a morning routine", "How do I connect my email?"];
 
+/// A page of the panel, over its tabs: its settings, its activity, or one run inspected.
+#[derive(Clone, Copy, PartialEq)]
+enum Page {
+    Settings,
+    Activity,
+    Inspector(Option<i64>),
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Tab {
     Details,
@@ -42,7 +50,7 @@ enum Tab {
 pub fn BotPanel(bot: Bot) -> Element {
     let mut ui = use_context::<Ui>();
     let mut tab = use_signal(|| Tab::Details);
-    let mut settings = use_signal(|| false);
+    let mut page = use_signal(|| None::<Page>);
     let close = move |_| ui.settings_open.set(false);
     rsx! {
         aside {
@@ -51,11 +59,11 @@ pub fn BotPanel(bot: Bot) -> Element {
             class: "animate-panel-in absolute inset-0 z-40 flex h-full min-w-0 flex-col border-l border-hairline/40 bg-app md:relative md:z-20 md:w-[380px] md:shrink-0",
             onkeydown: move |e| {
                 if e.key() == Key::Escape {
-                    if settings() { settings.set(false) } else { ui.settings_open.set(false) }
+                    if page().is_some() { page.set(None) } else { ui.settings_open.set(false) }
                 }
             },
             div { class: "flex h-[50px] shrink-0 items-start justify-end gap-2.5 px-[13px] pt-[13px]",
-                button { r#type: "button", "data-panel-gear": true, "aria-label": "{bot.name}'s settings", title: "{bot.name}'s settings", "aria-current": if settings() { "page" } else { "false" }, class: ROUND, onclick: move |_| settings.toggle(),
+                button { r#type: "button", "data-panel-gear": true, "aria-label": "{bot.name}'s settings", title: "{bot.name}'s settings", "aria-current": if page() == Some(Page::Settings) { "page" } else { "false" }, class: ROUND, onclick: move |_| page.set(if page() == Some(Page::Settings) { None } else { Some(Page::Settings) }),
                     Icon { name: "settings", size: 16 }
                 }
                 button { r#type: "button", "aria-label": "Close", title: "Close", class: ROUND, onclick: close,
@@ -63,14 +71,27 @@ pub fn BotPanel(bot: Bot) -> Element {
                 }
             }
             div { class: "relative min-h-0 flex-1 overflow-y-auto px-4 pb-7",
-                if settings() {
-                    div { "data-panel-page-view": "settings",
-                        button { r#type: "button", class: "-ml-1 flex items-center gap-1 rounded-md px-1 py-0.5 text-[13px] text-ink-secondary hover:text-ink", onclick: move |_| settings.set(false),
+                if let Some(shown) = page() {
+                    div { "data-panel-page-view": match shown { Page::Settings => "settings", Page::Activity => "activity", Page::Inspector(_) => "inspector" },
+                        button { r#type: "button", class: "-ml-1 flex items-center gap-1 rounded-md px-1 py-0.5 text-[13px] text-ink-secondary hover:text-ink",
+                            onclick: move |_| page.set(match page() { Some(Page::Inspector(Some(_))) => Some(Page::Activity), _ => None }),
                             svg { "aria-hidden": "true", width: "14", height: "14", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round", path { d: "m15 18-6-6 6-6" } }
-                            "Back"
+                            if matches!(shown, Page::Inspector(Some(_))) { "Activity" } else { "Details" }
                         }
-                        h2 { class: "mt-2 text-[20px] font-semibold text-ink", "{bot.name}'s settings" }
-                        crate::settings::BotSettings { bot: bot.clone() }
+                        match shown {
+                            Page::Settings => rsx! {
+                                h2 { class: "mt-2 text-[20px] font-semibold text-ink", "{bot.name}'s settings" }
+                                crate::settings::BotSettings { bot: bot.clone() }
+                            },
+                            Page::Activity => rsx! {
+                                h2 { class: "mt-2 text-[20px] font-semibold text-ink", "Activity" }
+                                p { class: "mt-1 text-[13px] text-ink-secondary", "{bot.name}'s turns, the newest first." }
+                                ActivityPage { bot: bot.clone(), on_open: move |id| page.set(Some(Page::Inspector(Some(id)))) }
+                            },
+                            Page::Inspector(run) => rsx! {
+                                Inspector { key: "{run:?}", bot: bot.clone(), run }
+                            },
+                        }
                     }
                 } else {
                     Hero { bot: bot.clone() }
@@ -92,9 +113,9 @@ pub fn BotPanel(bot: Bot) -> Element {
                     }
                     div { role: "tabpanel",
                         match tab() {
-                            Tab::Details => rsx! { Details { bot: bot.clone() } },
-                            Tab::Library => rsx! { Library { bot: bot.clone(), on_settings: move |_| settings.set(true) } },
-                            Tab::Computer => rsx! { Computer { bot: bot.clone(), on_settings: move |_| settings.set(true) } },
+                            Tab::Details => rsx! { Details { bot: bot.clone(), on_page: move |p| page.set(Some(p)) } },
+                            Tab::Library => rsx! { Library { bot: bot.clone(), on_settings: move |_| page.set(Some(Page::Settings)) } },
+                            Tab::Computer => rsx! { Computer { bot: bot.clone(), on_settings: move |_| page.set(Some(Page::Settings)) } },
                         }
                     }
                 }
@@ -143,7 +164,7 @@ fn NavRow(icon: &'static str, title: String, #[props(default)] value: String, #[
 }
 
 #[component]
-fn Details(bot: Bot) -> Element {
+fn Details(bot: Bot, on_page: EventHandler<Page>) -> Element {
     let mut state = use_context::<Signal<State>>();
     let mut ui = use_context::<Ui>();
     let mut all_chats = use_signal(|| false);
@@ -226,6 +247,8 @@ fn Details(bot: Bot) -> Element {
                 NavRow { icon: "search", title: "Find in conversation", data: "find", onclick: move |_| ui.find.set(Some(String::new())) }
                 NavRow { icon: "plus", title: "Start fresh", data: "start-fresh", onclick: move |_| crate::chats::start(state, ui, bot.id.clone()) }
                 NavRow { icon: "coins", title: "Spending", data: "usage", onclick: move |_| ui.prefs.set(Some("spending".into())) }
+                NavRow { icon: "gauge", title: "Activity", data: "activity", onclick: move |_| on_page.call(Page::Activity) }
+                NavRow { icon: "search", title: "Inspector", data: "inspector", onclick: move |_| on_page.call(Page::Inspector(None)) }
             }
             section { "data-panel-card": "routines",
                 div { class: LABEL, span { "Routines" } }
@@ -325,6 +348,204 @@ fn Library(bot: Bot, on_settings: EventHandler<()>) -> Element {
     }
 }
 
+/// How long ago, in words: "just now", "5 min ago", "3 h ago", "2 days ago".
+fn ago(at: &str) -> String {
+    let then = crate::chat::parse_time(at);
+    if !then.is_finite() || then <= 0.0 {
+        return String::new();
+    }
+    let minutes = ((crate::chat::js_now() - then) / 60_000.0).max(0.0) as i64;
+    match minutes {
+        0 => "just now".into(),
+        1..=59 => format!("{minutes} min ago"),
+        60..=1439 => format!("{} h ago", minutes / 60),
+        _ => match minutes / 1440 {
+            1 => "yesterday".into(),
+            d => format!("{d} days ago"),
+        },
+    }
+}
+
+/// A turn's length: "0.8 s", "12 s", "3 min 4 s".
+fn took(seconds: f64) -> String {
+    if seconds < 10.0 {
+        format!("{seconds:.1} s")
+    } else if seconds < 60.0 {
+        format!("{} s", seconds.round() as i64)
+    } else {
+        let s = seconds.round() as i64;
+        format!("{} min {} s", s / 60, s % 60)
+    }
+}
+
+/// The colour of a run's dot: done, failed or stopped.
+fn outcome_dot(outcome: &str) -> &'static str {
+    match outcome {
+        "done" => "bg-[#2fa46a]",
+        "stopped" => "bg-ink-tertiary",
+        _ => "bg-danger",
+    }
+}
+
+/// Their Activity: the bot's turns, the newest first, each opening the Inspector.
+#[component]
+fn ActivityPage(bot: Bot, on_open: EventHandler<i64>) -> Element {
+    let id = bot.id.clone();
+    let runs = use_resource(move || {
+        let id = id.clone();
+        async move { api::get(&format!("/api/bots/{id}/runs")).await }
+    });
+    let list: Option<Result<Vec<Value>, String>> = runs.read().as_ref().map(|r| r.as_ref().map(|v| v["runs"].as_array().cloned().unwrap_or_default()).map_err(Clone::clone));
+    rsx! {
+        div { class: "mt-4 flex flex-col", "data-panel-activity": true,
+            match list {
+                None => rsx! { p { class: NOTE, "Looking…" } },
+                Some(Err(err)) => rsx! { p { role: "alert", class: "text-[13px] text-danger", "{err}" } },
+                Some(Ok(runs)) if runs.is_empty() => rsx! { p { class: "py-6 text-center text-[13px] text-ink-secondary", "Nothing yet. Each turn {bot.name} takes shows here." } },
+                Some(Ok(runs)) => rsx! {
+                    for run in runs {
+                        {
+                            let id = run["id"].as_i64().unwrap_or_default();
+                            let outcome = run["outcome"].as_str().unwrap_or_default().to_string();
+                            let chat = run["chat"].as_str().unwrap_or("New chat").to_string();
+                            let tools = run["tools"].as_i64().unwrap_or(0);
+                            let mut facts = vec![ago(run["startedAt"].as_str().unwrap_or_default()), took(run["seconds"].as_f64().unwrap_or(0.0))];
+                            if tools > 0 {
+                                facts.push(if tools == 1 { "1 tool".into() } else { format!("{tools} tools") });
+                            }
+                            if let Some(cost) = run["costUsd"].as_f64().filter(|c| *c > 0.0) {
+                                facts.push(format!("${cost:.2}"));
+                            }
+                            let facts = facts.join(" · ");
+                            rsx! {
+                                button { key: "{id}", r#type: "button", class: "{MENU_ROW} min-h-[48px]", "data-panel-run": "{id}", onclick: move |_| on_open.call(id),
+                                    span { class: "size-2 shrink-0 rounded-full {outcome_dot(&outcome)}", title: "{outcome}" }
+                                    span { class: "min-w-0 flex-1",
+                                        span { class: "block truncate", "{chat}" }
+                                        span { class: "block truncate text-[12px] text-ink-tertiary", "{facts}" }
+                                    }
+                                    span { class: "shrink-0 text-ink-tertiary", Icon { name: "chevron-right", size: 15 } }
+                                }
+                            }
+                        }
+                    }
+                },
+            }
+        }
+    }
+}
+
+/// Their Inspector: one turn (the newest unless one was picked) as a run log, its events, or raw.
+#[component]
+fn Inspector(bot: Bot, run: Option<i64>) -> Element {
+    let mut view = use_signal(|| "log");
+    let id = bot.id.clone();
+    let found = use_resource(move || {
+        let id = id.clone();
+        async move {
+            let which = match run {
+                Some(run) => run,
+                None => {
+                    let list = api::get(&format!("/api/bots/{id}/runs")).await?;
+                    match list["runs"][0]["id"].as_i64() {
+                        Some(newest) => newest,
+                        None => return Ok(Value::Null),
+                    }
+                }
+            };
+            api::get(&format!("/api/bots/{id}/runs/{which}")).await.map(|r| r["run"].clone())
+        }
+    });
+    let shown = found.read().clone();
+    rsx! {
+        h2 { class: "mt-2 text-[20px] font-semibold text-ink", "Inspector" }
+        p { class: "mt-1 text-[13px] text-ink-secondary", "What happened in a turn, step by step." }
+        div { class: "mt-4", "data-panel-inspector": true,
+            match shown {
+                None => rsx! { p { class: NOTE, "Looking…" } },
+                Some(Err(err)) => rsx! { p { role: "alert", class: "text-[13px] text-danger", "{err}" } },
+                Some(Ok(Value::Null)) => rsx! { p { class: "py-6 text-center text-[13px] text-ink-secondary", "Nothing to inspect yet: {bot.name} hasn't taken a turn." } },
+                Some(Ok(run)) => {
+                    let outcome = run["outcome"].as_str().unwrap_or_default().to_string();
+                    let chat = run["chat"].as_str().unwrap_or("New chat").to_string();
+                    let model = [run["engine"].as_str().unwrap_or_default(), run["model"].as_str().unwrap_or_default()].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join(" · ");
+                    let raw = serde_json::to_string_pretty(&run["events"]).unwrap_or_default();
+                    let when = ago(run["startedAt"].as_str().unwrap_or_default());
+                    let lines: Vec<(String, &'static str, String)> = run["log"].as_array().cloned().unwrap_or_default().into_iter().map(|l| {
+                        let tone = match l["kind"].as_str() {
+                            Some("error") => "text-danger",
+                            Some("ask") => "text-warning",
+                            Some("thinking") | Some("note") => "text-ink-secondary",
+                            _ => "text-ink",
+                        };
+                        (format!("+{:.1}s", l["at"].as_f64().unwrap_or(0.0)), tone, l["text"].as_str().unwrap_or_default().to_string())
+                    }).collect();
+                    let events: Vec<(String, String, String)> = run["events"].as_array().cloned().unwrap_or_default().into_iter().map(|e| {
+                        (format!("{} ms", e["ms"].as_u64().unwrap_or(0)), e["type"].as_str().unwrap_or("?").to_string(), event_gist(&e))
+                    }).collect();
+                    let length = took(run["seconds"].as_f64().unwrap_or(0.0));
+                    rsx! {
+                        div { class: "flex items-center gap-2 px-2",
+                            span { class: "size-2 shrink-0 rounded-full {outcome_dot(&outcome)}" }
+                            span { class: "min-w-0 flex-1 truncate text-[14px] font-medium text-ink", "{chat}" }
+                            span { class: "shrink-0 text-[12px] text-ink-tertiary", "{when}" }
+                        }
+                        p { class: "mt-0.5 px-2 text-[12px] text-ink-tertiary", "{model} · {length}" }
+                        div { role: "tablist", class: "mt-3 flex justify-center",
+                            div { class: "flex gap-0.5 rounded-full bg-ink/[0.05] p-[3px]",
+                                for (key, label) in [("log", "Run log"), ("events", "Events"), ("raw", "Raw")] {
+                                    button { key: "{key}", r#type: "button", role: "tab", "aria-selected": "{view() == key}", "data-inspector-view": "{key}",
+                                        class: if view() == key { "h-[26px] rounded-full bg-ink/[0.1] px-3 text-[13px] font-medium text-ink" } else { "h-[26px] rounded-full px-3 text-[13px] text-ink-secondary hover:text-ink" },
+                                        onclick: move |_| view.set(key),
+                                        "{label}"
+                                    }
+                                }
+                            }
+                        }
+                        match view() {
+                            "log" => rsx! {
+                                ol { class: "mt-3 flex flex-col gap-1.5 px-2", "data-inspector-log": true,
+                                    for (n, (at, tone, text)) in lines.into_iter().enumerate() {
+                                        li { key: "{n}", class: "flex gap-2 text-[13px] leading-5",
+                                            span { class: "w-12 shrink-0 text-right tabular-nums text-ink-tertiary", "{at}" }
+                                            span { class: "min-w-0 flex-1 [overflow-wrap:anywhere] {tone}", "{text}" }
+                                        }
+                                    }
+                                }
+                            },
+                            "events" => rsx! {
+                                ol { class: "mt-3 flex flex-col divide-y divide-hairline/40 px-2", "data-inspector-events": true,
+                                    for (n, (ms, kind, gist)) in events.into_iter().enumerate() {
+                                        li { key: "{n}", class: "flex gap-2 py-1.5 font-mono text-[12px] leading-4",
+                                            span { class: "w-14 shrink-0 text-right tabular-nums text-ink-tertiary", "{ms}" }
+                                            span { class: "shrink-0 text-ink", "{kind}" }
+                                            span { class: "min-w-0 flex-1 truncate text-ink-secondary", "{gist}" }
+                                        }
+                                    }
+                                }
+                            },
+                            _ => rsx! {
+                                pre { class: "mt-3 max-h-[60vh] overflow-auto rounded-lg bg-ink/[0.04] p-3 font-mono text-[11px] leading-4 whitespace-pre-wrap [overflow-wrap:anywhere] text-ink", "data-inspector-raw": true, "{raw}" }
+                            },
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// An event's gist for the Events list: its title, summary, text or message.
+fn event_gist(event: &Value) -> String {
+    ["title", "summary", "text", "message", "model", "output"]
+        .iter()
+        .filter_map(|k| event[*k].as_str())
+        .filter(|s| !s.is_empty())
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" · ")
+}
+
 const APPROVAL: [(&str, &str); 4] = [("ask", "Asks first"), ("edits", "Edits on its own"), ("auto", "Approves for you"), ("full", "Full access")];
 
 #[component]
@@ -410,5 +631,14 @@ mod tests {
         assert!(!bot_note("Projects/Scout.md", "Scout"));
         assert_eq!(short_path("/home/moo/.local/share/catbot/bots/scout"), "~/.local/share/catbot/bots/scout");
         assert_eq!(short_path("/srv/bots/scout"), "/srv/bots/scout");
+    }
+
+    #[test]
+    fn runs_in_words() {
+        assert_eq!(took(0.84), "0.8 s");
+        assert_eq!(took(12.4), "12 s");
+        assert_eq!(took(184.0), "3 min 4 s");
+        assert_eq!(event_gist(&json!({ "type": "item.started", "title": "Bash", "summary": "ls" })), "Bash · ls");
+        assert_eq!(outcome_dot("failed"), "bg-danger");
     }
 }

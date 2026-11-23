@@ -280,6 +280,19 @@ async fn a_turn_streams_asks_and_is_kept() {
     let kept: Vec<String> = page["messages"].as_array().unwrap().iter().map(describe).collect();
     assert_eq!(kept, ["user approve", "card Approval needed: Bash echo hi → allow", "bot Bash echo hi", "bot Hello, approve"]);
     assert_eq!(page["activeLeafId"], page["messages"][3]["id"]);
+
+    // The turn is kept as a run: listed in its Activity, and told step by step in its Inspector.
+    let (_, runs) = s.call("GET", &format!("/api/bots/{bot}/runs"), None).await;
+    let run = &runs["runs"][0];
+    assert_eq!((run["outcome"].as_str(), run["tools"].as_i64(), run["threadId"].as_str()), (Some("done"), Some(1), Some(thread.as_str())));
+    assert!(run.get("events").is_none(), "the list leaves the events out");
+    let (_, one) = s.call("GET", &format!("/api/bots/{bot}/runs/{}", run["id"]), None).await;
+    let log: Vec<&str> = one["run"]["log"].as_array().unwrap().iter().filter_map(|l| l["text"].as_str()).collect();
+    assert!(log.contains(&"Asked you: Bash echo hi"), "{log:?}");
+    assert!(log.contains(&"Wrote: Hello, approve"), "{log:?}");
+    assert_eq!(log.last(), Some(&"Finished"));
+    assert!(one["run"]["events"].as_array().unwrap().iter().any(|e| e["type"] == "request.opened"));
+    assert_eq!(s.call("GET", &format!("/api/bots/{bot}/runs/999"), None).await.0, 404);
 }
 
 #[tokio::test]

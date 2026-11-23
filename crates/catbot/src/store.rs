@@ -290,6 +290,46 @@ CREATE TABLE messages (
 CREATE INDEX messages_by_conversation ON messages(conversation_id, id);
 ";
 
+/// How many runs a bot keeps.
+pub const RUNS_KEPT: i64 = 200;
+
+/// One turn of a bot's, as the panel's Activity and Inspector show it. `outcome` is "done",
+/// "failed" or "stopped"; `events` what happened, trimmed (`server::runs`).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct Run {
+    pub id: i64,
+    pub bot_id: String,
+    pub conversation_id: String,
+    pub turn_id: String,
+    pub started_at: String,
+    pub ended_at: String,
+    pub outcome: String,
+    pub engine: String,
+    pub model: String,
+    pub tools: i64,
+    pub errors: i64,
+    pub cost_usd: Option<f64>,
+    pub events: Value,
+}
+
+fn run_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
+    Ok(Run {
+        id: r.get(0)?,
+        bot_id: r.get(1)?,
+        conversation_id: r.get(2)?,
+        turn_id: r.get(3)?,
+        started_at: r.get(4)?,
+        ended_at: r.get(5)?,
+        outcome: r.get(6)?,
+        engine: r.get(7)?,
+        model: r.get(8)?,
+        tools: r.get(9)?,
+        errors: r.get(10)?,
+        cost_usd: r.get(11)?,
+        events: serde_json::from_str(&r.get::<_, String>(12)?).unwrap_or(Value::Array(Vec::new())),
+    })
+}
+
 fn now() -> String {
     chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
 }
@@ -448,6 +488,30 @@ impl Store {
             // Version 9: a bot's thinking level.
             conn.execute_batch("BEGIN; ALTER TABLE bots ADD COLUMN effort TEXT; PRAGMA user_version = 9; COMMIT;")?;
         }
+        if version < 10 {
+            // Version 10: each turn's run, with what happened in it (the panel's Activity and Inspector).
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE runs (
+                     id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                     bot_id          TEXT NOT NULL,
+                     conversation_id TEXT NOT NULL,
+                     turn_id         TEXT NOT NULL,
+                     started_at      TEXT NOT NULL,
+                     ended_at        TEXT NOT NULL,
+                     outcome         TEXT NOT NULL,
+                     engine          TEXT NOT NULL,
+                     model           TEXT NOT NULL,
+                     tools           INTEGER NOT NULL,
+                     errors          INTEGER NOT NULL,
+                     cost_usd        REAL,
+                     events          TEXT NOT NULL
+                 );
+                 CREATE INDEX runs_by_bot ON runs(bot_id, id);
+                 PRAGMA user_version = 10;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { conn, home: home.to_path_buf() })
     }
 
@@ -472,6 +536,44 @@ impl Store {
             ],
         )?;
         Ok(())
+    }
+
+    /// Keeps a turn's run, and only a bot's newest `RUNS_KEPT`.
+    pub fn add_run(&self, run: &Run) -> Result<i64, BoxError> {
+        self.conn.execute(
+            "INSERT INTO runs (bot_id, conversation_id, turn_id, started_at, ended_at, outcome, engine, model, tools, errors, cost_usd, events)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+            params![run.bot_id, run.conversation_id, run.turn_id, run.started_at, run.ended_at, run.outcome, run.engine, run.model, run.tools, run.errors, run.cost_usd, run.events.to_string()],
+        )?;
+        let id = self.conn.last_insert_rowid();
+        self.conn.execute(
+            "DELETE FROM runs WHERE bot_id = ?1 AND id NOT IN (SELECT id FROM runs WHERE bot_id = ?1 ORDER BY id DESC LIMIT ?2)",
+            params![run.bot_id, RUNS_KEPT],
+        )?;
+        Ok(id)
+    }
+
+    /// A bot's runs, the newest first, without their events.
+    pub fn runs(&self, bot_id: &str, limit: usize) -> Result<Vec<Run>, BoxError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, bot_id, conversation_id, turn_id, started_at, ended_at, outcome, engine, model, tools, errors, cost_usd, '[]'
+             FROM runs WHERE bot_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![bot_id, limit as i64], run_row)?.collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// One of a bot's runs, with its events.
+    pub fn run(&self, bot_id: &str, id: i64) -> Result<Option<Run>, BoxError> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT id, bot_id, conversation_id, turn_id, started_at, ended_at, outcome, engine, model, tools, errors, cost_usd, events
+                 FROM runs WHERE bot_id = ?1 AND id = ?2",
+                params![bot_id, id],
+                run_row,
+            )
+            .optional()?)
     }
 
     /// Every turn's usage since a time (an RFC 3339 string, as stored), oldest first.
@@ -1341,7 +1443,7 @@ mod tests {
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
         assert_eq!(bot.engine, "claude", "bots from before run on Claude");
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 9);
+        assert_eq!(version, 10);
         assert_eq!(bot.effort, None, "and think at their engine's own level");
         // And keys for the chat APIs.
         assert_eq!(store.engine_key("xai").unwrap(), None);

@@ -36,6 +36,7 @@ pub mod hooks;
 pub mod hub;
 pub mod memory;
 pub mod remote;
+pub mod runs;
 pub mod triggers;
 pub mod turns;
 pub mod wire;
@@ -746,6 +747,7 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
         (Method::POST, ["tasks", thread, "branch"]) => branch_chat(app, bot, thread, json_body(req).await?),
         (Method::DELETE, ["tasks", thread]) => delete_chat(app, bot, thread),
         (Method::POST, ["read"]) => Ok((StatusCode::OK, json!({ "ok": true }))),
+        (Method::GET, ["runs", rest @ ..]) => runs::route(app, &bot, rest),
         (Method::POST, ["interrupt"]) => {
             let body = json_body(req).await?;
             let thread = match body["threadId"].as_str() {

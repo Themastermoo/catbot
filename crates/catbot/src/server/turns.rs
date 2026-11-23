@@ -163,7 +163,12 @@ async fn run(
     guest: bool,
 ) -> Option<String> {
     let thread = conversation.id.as_str();
-    let emit = |event: Value| app.hub.send(runtime(thread, turn_id, event));
+    // What happens is kept as it's sent, for the bot panel's Activity and Inspector.
+    let record = super::runs::Recorder::new();
+    let emit = |event: Value| {
+        record.push(&event);
+        app.hub.send(runtime(thread, turn_id, event))
+    };
     // The Chief of Staff is told its role and the whole team, wherever it answers.
     let mut dressed = bot.clone();
     if let Some(chief) = super::chief::chief(app).filter(|c| c.id == bot.id) {
@@ -290,6 +295,7 @@ async fn run(
     if result.stopped {
         save_and_send(app, thread, Role::Note, "Stopped.", None);
     }
+    let model = result.model.clone().or_else(|| bot.model.clone()).unwrap_or_default();
     let outcome = result.outcome.unwrap_or_default();
     emit(json!({
         "type": "turn.completed",
@@ -298,6 +304,9 @@ async fn run(
         "cost": outcome.cost_usd,
         "denials": outcome.permission_denials.iter().filter_map(|d| d["tool_name"].as_str()).collect::<Vec<_>>(),
     }));
+    let how = if result.stopped { "stopped" } else if outcome.ok && result.errors.is_empty() { "done" } else { "failed" };
+    let tools = result.steps.iter().filter(|s| matches!(s, Step::Tool { .. })).count();
+    record.finish(app, bot, thread, turn_id, how, &model, tools, result.errors.len(), outcome.cost_usd);
     (!result.stopped && !result.reply.trim().is_empty()).then_some(result.reply)
 }
 
