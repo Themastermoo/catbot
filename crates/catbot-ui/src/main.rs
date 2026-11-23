@@ -45,6 +45,8 @@ mod prefs;
 mod model_menu;
 mod panel;
 mod pets;
+#[cfg(feature = "desktop")]
+mod pet_window;
 
 use dioxus::prelude::*;
 
@@ -64,6 +66,13 @@ const ICON_SMALL: Asset = asset!("/assets/icon/catbot-32.png");
 fn main() {
     #[cfg(feature = "desktop")]
     {
+        // The desktop pets' own program (`pet_window`), started when the window closes.
+        if std::env::args().any(|a| a == "--pets") {
+            pet_window::launch();
+            return;
+        }
+        // Opening Catbot sends any pets home.
+        pet_window::bring_home();
         use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
         let window = WindowBuilder::new().with_title("Catbot").with_inner_size(LogicalSize::new(1280.0, 840.0)).with_min_inner_size(LogicalSize::new(720.0, 480.0));
         let mut config = Config::new().with_window(window).with_menu(None);
@@ -153,6 +162,19 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let find = use_signal(|| None::<String>);
     let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat, prefs, find });
     let notify_prefs = use_context_provider(|| Signal::new(notify::load()));
+    // Closing the window lets the desktop pets out, if any bot is one.
+    #[cfg(feature = "desktop")]
+    {
+        let main_window = use_hook(|| dioxus::desktop::window().id());
+        dioxus::desktop::use_wry_event_handler(move |event, _| {
+            if let dioxus::desktop::tao::event::Event::WindowEvent { window_id, event: dioxus::desktop::WindowEvent::CloseRequested, .. } = event
+                && *window_id == main_window
+                && state.peek().bots.iter().any(|b| b.pet)
+            {
+                pet_window::come_out();
+            }
+        });
+    }
     use_future(move || notify::follow_clicks(state, ui));
     // Talking to home through the link, and home has removed this device.
     let unpaired = move || place == link::Place::Home && link::current().is_none();

@@ -1,0 +1,378 @@
+/* Catbot desktop pet, drawn and animated by Fable (Claude Fable 5.2) for Catbot's pet windows
+   (src/pet_window.rs, src/pet.svg). Animates transform + opacity only.
+   State: [data-pet] on the root svg. Face: [data-face="dots"|"visor"].
+   Tint: --pet, --pet-light, --pet-dark. Speed: --pet-speed (default 1).
+   All transform-origins are in viewBox user units (0 0 96 80). */
+
+.catbot-pet {
+  display: block;
+  overflow: visible;
+  --_s: var(--pet-speed, 1);
+}
+.catbot-pet g { transform-box: view-box; }
+
+/* joints */
+.catbot-pet .pet-body    { transform-origin: 46px 80px; }   /* ground, centre */
+.catbot-pet .pet-torso   { transform-origin: 42px 53px; }
+.catbot-pet .pet-head    { transform-origin: 64px 50px; }   /* neck */
+.catbot-pet .pet-ear-l   { transform-origin: 62px 29px; }
+.catbot-pet .pet-ear-r   { transform-origin: 79px 29px; }
+.catbot-pet .pet-tail    { transform-origin: 21px 53px; }   /* tail root */
+.catbot-pet .pet-leg-fl  { transform-origin: 63.5px 58px; } /* far front shoulder */
+.catbot-pet .pet-leg-fr  { transform-origin: 56.5px 58px; } /* near front shoulder */
+.catbot-pet .pet-leg-bl  { transform-origin: 34.5px 58px; } /* far back hip */
+.catbot-pet .pet-leg-br  { transform-origin: 27.5px 58px; } /* near back hip */
+.catbot-pet .pet-blink   { transform-origin: 74.5px 38.5px; }
+.catbot-pet .pet-alert   { transform-origin: 70.5px 17px; }
+.catbot-pet .pet-zzz > g,
+.catbot-pet .pet-sweat > circle { transform-box: fill-box; transform-origin: 50% 50%; }
+
+/* faces */
+.catbot-pet:not([data-face="visor"]) .pet-face-visor { display: none; }
+.catbot-pet[data-face="visor"] .pet-face-dots { display: none; }
+
+/* extras hidden unless their state shows them */
+.catbot-pet .pet-zzz,
+.catbot-pet .pet-alert,
+.catbot-pet .pet-sweat,
+.catbot-pet .pet-tail-curl { opacity: 0; }
+
+/* shared */
+@keyframes pet-blink {
+  0%, 93%, 100% { transform: scaleY(1); }
+  96.5% { transform: scaleY(0.1); }
+}
+@keyframes pet-slow-blink {
+  0%, 78%, 100% { transform: scaleY(1); }
+  84%, 92% { transform: scaleY(0.12); }
+}
+@keyframes pet-settle { from { transform: translate(0px, 0px) rotate(0deg) scale(1, 1); } }
+@keyframes pet-fade-in { from { opacity: 0; } }
+
+.catbot-pet[data-pet="idle"] .pet-blink,
+.catbot-pet[data-pet="walk"] .pet-blink,
+.catbot-pet[data-pet="working"] .pet-blink,
+.catbot-pet[data-pet="waiting"] .pet-blink,
+.catbot-pet[data-pet="drag"] .pet-blink {
+  animation: pet-blink calc(5.2s / var(--_s)) linear infinite;
+}
+
+/* ---------- idle ---------- */
+@keyframes pet-breathe {
+  0%, 100% { transform: scale(1, 1); }
+  50% { transform: scale(1.012, 1.022); }
+}
+@keyframes pet-tail-sway {
+  0%, 100% { transform: rotate(-4deg); }
+  50% { transform: rotate(8deg); }
+}
+@keyframes pet-ear-twitch {
+  0%, 88%, 96%, 100% { transform: rotate(0deg); }
+  91% { transform: rotate(12deg); }
+  93.5% { transform: rotate(-3deg); }
+}
+.catbot-pet[data-pet="idle"] .pet-body { animation: pet-breathe calc(3.2s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="idle"] .pet-tail { animation: pet-tail-sway calc(3.6s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="idle"] .pet-ear-r { animation: pet-ear-twitch calc(7s / var(--_s)) ease-in-out infinite; }
+
+/* ---------- walk (treadmill; 0.8s cycle) ----------
+   Stance 0-50% (foot sweeps back at constant speed), swing 50-100% (foot lifted).
+   The body drops 1.6 units when the legs are splayed so stance feet stay on y=80.
+   Ground speed that matches the feet: 33 viewBox units per cycle
+   (= 0.344 x rendered width per cycle, or 0.43 x width x --pet-speed per second). */
+@keyframes pet-step {
+  0%   { transform: translateY(0px) rotate(-22deg); }
+  25%  { transform: translateY(0px) rotate(0deg); }
+  50%  { transform: translateY(0px) rotate(22deg); }
+  60%  { transform: translateY(-3.2px) rotate(17deg); }
+  75%  { transform: translateY(-5px) rotate(-1deg); }
+  90%  { transform: translateY(-2.6px) rotate(-19deg); }
+  100% { transform: translateY(0px) rotate(-22deg); }
+}
+@keyframes pet-walk-bob {
+  0%, 50%, 100% { transform: translateY(1.6px); animation-timing-function: ease-out; }
+  25%, 75% { transform: translateY(0px); animation-timing-function: ease-in; }
+}
+@keyframes pet-walk-head {
+  0%, 50%, 100% { transform: translateY(-1px); animation-timing-function: ease-out; }
+  25%, 75% { transform: translateY(0px); animation-timing-function: ease-in; }
+}
+@keyframes pet-walk-tail {
+  0%, 50%, 100% { transform: rotate(-5deg); }
+  25%, 75% { transform: rotate(5deg); }
+}
+.catbot-pet[data-pet="walk"] .pet-body { animation: pet-walk-bob calc(0.8s / var(--_s)) linear infinite; }
+.catbot-pet[data-pet="walk"] .pet-head { animation: pet-walk-head calc(0.8s / var(--_s)) linear infinite; }
+.catbot-pet[data-pet="walk"] .pet-tail { animation: pet-walk-tail calc(0.8s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="walk"] .pet-leg-fr,
+.catbot-pet[data-pet="walk"] .pet-leg-bl,
+.catbot-pet[data-pet="walk"] .pet-leg-fl,
+.catbot-pet[data-pet="walk"] .pet-leg-br { animation: pet-step calc(0.8s / var(--_s)) linear infinite; }
+.catbot-pet[data-pet="walk"] .pet-leg-fl,
+.catbot-pet[data-pet="walk"] .pet-leg-br { animation-delay: calc(-0.4s / var(--_s)); }
+
+/* ---------- sit ---------- */
+.catbot-pet[data-pet="sit"] .pet-torso  { transform: translate(3px, 6.5px) rotate(-52deg) scale(0.92, 1); }
+.catbot-pet[data-pet="sit"] .pet-head   { transform: translate(-7px, -4px) rotate(0deg) scale(1, 1); }
+.catbot-pet[data-pet="sit"] .pet-leg-fr { transform: translate(0px, 0px) rotate(0deg) scale(1, 1); }
+.catbot-pet[data-pet="sit"] .pet-leg-fl { transform: translate(-2px, 0px) rotate(0deg) scale(1, 1); }
+.catbot-pet[data-pet="sit"] .pet-leg-br { transform: translate(3px, 17.5px) rotate(-90deg) scale(1, 1); }
+.catbot-pet[data-pet="sit"] .pet-leg-bl { transform: translate(-3px, 17.5px) rotate(-90deg) scale(1, 1); }
+.catbot-pet[data-pet="sit"] .pet-tail   { transform: translate(10px, 23px) rotate(6deg) scale(0.9, 0.9); }
+@keyframes pet-sit-breathe {
+  0%, 100% { transform: translate(3px, 6.5px) rotate(-52deg) scale(0.92, 1); }
+  50% { transform: translate(3px, 6.2px) rotate(-52deg) scale(0.93, 1.03); }
+}
+@keyframes pet-sit-head {
+  0%, 100% { transform: translate(-7px, -4px) rotate(0deg) scale(1, 1); }
+  50% { transform: translate(-7px, -4.7px) rotate(0deg) scale(1, 1); }
+}
+@keyframes pet-sit-tail {
+  0%, 100% { transform: translate(10px, 23px) rotate(6deg) scale(0.9, 0.9); }
+  50% { transform: translate(10px, 23px) rotate(-3deg) scale(0.9, 0.9); }
+}
+.catbot-pet[data-pet="sit"] .pet-torso {
+  animation: pet-settle calc(0.4s / var(--_s)) ease-out both,
+             pet-sit-breathe calc(3.6s / var(--_s)) ease-in-out calc(0.4s / var(--_s)) infinite;
+}
+.catbot-pet[data-pet="sit"] .pet-head {
+  animation: pet-settle calc(0.4s / var(--_s)) ease-out both,
+             pet-sit-head calc(3.6s / var(--_s)) ease-in-out calc(0.4s / var(--_s)) infinite;
+}
+.catbot-pet[data-pet="sit"] .pet-tail {
+  animation: pet-settle calc(0.4s / var(--_s)) ease-out both,
+             pet-sit-tail calc(4.4s / var(--_s)) ease-in-out calc(0.4s / var(--_s)) infinite;
+}
+.catbot-pet[data-pet="sit"] .pet-leg-fl,
+.catbot-pet[data-pet="sit"] .pet-leg-br,
+.catbot-pet[data-pet="sit"] .pet-leg-bl { animation: pet-settle calc(0.4s / var(--_s)) ease-out both; }
+.catbot-pet[data-pet="sit"] .pet-blink { animation: pet-slow-blink calc(6s / var(--_s)) ease-in-out infinite; }
+
+/* ---------- sleep ---------- */
+.catbot-pet[data-pet="sleep"] .pet-torso  { transform: translate(0px, 14px) rotate(0deg) scale(1.04, 0.9); }
+.catbot-pet[data-pet="sleep"] .pet-head   { transform: translate(1px, 23.5px) rotate(5deg) scale(1, 1); }
+.catbot-pet[data-pet="sleep"] .pet-leg-fr { transform: translate(7px, 17.5px) rotate(-90deg) scale(1, 1); }
+.catbot-pet[data-pet="sleep"] .pet-leg-fl { transform: translate(3px, 17.5px) rotate(-90deg) scale(1, 1); }
+.catbot-pet[data-pet="sleep"] .pet-leg-br,
+.catbot-pet[data-pet="sleep"] .pet-leg-bl,
+.catbot-pet[data-pet="sleep"] .pet-tail   { opacity: 0; }
+.catbot-pet[data-pet="sleep"] .pet-tail-curl { opacity: 1; }
+.catbot-pet[data-pet="sleep"] .pet-blink  { transform: scaleY(0.12); }
+.catbot-pet[data-pet="sleep"] .pet-ear-l  { transform: rotate(-9deg); }
+.catbot-pet[data-pet="sleep"] .pet-ear-r  { transform: rotate(9deg); }
+.catbot-pet[data-pet="sleep"] .pet-zzz    { opacity: 1; }
+@keyframes pet-sleep-breathe {
+  0%, 100% { transform: translate(0px, 14px) rotate(0deg) scale(1.04, 0.9); }
+  50% { transform: translate(0px, 13.6px) rotate(0deg) scale(1.055, 0.935); }
+}
+@keyframes pet-sleep-head {
+  0%, 100% { transform: translate(1px, 23.5px) rotate(5deg) scale(1, 1); }
+  50% { transform: translate(1px, 22.8px) rotate(4deg) scale(1, 1); }
+}
+@keyframes pet-zzz {
+  0%   { opacity: 0; transform: translate(-2px, 4px) scale(0.6); }
+  20%  { opacity: 1; }
+  65%  { opacity: 1; }
+  100% { opacity: 0; transform: translate(2.5px, -6px) scale(1.08); }
+}
+.catbot-pet[data-pet="sleep"] .pet-torso {
+  animation: pet-settle calc(0.5s / var(--_s)) ease-out both,
+             pet-sleep-breathe calc(4.4s / var(--_s)) ease-in-out calc(0.5s / var(--_s)) infinite;
+}
+.catbot-pet[data-pet="sleep"] .pet-head {
+  animation: pet-settle calc(0.5s / var(--_s)) ease-out both,
+             pet-sleep-head calc(4.4s / var(--_s)) ease-in-out calc(0.5s / var(--_s)) infinite;
+}
+.catbot-pet[data-pet="sleep"] .pet-leg-fr,
+.catbot-pet[data-pet="sleep"] .pet-leg-fl { animation: pet-settle calc(0.5s / var(--_s)) ease-out both; }
+.catbot-pet[data-pet="sleep"] .pet-tail-curl { animation: pet-fade-in calc(0.5s / var(--_s)) ease-out both; }
+.catbot-pet[data-pet="sleep"] .pet-zzz > g { animation: pet-zzz calc(3.3s / var(--_s)) ease-out infinite both; }
+.catbot-pet[data-pet="sleep"] .pet-zzz > g:nth-child(1) { animation-delay: calc(0.5s / var(--_s)); }
+.catbot-pet[data-pet="sleep"] .pet-zzz > g:nth-child(2) { animation-delay: calc(1.3s / var(--_s)); }
+.catbot-pet[data-pet="sleep"] .pet-zzz > g:nth-child(3) { animation-delay: calc(2.1s / var(--_s)); }
+
+/* ---------- jump (one-shot 0.6s, holds the tuck) ---------- */
+@keyframes pet-jump-body {
+  0%   { transform: translate(0px, 0px) rotate(0deg) scale(1, 1); }
+  20%  { transform: translate(-1px, 0px) rotate(3deg) scale(1.09, 0.82); }
+  45%  { transform: translate(4px, -2px) rotate(-11deg) scale(0.96, 1.06); }
+  72%  { transform: translate(3px, -4px) rotate(-5deg) scale(0.98, 1.03); }
+  100% { transform: translate(0px, -4px) rotate(7deg) scale(1.02, 0.97); }
+}
+@keyframes pet-jump-front {
+  0%, 20% { transform: rotate(0deg); }
+  45%  { transform: rotate(-58deg); }
+  72%  { transform: rotate(-50deg); }
+  100% { transform: rotate(-32deg); }
+}
+@keyframes pet-jump-back {
+  0%, 20% { transform: rotate(0deg); }
+  45%  { transform: rotate(52deg); }
+  72%  { transform: rotate(30deg); }
+  100% { transform: rotate(-34deg); }
+}
+@keyframes pet-jump-tail {
+  0%   { transform: rotate(0deg); }
+  20%  { transform: rotate(10deg); }
+  45%  { transform: rotate(-4deg); }
+  100% { transform: rotate(-8deg); }
+}
+@keyframes pet-jump-head {
+  0%, 100% { transform: rotate(0deg); }
+  20% { transform: rotate(-4deg); }
+  45% { transform: rotate(8deg); }
+}
+.catbot-pet[data-pet="jump"] .pet-body { animation: pet-jump-body calc(0.6s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="jump"] .pet-head { animation: pet-jump-head calc(0.6s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="jump"] .pet-tail { animation: pet-jump-tail calc(0.6s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="jump"] .pet-leg-fr,
+.catbot-pet[data-pet="jump"] .pet-leg-fl { animation: pet-jump-front calc(0.6s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="jump"] .pet-leg-br,
+.catbot-pet[data-pet="jump"] .pet-leg-bl { animation: pet-jump-back calc(0.6s / var(--_s)) ease-in-out both; }
+
+/* ---------- land (one-shot 0.35s) ---------- */
+@keyframes pet-land-body {
+  0%   { transform: translateY(-2px) scale(0.98, 1.04); }
+  35%  { transform: translateY(0px) scale(1.13, 0.78); }
+  68%  { transform: translateY(0px) scale(0.97, 1.05); }
+  100% { transform: translateY(0px) scale(1, 1); }
+}
+@keyframes pet-land-front { 0% { transform: rotate(-20deg); } 35% { transform: rotate(-12deg); } 100% { transform: rotate(0deg); } }
+@keyframes pet-land-back  { 0% { transform: rotate(-16deg); } 35% { transform: rotate(12deg); } 100% { transform: rotate(0deg); } }
+@keyframes pet-land-tail  { 0% { transform: rotate(-20deg); } 40% { transform: rotate(16deg); } 100% { transform: rotate(0deg); } }
+@keyframes pet-land-head  { 0%, 100% { transform: translateY(0px); } 35% { transform: translateY(2px); } }
+.catbot-pet[data-pet="land"] .pet-body { animation: pet-land-body calc(0.35s / var(--_s)) ease-out both; }
+.catbot-pet[data-pet="land"] .pet-head { animation: pet-land-head calc(0.35s / var(--_s)) ease-out both; }
+.catbot-pet[data-pet="land"] .pet-tail { animation: pet-land-tail calc(0.35s / var(--_s)) ease-out both; }
+.catbot-pet[data-pet="land"] .pet-leg-fr,
+.catbot-pet[data-pet="land"] .pet-leg-fl { animation: pet-land-front calc(0.35s / var(--_s)) ease-out both; }
+.catbot-pet[data-pet="land"] .pet-leg-br,
+.catbot-pet[data-pet="land"] .pet-leg-bl { animation: pet-land-back calc(0.35s / var(--_s)) ease-out both; }
+
+/* ---------- working ---------- */
+.catbot-pet[data-pet="working"] .pet-ear-l,
+.catbot-pet[data-pet="waiting"] .pet-ear-l { transform: rotate(-6deg) scale(1, 1.06); }
+.catbot-pet[data-pet="working"] .pet-ear-r,
+.catbot-pet[data-pet="waiting"] .pet-ear-r { transform: rotate(6deg) scale(1, 1.06); }
+.catbot-pet[data-pet="working"] .pet-sweat { opacity: 1; }
+@keyframes pet-work-bob {
+  0%, 100% { transform: translateY(0px) scale(1, 1); }
+  50% { transform: translateY(0px) scale(1.012, 0.975); }
+}
+@keyframes pet-work-nod {
+  0%, 100% { transform: rotate(-2deg); }
+  50% { transform: rotate(7deg); }
+}
+@keyframes pet-work-tail {
+  0%, 100% { transform: rotate(-7deg); }
+  35% { transform: rotate(12deg); }
+  60% { transform: rotate(2deg); }
+}
+@keyframes pet-think {
+  0%, 60%, 100% { opacity: 0.35; transform: translateY(0px) scale(0.8); }
+  30% { opacity: 1; transform: translateY(-1.5px) scale(1); }
+}
+.catbot-pet[data-pet="working"] .pet-body { animation: pet-work-bob calc(0.46s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="working"] .pet-head { animation: pet-work-nod calc(0.46s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="working"] .pet-tail { animation: pet-work-tail calc(0.62s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="working"] .pet-sweat > circle { animation: pet-think calc(1.2s / var(--_s)) ease-in-out infinite both; }
+.catbot-pet[data-pet="working"] .pet-sweat > circle:nth-child(2) { animation-delay: calc(0.2s / var(--_s)); }
+.catbot-pet[data-pet="working"] .pet-sweat > circle:nth-child(3) { animation-delay: calc(0.4s / var(--_s)); }
+
+/* ---------- waiting ---------- */
+.catbot-pet[data-pet="waiting"] .pet-alert { opacity: 1; }
+@keyframes pet-wait-hop {
+  0%, 40%, 100% { transform: translateY(0px) scale(1, 1); }
+  6%  { transform: translateY(0px) scale(1.07, 0.9); }
+  17% { transform: translateY(-3.5px) scale(0.97, 1.05); }
+  28% { transform: translateY(0px) scale(1.06, 0.92); }
+  34% { transform: translateY(-1px) scale(0.99, 1.02); }
+}
+@keyframes pet-wait-front { 0%, 6%, 28%, 100% { transform: rotate(0deg); } 17% { transform: rotate(-16deg); } }
+@keyframes pet-wait-back  { 0%, 6%, 28%, 100% { transform: rotate(0deg); } 17% { transform: rotate(16deg); } }
+@keyframes pet-wait-tail {
+  0%, 100% { transform: rotate(8deg); }
+  50% { transform: rotate(18deg); }
+}
+@keyframes pet-alert-bounce { /* rises with the hop, then two small bounces */
+  0%, 6%, 28%, 40%, 55%, 70%, 85%, 100% { transform: translateY(0px) scale(1); }
+  17% { transform: translateY(-1.2px) scale(1.08); }
+  47.5%, 77.5% { transform: translateY(-1px) scale(1.06); }
+}
+.catbot-pet[data-pet="waiting"] .pet-body { animation: pet-wait-hop calc(1.5s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="waiting"] .pet-leg-fr,
+.catbot-pet[data-pet="waiting"] .pet-leg-fl { animation: pet-wait-front calc(1.5s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="waiting"] .pet-leg-br,
+.catbot-pet[data-pet="waiting"] .pet-leg-bl { animation: pet-wait-back calc(1.5s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="waiting"] .pet-tail { animation: pet-wait-tail calc(0.5s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="waiting"] .pet-alert { animation: pet-alert-bounce calc(1.5s / var(--_s)) ease-in-out infinite; }
+
+/* ---------- happy (one-shot 0.5s) ---------- */
+@keyframes pet-happy-body {
+  0%   { transform: translateY(0px) scale(1, 1); }
+  12%  { transform: translateY(0px) scale(1.07, 0.9); }
+  38%  { transform: translateY(-7px) scale(0.96, 1.06); }
+  62%  { transform: translateY(0px) scale(1.08, 0.9); }
+  80%  { transform: translateY(-2px) scale(0.99, 1.02); }
+  100% { transform: translateY(0px) scale(1, 1); }
+}
+@keyframes pet-happy-ear-l {
+  0%, 100% { transform: rotate(0deg); }
+  20%, 60% { transform: rotate(-14deg); }
+  40%, 80% { transform: rotate(8deg); }
+}
+@keyframes pet-happy-ear-r {
+  0%, 100% { transform: rotate(0deg); }
+  20%, 60% { transform: rotate(14deg); }
+  40%, 80% { transform: rotate(-8deg); }
+}
+@keyframes pet-happy-eyes {
+  0%, 100% { transform: scaleY(1); }
+  30%, 70% { transform: scaleY(0.35); }
+}
+@keyframes pet-happy-tail {
+  0%, 100% { transform: rotate(0deg); }
+  25%, 75% { transform: rotate(16deg); }
+  50% { transform: rotate(4deg); }
+}
+@keyframes pet-happy-legs { 0%, 12%, 62%, 100% { transform: rotate(0deg); } 38% { transform: rotate(var(--_tuck, 12deg)); } }
+.catbot-pet[data-pet="happy"] .pet-body  { animation: pet-happy-body calc(0.5s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="happy"] .pet-ear-l { animation: pet-happy-ear-l calc(0.5s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="happy"] .pet-ear-r { animation: pet-happy-ear-r calc(0.5s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="happy"] .pet-blink { animation: pet-happy-eyes calc(0.5s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="happy"] .pet-tail  { animation: pet-happy-tail calc(0.5s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="happy"] .pet-leg-fr,
+.catbot-pet[data-pet="happy"] .pet-leg-fl { --_tuck: -14deg; animation: pet-happy-legs calc(0.5s / var(--_s)) ease-in-out both; }
+.catbot-pet[data-pet="happy"] .pet-leg-br,
+.catbot-pet[data-pet="happy"] .pet-leg-bl { --_tuck: 14deg; animation: pet-happy-legs calc(0.5s / var(--_s)) ease-in-out both; }
+
+/* ---------- drag (held by the scruff) ---------- */
+.catbot-pet[data-pet="drag"] .pet-body   { transform: translate(3px, -4px) rotate(-8deg) scale(0.98, 1.04); }
+.catbot-pet[data-pet="drag"] .pet-tail   { transform: rotate(8deg) scale(0.9, -0.9); }
+.catbot-pet[data-pet="drag"] .pet-leg-fr { transform: rotate(16deg); }
+.catbot-pet[data-pet="drag"] .pet-leg-fl { transform: rotate(3deg); }
+.catbot-pet[data-pet="drag"] .pet-leg-br { transform: rotate(15deg); }
+.catbot-pet[data-pet="drag"] .pet-leg-bl { transform: rotate(1deg); }
+.catbot-pet[data-pet="drag"] .pet-ear-l  { transform: rotate(-10deg); }
+.catbot-pet[data-pet="drag"] .pet-ear-r  { transform: rotate(10deg); }
+@keyframes pet-drag-body {
+  0%, 100% { transform: translate(3px, -4px) rotate(-9.5deg) scale(0.98, 1.04); }
+  50% { transform: translate(3px, -4px) rotate(-6.5deg) scale(0.98, 1.05); }
+}
+@keyframes pet-drag-tail {
+  0%, 100% { transform: rotate(3deg) scale(0.9, -0.9); }
+  50% { transform: rotate(13deg) scale(0.9, -0.9); }
+}
+@keyframes pet-dangle-a { 0%, 100% { transform: rotate(10deg); } 50% { transform: rotate(21deg); } }
+@keyframes pet-dangle-b { 0%, 100% { transform: rotate(7deg); } 50% { transform: rotate(-3deg); } }
+.catbot-pet[data-pet="drag"] .pet-body { animation: pet-drag-body calc(1.4s / var(--_s)) ease-in-out infinite; }
+.catbot-pet[data-pet="drag"] .pet-tail { animation: pet-drag-tail calc(1.4s / var(--_s)) ease-in-out calc(-0.3s / var(--_s)) infinite; }
+.catbot-pet[data-pet="drag"] .pet-leg-fr,
+.catbot-pet[data-pet="drag"] .pet-leg-br { animation: pet-dangle-a calc(1.4s / var(--_s)) ease-in-out calc(-0.2s / var(--_s)) infinite; }
+.catbot-pet[data-pet="drag"] .pet-leg-fl,
+.catbot-pet[data-pet="drag"] .pet-leg-bl { animation: pet-dangle-b calc(1.4s / var(--_s)) ease-in-out calc(-0.5s / var(--_s)) infinite; }
+
+/* ---------- reduced motion: keep the poses, stop the loops ---------- */
+@media (prefers-reduced-motion: reduce) {
+  .catbot-pet, .catbot-pet * { animation: none !important; }
+}
