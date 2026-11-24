@@ -414,9 +414,7 @@ fn AppPage() -> Element {
     let mut about = use_signal(|| false);
     rsx! {
         h3 { class: SECTION, "Updates" }
-        div { class: CARD,
-            Row { label: format!("Catbot {version}"), line: "Your helper builds each new stage and restarts Catbot; reopen this window to get it.".to_string() }
-        }
+        Updates { version: version.to_string() }
         h3 { class: SECTION, "Desktop pets" }
         div { class: CARD, crate::pets::PetsSettings {} }
         if crate::notify::AVAILABLE {
@@ -430,6 +428,109 @@ fn AppPage() -> Element {
                 div { class: "border-t border-hairline/50 px-4 py-3 text-[13px] leading-[19px] text-ink-secondary",
                     p { "Catbot {version}: a home for your AI bots, built in Rust." }
                     p { class: "mt-1", "It follows OpenMausBot's design and wire protocol (Apache-2.0); the full list of what it borrows, and their licences, is in its NOTICE file." }
+                }
+            }
+        }
+    }
+}
+
+/// The version, and the update check (stage 19.7.4): against Catbot's GitHub repository once
+/// it's named (Moo's choice: Catbot moves to GitHub), its latest release, or its newest commit
+/// when it has no releases.
+#[component]
+fn Updates(version: String) -> Element {
+    let mut info = use_signal(|| None::<Value>);
+    let mut typed = use_signal(String::new);
+    let mut editing = use_signal(|| false);
+    let mut checking = use_signal(|| false);
+    let mut outcome = use_signal(|| None::<Result<Value, String>>);
+    let at_home = crate::link::active().is_none();
+    use_effect(move || {
+        spawn(async move {
+            if let Ok(answer) = api::get("/api/version").await {
+                typed.set(answer["repo"].as_str().unwrap_or_default().to_string());
+                if !answer["checked"].is_null() {
+                    outcome.set(Some(Ok(answer["checked"].clone())));
+                }
+                info.set(Some(answer));
+            }
+        });
+    });
+    let built = info().and_then(|i| i["built"].as_str().map(|b| {
+        let at = crate::chat::parse_time(b);
+        let when = crate::chat::short_when(at);
+        // Today it reads as a time already.
+        if when.contains(':') { format!("Built today at {}", crate::chat::clock(at)) } else { format!("Built {when}, {}", crate::chat::clock(at)) }
+    }));
+    let repo = info().and_then(|i| i["repo"].as_str().map(str::to_string));
+    let save = move |_| {
+        spawn(async move {
+            match api::call("PUT", "/api/version", Some(&serde_json::json!({ "repo": typed.peek().trim() }))).await {
+                Ok(answer) => {
+                    info.set(Some(answer));
+                    editing.set(false);
+                    outcome.set(None);
+                }
+                Err(err) => outcome.set(Some(Err(err))),
+            }
+        });
+    };
+    let check = move |_| {
+        checking.set(true);
+        spawn(async move {
+            outcome.set(Some(api::post("/api/version/check", &serde_json::json!({})).await));
+            checking.set(false);
+        });
+    };
+    let said = match outcome() {
+        None => None,
+        Some(Err(err)) => Some((false, err, None)),
+        Some(Ok(found)) => {
+            let latest = &found["latest"];
+            let name = latest["name"].as_str().unwrap_or_default();
+            let url = latest["url"].as_str().map(str::to_string);
+            let words = match (latest["kind"].as_str(), found["newer"] == true) {
+                (Some("release"), true) => format!("A newer Catbot is out: {name}."),
+                (Some("release"), false) => format!("Up to date: the latest release is {name}."),
+                (_, true) => format!("Your repository has newer work ({name}{}). The helper builds it.", latest["message"].as_str().map(|m| format!(": {m}")).unwrap_or_default()),
+                _ => format!("Up to date with the repository's newest commit ({name})."),
+            };
+            Some((found["newer"] == true, words, url))
+        }
+    };
+    rsx! {
+        div { class: CARD, "data-updates": true,
+            Row { label: format!("Catbot {version}"), line: built.unwrap_or_else(|| "Your helper builds each new stage and restarts Catbot; reopen this window to get it.".to_string()) }
+            if at_home {
+                Row { label: "GitHub repository".to_string(), line: match &repo { Some(r) => format!("Updates are checked at github.com/{r}."), None => "Where updates are checked, once Catbot is on GitHub.".to_string() },
+                    button { r#type: "button", "data-edit-repo": true, class: "shrink-0 rounded-full bg-control px-3 py-1 text-[13px] font-medium text-ink hover:bg-raised", onclick: move |_| editing.toggle(),
+                        if editing() { "Close" } else if repo.is_some() { "Change" } else { "Set" }
+                    }
+                }
+                if editing() {
+                    div { class: "flex items-center gap-2 border-t border-hairline/50 px-4 py-3",
+                        input { "data-repo-input": true, value: "{typed}", placeholder: "owner/name", "aria-label": "GitHub repository",
+                            class: "min-w-0 flex-1 rounded-md bg-inset px-2 py-1.5 font-mono text-[13px] text-ink outline-none focus:ring-1 focus:ring-accent",
+                            oninput: move |e| typed.set(e.value()),
+                        }
+                        button { r#type: "button", "data-save-repo": true, class: "shrink-0 rounded-full bg-accent px-3 py-1 text-[13px] font-medium text-accent-ink hover:brightness-110", onclick: save, "Save" }
+                    }
+                }
+                if repo.is_some() {
+                    Row { label: "Check for updates".to_string(),
+                        button { r#type: "button", "data-check-updates": true, disabled: checking(), class: "shrink-0 rounded-full bg-control px-3 py-1 text-[13px] font-medium text-ink hover:bg-raised disabled:opacity-50", onclick: check,
+                            if checking() { "Checking…" } else { "Check now" }
+                        }
+                    }
+                }
+                if let Some((newer, words, url)) = said {
+                    div { "data-update-result": true, class: "border-t border-hairline/50 px-4 py-3 text-[13px]",
+                        span { class: if newer { "font-medium text-accent" } else { "text-ink-secondary" }, "{words}" }
+                        if let Some(url) = url {
+                            " "
+                            a { href: "{url}", target: "_blank", rel: "noreferrer", class: "text-accent underline", "See it on GitHub" }
+                        }
+                    }
                 }
             }
         }

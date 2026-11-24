@@ -403,7 +403,14 @@ pub fn InstructionsDialog(name: String, on_close: EventHandler<()>) -> Element {
     let mut problem = use_signal(|| None::<String>);
     let bytes = text.read().len();
     let dirty = *text.read() != saved;
-    let when = dept.updated_at.map(|at| format!(" Last saved {} {}.", crate::chat::short_when(at).to_lowercase(), crate::chat::clock(at))).unwrap_or_default();
+    let when = dept
+        .updated_at
+        .map(|at| {
+            let day = crate::chat::short_when(at);
+            // Today it reads as a time already.
+            if day.contains(':') { format!(" Last saved today at {}.", crate::chat::clock(at)) } else { format!(" Last saved {day}, {}.", crate::chat::clock(at)) }
+        })
+        .unwrap_or_default();
     let target = path(&name);
     let save = move |_| {
         saving.set(true);

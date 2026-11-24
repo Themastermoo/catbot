@@ -321,6 +321,20 @@ async fn bots_become_desktop_pets_when_ticked() {
 }
 
 #[tokio::test]
+async fn the_version_and_where_updates_are_checked() {
+    let s = setup().await;
+    let (_, version) = s.call("GET", "/api/version", None).await;
+    assert_eq!((version["version"].as_str(), version["repo"].clone()), (Some(env!("CARGO_PKG_VERSION")), Value::Null));
+    assert!(version["built"].is_string(), "{version}");
+    assert_eq!(s.call("POST", "/api/version/check", None).await.0, 400, "nothing to check yet");
+    assert_eq!(s.call("PUT", "/api/version", Some(json!({ "repo": "just-a-name" }))).await.0, 400);
+    let (_, set) = s.call("PUT", "/api/version", Some(json!({ "repo": "https://github.com/moo/catbot" }))).await;
+    assert_eq!(set["repo"], "moo/catbot");
+    let (_, forgot) = s.call("PUT", "/api/version", Some(json!({ "repo": "" }))).await;
+    assert_eq!(forgot["repo"], Value::Null);
+}
+
+#[tokio::test]
 async fn an_ai_program_can_be_pointed_to_and_is_tried_first() {
     let s = setup().await;
     let dir = tempfile::tempdir().unwrap();

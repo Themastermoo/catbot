@@ -26,6 +26,7 @@ pub mod limits;
 pub mod reactions;
 pub mod secrets;
 pub mod usage;
+pub mod version;
 pub mod departments;
 pub mod devices;
 pub mod email;
@@ -376,6 +377,19 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "usage", "csv", "save"] if method == Method::POST => usage_route(&app, &["csv", "save"], usage_query(&req)).await,
         ["api", "usage", rest @ ..] if method == Method::GET => usage_route(&app, rest, usage_query(&req)).await,
         ["api", "inbox", rest @ ..] => respond(inbox::route(&app, &method, rest)),
+        ["api", "version", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => body,
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                Value::Null
+            };
+            respond(version::route(&app, &method, &rest, body).await)
+        }
         ["api", "departments", rest @ ..] | ["api", "team-map", rest @ ..] => {
             let map = segments[1] == "team-map";
             let rest: Vec<String> = rest.iter().map(|s| urlencoding_decode(s)).collect();
