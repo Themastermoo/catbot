@@ -3651,3 +3651,158 @@ async fn messages_are_scheduled_changed_cancelled_and_sent_on_time_or_late() {
     assert_eq!(asked["threadId"], transcript.as_str());
     until(&mut events, "lead", |f| f["kind"] == "message" && f["threadId"] == transcript.as_str() && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
 }
+
+/// Puts the stand-in sherpa-onnx programs and empty model files where Catbot looks for them.
+fn fake_voice_files(home: &std::path::Path) {
+    let sherpa = home.join("voice/sherpa");
+    std::fs::create_dir_all(&sherpa).unwrap();
+    let script = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-sherpa.py")).unwrap();
+    for name in ["sherpa-onnx-offline", "sherpa-onnx-offline-tts"] {
+        let path = sherpa.join(name);
+        std::fs::write(&path, format!("#!/usr/bin/env python3\n{script}")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+    }
+    std::fs::write(sherpa.join("libonnxruntime.so"), b"").unwrap();
+    for (part, files) in [("whisper-base.en", &["encoder.onnx", "decoder.onnx", "tokens.txt"][..]), ("kokoro", &["model.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt"][..])] {
+        let dir = home.join("voice/models").join(part);
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in files {
+            std::fs::write(dir.join(file), b"").unwrap();
+        }
+    }
+}
+
+/// A POST with raw bytes: its status, type and the bytes back.
+async fn post_raw(base: &str, path: &str, kind: &str, body: Vec<u8>) -> (u16, String, Vec<u8>) {
+    let client = Client::builder(TokioExecutor::new()).build_http::<Full<Bytes>>();
+    let req = hyper::Request::post(format!("{base}{path}")).header("content-type", kind).body(Full::new(Bytes::from(body))).unwrap();
+    let resp = client.request(req).await.unwrap();
+    let status = resp.status().as_u16();
+    let kind = resp.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    (status, kind, resp.into_body().collect().await.unwrap().to_bytes().to_vec())
+}
+
+/// OpenAI's and ElevenLabs' voice routes, as far as Catbot uses them.
+fn fake_voice_api(seen: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Router {
+    let (heard, spoke, eleven) = (seen.clone(), seen.clone(), seen.clone());
+    Router::new()
+        .route("/v1/audio/transcriptions", post(move |headers: axum::http::HeaderMap, body: Bytes| {
+            let heard = heard.clone();
+            async move {
+                let kind = headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                let text = String::from_utf8_lossy(&body).to_string();
+                heard.lock().unwrap().push(json!({ "transcribe": kind.starts_with("multipart/form-data; boundary="), "model": text.contains("gpt-4o-mini-transcribe"), "wav": text.contains("speech.wav") }));
+                axum::Json(json!({ "text": "Plant the beans" }))
+            }
+        }))
+        .route("/v1/audio/speech", post(move |axum::Json(body): axum::Json<Value>| {
+            let spoke = spoke.clone();
+            async move {
+                spoke.lock().unwrap().push(json!({ "speech": body }));
+                Response::builder().header("content-type", "audio/mpeg").body(Body::from("ID3-openai")).unwrap()
+            }
+        }))
+        .route("/v1/voices", get(|| async { axum::Json(json!({ "voices": [{ "voice_id": "v-rose", "name": "Rose" }] })) }))
+        .route("/v1/text-to-speech/{voice}", post(move |axum::extract::Path(voice): axum::extract::Path<String>, headers: axum::http::HeaderMap, axum::Json(body): axum::Json<Value>| {
+            let eleven = eleven.clone();
+            async move {
+                let key = headers.get("xi-api-key").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+                eleven.lock().unwrap().push(json!({ "eleven": voice, "key": key, "body": body }));
+                Response::builder().header("content-type", "audio/mpeg").body(Body::from("ID3-eleven")).unwrap()
+            }
+        }))
+        // Stands in for PyPI and Hugging Face: every file is the wrong one.
+        .fallback(|| async { "not the real package" })
+}
+
+#[tokio::test]
+async fn voice_listens_and_speaks_here_and_online_and_checks_what_it_downloads() {
+    let s = setup().await;
+    let home = s._dir.path().join("home");
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+
+    // Off and not set up at first; nothing is ready on this computer.
+    let (status, voice) = s.call("GET", "/api/voice", None).await;
+    assert_eq!(status, 200, "{voice}");
+    assert_eq!((voice["settings"]["listen"]["on"].as_bool(), voice["settings"]["reply"]["where"].as_str()), (Some(false), Some("local")));
+    assert_eq!(voice["local"]["program"]["ready"], false);
+    assert_eq!(voice["voices"]["kokoro"].as_array().unwrap().len(), 28);
+    let wav = |words: &str| [b"RIFF".to_vec(), b"....WAVEfmt SAY:".to_vec(), words.as_bytes().to_vec()].concat();
+    let (status, _, said) = post_raw(&s.base, "/api/voice/listen", "audio/wav", wav("hello")).await;
+    assert_eq!(status, 409, "{}", String::from_utf8_lossy(&said));
+
+    // On this computer: Whisper hears, Kokoro speaks in the bot's own voice.
+    fake_voice_files(&home);
+    let (_, voice) = s.call("PUT", "/api/voice", Some(json!({ "listen": { "on": true }, "reply": { "on": true }, "bots": { bot.clone(): { "kokoro": "11" } } }))).await;
+    assert_eq!(voice["local"]["program"]["ready"], true, "{voice}");
+    assert_eq!(voice["local"]["kokoro"]["ready"], true);
+    assert_eq!(s.call("PUT", "/api/voice", Some(json!({ "reply": { "local": "festival" } }))).await.0, 400);
+    let (status, _, said) = post_raw(&s.base, "/api/voice/listen", "audio/wav", wav("Water the tomatoes")).await;
+    assert_eq!(status, 200, "{}", String::from_utf8_lossy(&said));
+    assert_eq!(serde_json::from_slice::<Value>(&said).unwrap()["text"], "Water the tomatoes");
+    let (status, kind, audio) = post_raw(&s.base, "/api/voice/speak", "application/json", json!({ "text": "**Done.** See [the plan](https://x.y).", "botId": bot }).to_string().into_bytes()).await;
+    assert_eq!((status, kind.as_str()), (200, "audio/wav"), "{}", String::from_utf8_lossy(&audio));
+    let args: Vec<String> = serde_json::from_slice(&audio[4..]).unwrap();
+    assert!(args.contains(&"--sid=11".to_string()), "the bot's voice: {args:?}");
+    assert_eq!(args.last().unwrap(), "Done. See the plan.", "read without its marks");
+    let (_, _, audio) = post_raw(&s.base, "/api/voice/speak", "application/json", json!({ "text": "Hi" }).to_string().into_bytes()).await;
+    assert!(serde_json::from_slice::<Vec<String>>(&audio[4..]).unwrap().contains(&"--sid=3".to_string()), "the default voice");
+
+    // Online: OpenAI hears and speaks, ElevenLabs speaks; keys come back as their last four.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let api = listen(fake_voice_api(seen.clone())).await;
+    for service in ["openai", "elevenlabs"] {
+        let (status, voice) = s.call("PUT", &format!("/api/voice/keys/{service}"), Some(json!({ "key": format!("sk-{service}-1234"), "url": format!("http://{api}/v1") }))).await;
+        assert_eq!(status, 200, "{voice}");
+        assert_eq!(voice["keys"][service]["hint"], "…1234");
+        assert!(!voice.to_string().contains(&format!("sk-{service}")), "never the key itself");
+    }
+    s.call("PUT", "/api/voice", Some(json!({ "listen": { "where": "online" }, "reply": { "where": "online" } }))).await;
+    let (status, _, said) = post_raw(&s.base, "/api/voice/listen", "audio/wav", wav("anything")).await;
+    assert_eq!((status, serde_json::from_slice::<Value>(&said).unwrap()["text"].as_str()), (200, Some("Plant the beans")));
+    let (status, kind, audio) = post_raw(&s.base, "/api/voice/speak", "application/json", json!({ "text": "Hello there" }).to_string().into_bytes()).await;
+    assert_eq!((status, kind.as_str(), audio.as_slice()), (200, "audio/mpeg", &b"ID3-openai"[..]));
+    s.call("PUT", "/api/voice", Some(json!({ "reply": { "online": "elevenlabs" } }))).await;
+    let (_, voices) = s.call("GET", "/api/voice/elevenlabs-voices", None).await;
+    assert_eq!(voices["voices"][0]["name"], "Rose");
+    let (_, _, audio) = post_raw(&s.base, "/api/voice/speak", "application/json", json!({ "text": "Hello" }).to_string().into_bytes()).await;
+    assert_eq!(audio, b"ID3-eleven");
+    {
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen[0], json!({ "transcribe": true, "model": true, "wav": true }));
+        assert_eq!((seen[1]["speech"]["voice"].as_str(), seen[1]["speech"]["input"].as_str()), (Some("coral"), Some("Hello there")));
+        assert_eq!((seen[2]["eleven"].as_str(), seen[2]["key"].as_str()), (Some("v-rose"), Some("sk-elevenlabs-1234")), "the account's first voice");
+    }
+    // Away from home, keys and downloads aren't offered.
+    let (code, key) = {
+        let (_, pairing) = s.call("POST", "/api/devices/pairing", None).await;
+        let code = pairing["pairing"]["code"].as_str().unwrap_or_default().to_string();
+        let (_, paired) = s.away(None, "POST", "/api/pair", Some(json!({ "code": code, "name": "Phone" }))).await;
+        (code, paired["key"].as_str().unwrap_or_default().to_string())
+    };
+    assert!(!code.is_empty() && !key.is_empty());
+    assert_eq!(s.away(Some(&key), "PUT", "/api/voice/keys/openai", Some(json!({ "key": "sk-x" }))).await.0, 403);
+    assert_eq!(s.away(Some(&key), "GET", "/api/voice", None).await.0, 200);
+
+    // A download that isn't the package Catbot expects is refused, and says so.
+    unsafe { std::env::set_var("CATBOT_VOICE_MIRROR", format!("http://{api}")) };
+    std::fs::remove_dir_all(home.join("voice/sherpa")).unwrap();
+    assert_eq!(s.call("POST", "/api/voice/get", Some(json!({ "part": "program" }))).await.0, 202);
+    let mut problem = Value::Null;
+    for _ in 0..100 {
+        let (_, voice) = s.call("GET", "/api/voice", None).await;
+        if !voice["local"]["program"]["problem"].is_null() {
+            problem = voice["local"]["program"]["problem"].clone();
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(problem.as_str().unwrap_or_default().contains("didn't match"), "{problem}");
+    assert!(!home.join("voice/sherpa").exists(), "nothing half-downloaded is used");
+    assert_eq!(s.call("POST", "/api/voice/get", Some(json!({ "part": "everything" }))).await.0, 400);
+}

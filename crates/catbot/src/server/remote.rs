@@ -92,6 +92,25 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
             respond(super::engines::route(&app, &method, &rest, req, false).await)
         }
+        ["api", "voice", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            super::voice::route(&app, method, &rest, req, false).await
+        }
+        ["api", "scheduled", rest @ ..] => {
+            // Scheduling from the phone too (stage 21).
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let bot = super::query_param(&req, "botId").map(super::urlencoding_decode);
+            let thread = super::query_param(&req, "threadId").map(super::urlencoding_decode);
+            let body = if method == Method::GET { json!({}) } else {
+                match json_body(req).await {
+                    Ok(body) => body,
+                    Err(err) => return respond(Err(err)),
+                }
+            };
+            respond(super::scheduled::route(&app, &method, &rest, bot, thread, body))
+        }
         ["api", "bots"] if method == Method::POST => respond(create_bot(&app, req).await),
         ["api", "bots", id, rest @ ..] if owns_bot(&app, id) => {
             let id = id.to_string();

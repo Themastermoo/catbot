@@ -26,6 +26,7 @@ pub mod limits;
 pub mod reactions;
 pub mod secrets;
 pub mod usage;
+pub mod voice;
 pub mod version;
 pub mod departments;
 pub mod devices;
@@ -433,6 +434,12 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(limits::route(&app, &method, body, true).await)
         }
         ["api", "handoffs"] if method == Method::GET => respond(handoffs::route(&app, None)),
+        ["api", "voice", rest @ ..] => {
+            // Talking to bots and hearing them (stage 22).
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            voice::route(&app, method, &rest, req, true).await
+        }
         ["api", "scheduled", rest @ ..] => {
             // Messages set to go out later (stage 21).
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
