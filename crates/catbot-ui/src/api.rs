@@ -127,6 +127,31 @@ pub async fn upload(path: &str, name: &str, mime: &str, bytes: Vec<u8>) -> Resul
     serde_json::from_str(&text).map_err(|e| e.to_string())
 }
 
+/// POSTs JSON and reads the answer as bytes, with their type (a voice's audio, `voice.rs`).
+pub async fn post_for_bytes(path: &str, body: &Value) -> Result<(Vec<u8>, String), String> {
+    #[cfg(target_arch = "wasm32")]
+    let (status, kind, bytes) = {
+        use gloo_net::http::{Method, RequestBuilder};
+        let request = RequestBuilder::new(path).method(Method::POST).json(body).map_err(|e| e.to_string())?;
+        let response = request.send().await.map_err(|e| format!("Catbot didn't answer ({e})"))?;
+        let kind = response.headers().get("content-type").unwrap_or_default();
+        (response.status(), kind, response.binary().await.unwrap_or_default())
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let (status, kind, bytes) = {
+        let response = request(reqwest::Method::POST, path).json(body).send().await.map_err(|e| format!("Catbot didn't answer at {} ({e})", server()))?;
+        let status = response.status().as_u16();
+        check_paired(status);
+        let kind = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
+        (status, kind, response.bytes().await.map(|b| b.to_vec()).unwrap_or_default())
+    };
+    if !(200..300).contains(&status) {
+        let said = serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v["error"].as_str().map(str::to_string));
+        return Err(said.unwrap_or_else(|| format!("{path} answered {status}")));
+    }
+    Ok((bytes, kind))
+}
+
 /// A file's bytes (an attachment, say), with this device's key when it's paired.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn bytes(path: &str) -> Result<Vec<u8>, String> {

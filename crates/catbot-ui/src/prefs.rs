@@ -2,7 +2,7 @@
 //! on the left with a search box and the pages in groups, and the open page on the right.
 //!
 //! - **This computer** (its overview: "At a glance" and the sidebar's look): Phone & devices, AI,
-//!   Apps, Computers & secrets, Spending, Import & export.
+//!   Voice, Apps, Computers & secrets, Spending, Import & export.
 //! - **Your team**: Chief of Staff, Skills, Email, Published pages, Hand-offs.
 //! - **This app** (version, notifications, about): Appearance.
 //!
@@ -31,9 +31,10 @@ struct Page {
     words: &'static str,
 }
 
-const COMPUTER: [Page; 6] = [
+const COMPUTER: [Page; 7] = [
     Page { key: "devices", name: "Phone & devices", glyph: "phone", words: "pair pairing phone android remote away tailscale qr" },
     Page { key: "ai", name: "AI", glyph: "sparkles", words: "providers models keys claude codex grok gemini openai sign in install engines" },
+    Page { key: "voice", name: "Voice", glyph: "mic", words: "voice microphone speak talk listen whisper kokoro piper elevenlabs read aloud mute" },
     Page { key: "apps", name: "Apps", glyph: "puzzle", words: "connect apps mcp servers composio tools gmail slack notion" },
     Page { key: "computers", name: "Computers & secrets", glyph: "monitor", words: "computer boat docker secrets 1password vault" },
     Page { key: "spending", name: "Spending", glyph: "coins", words: "usage cost tokens limits plan spend money" },
@@ -187,6 +188,7 @@ pub fn SettingsWindow(on_close: EventHandler<()>, start: String) -> Element {
                             "computer" => rsx! { ComputerPage { on_go: go } },
                             "devices" => rsx! { crate::devices::DevicesDialog { embedded: true, on_close: move |_| {} } },
                             "ai" => rsx! { AiPage {} },
+                            "voice" => rsx! { crate::voice::VoiceSettings {} },
                             "apps" => rsx! { crate::apps::AppsSettings {} },
                             "computers" => rsx! { crate::computers::ComputersSettings {} },
                             "spending" => rsx! { crate::usage::UsageDialog { embedded: true, on_close: move |_| {} } },

@@ -5,6 +5,7 @@
 
 mod api;
 mod scheduled;
+mod voice;
 mod apps;
 mod computers;
 mod attach;
@@ -172,6 +173,12 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let notify_prefs = use_context_provider(|| Signal::new(notify::load()));
     let inbox = use_context_provider(inbox::Inbox::new);
     let depts = use_context_provider(|| Signal::new(departments::Depts::default()));
+    // Voice settings and what's ready (stage 22), read at start and on each `voice` frame.
+    let voice = use_context_provider(voice::VoiceInfo::new);
+    use_effect(move || {
+        let _ = state.read().voice_changed;
+        voice.refresh();
+    });
     // The departments, read at start and whenever they change.
     use_effect(move || {
         let _ = state.read().departments_changed;

@@ -188,6 +188,7 @@ fn Details(bot: Bot, on_page: EventHandler<Page>) -> Element {
                 crate::model_menu::ModelRow { bot: bot.clone() }
                 crate::model_menu::Thinking { key: "{bot.engine}-{bot.model}", bot: bot.clone() }
             }
+            crate::voice::BotVoice { bot_id: bot.id.clone() }
             section { "data-panel-card": "chats",
                 div { class: LABEL,
                     span { "Chats" }
