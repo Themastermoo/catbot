@@ -564,6 +564,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "web-sys",
+ "webkit2gtk",
  "windows-sys 0.61.2",
  "zbus",
 ]

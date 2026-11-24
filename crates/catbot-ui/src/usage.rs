@@ -107,6 +107,7 @@ pub fn UsageDialog(on_close: EventHandler<()>, #[props(default)] embedded: bool)
                             Some(Err(err)) => rsx! { p { role: "alert", class: "text-[13px] text-danger", "{err}" } },
                             Some(Ok(found)) => rsx! {
                                 Compare { found: found.clone() }
+                                VoiceSpend { found: found.clone() }
                                 DailyChart { found: found.clone() }
                                 Breakdown { found }
                                 Export { period: period() }
@@ -332,6 +333,31 @@ fn Compare(found: Value) -> Element {
                 span { class: "text-ink-tertiary", " ({change})" }
             }
             "{money_line}"
+        }
+    }
+}
+
+/// What online voice used in the period, and about what it cost (stage 22.4). Nothing when none.
+#[component]
+fn VoiceSpend(found: Value) -> Element {
+    let lines: Vec<Value> = found["voice"]["lines"].as_array().cloned().unwrap_or_default();
+    if lines.is_empty() {
+        return rsx! {};
+    }
+    let total = money(&found["voice"]["costUsd"]);
+    rsx! {
+        div { "data-usage-voice": true, class: "mb-3 rounded-xl bg-composer px-4 py-3 text-[13px] ring-1 ring-inset ring-ink/[0.07]",
+            div { class: "flex items-center justify-between font-medium text-ink",
+                span { "Voice, online" }
+                span { "about {total}" }
+            }
+            for line in lines {
+                div { key: "{line[\"label\"]}", class: "mt-1 flex items-center justify-between text-ink-secondary",
+                    span { "{line[\"label\"].as_str().unwrap_or_default()} · {line[\"used\"].as_str().unwrap_or_default()}" }
+                    span { "{money(&line[\"costUsd\"])}" }
+                }
+            }
+            p { class: "mt-1 text-[12px] text-ink-tertiary", "Estimated from list prices; your plan may differ. Voice on this computer is free." }
         }
     }
 }

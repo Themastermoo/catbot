@@ -225,7 +225,9 @@ fn breakdown(app: &App, period_name: &str, by: &str) -> Answer {
     } else {
         list.sort_by(|a, b| b["newTokens"].as_u64().cmp(&a["newTokens"].as_u64()));
     }
-    Ok((StatusCode::OK, json!({ "period": period_name, "by": by, "from": since, "to": until, "rows": list, "total": total.wire(), "daily": daily(&rows, from, to), "previous": before })))
+    // What online voice used (stage 22.4), beside the bots' turns.
+    let voice = super::voice::spent(app, from, to);
+    Ok((StatusCode::OK, json!({ "period": period_name, "by": by, "from": since, "to": until, "rows": list, "total": total.wire(), "daily": daily(&rows, from, to), "previous": before, "voice": voice })))
 }
 
 /// Totals for a group of turns.

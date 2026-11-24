@@ -213,6 +213,9 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
             let _ = api::post(&format!("/api/bots/{bot_id}/read"), &serde_json::json!({ "threadId": thread })).await;
         });
     });
+    // On Linux the window's web view keeps the microphone off; voice needs it (stage 22.4).
+    #[cfg(all(feature = "desktop", target_os = "linux"))]
+    use_hook(voice::let_the_window_listen);
     // Closing the window lets the desktop pets out, if any bot is one.
     #[cfg(feature = "desktop")]
     {

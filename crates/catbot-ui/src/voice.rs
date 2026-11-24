@@ -476,6 +476,31 @@ if (!window.catbotVoice) {
 }
 "#;
 
+/// The Linux desktop app's web view (WebKitGTK) has the microphone switched off and turns down
+/// every request for it. This switches it on and lets Catbot's own page have the microphone
+/// (only the microphone: a request that wants the camera too is turned down).
+#[cfg(all(feature = "desktop", target_os = "linux"))]
+pub fn let_the_window_listen() {
+    use dioxus::desktop::wry::WebViewExtUnix;
+    use webkit2gtk::glib::object::Cast;
+    use webkit2gtk::{PermissionRequestExt, SettingsExt, UserMediaPermissionRequest, UserMediaPermissionRequestExt, WebViewExt};
+    let view = dioxus::desktop::window().webview.webview();
+    if let Some(settings) = WebViewExt::settings(&view) {
+        settings.set_enable_media_stream(true);
+    }
+    view.connect_permission_request(|_, request| match request.downcast_ref::<UserMediaPermissionRequest>() {
+        Some(media) if media.is_for_audio_device() && !media.is_for_video_device() => {
+            request.allow();
+            true
+        }
+        Some(_) => {
+            request.deny();
+            true
+        }
+        None => false,
+    });
+}
+
 /// Makes sure the page's voice helper is there.
 pub fn ready_js() {
     document::eval(VOICE_JS);

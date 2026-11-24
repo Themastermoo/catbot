@@ -580,6 +580,7 @@ async fn listen_online(app: &Arc<App>, settings: &Settings, audio: Bytes) -> Res
     if !status.is_success() {
         return Err((StatusCode::BAD_GATEWAY, format!("OpenAI said no ({status}): {}", said["error"]["message"].as_str().unwrap_or("no reason given"))));
     }
+    record(app, "openaiListenSeconds", seconds_of(&audio));
     Ok(said["text"].as_str().unwrap_or_default().to_string())
 }
 
@@ -670,7 +671,9 @@ async fn speak_openai(app: &Arc<App>, settings: &Settings, words: &str, voice: &
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("couldn't reach OpenAI: {e}")))?;
-    audio_from("OpenAI", answer).await
+    let audio = audio_from("OpenAI", answer).await?;
+    record(app, "openaiSpeakLetters", words.chars().count() as f64);
+    Ok(audio)
 }
 
 async fn speak_elevenlabs(app: &Arc<App>, settings: &Settings, words: &str, voice: &str) -> Result<(Vec<u8>, &'static str), (StatusCode, String)> {
@@ -692,7 +695,11 @@ async fn speak_elevenlabs(app: &Arc<App>, settings: &Settings, words: &str, voic
         .send()
         .await
         .map_err(|e| (StatusCode::BAD_GATEWAY, format!("couldn't reach ElevenLabs: {e}")))?;
-    audio_from("ElevenLabs", answer).await
+    let audio = audio_from("ElevenLabs", answer).await?;
+    // Flash and Turbo models take half a credit a letter.
+    let cheap = settings.reply.elevenlabs_model.contains("flash") || settings.reply.elevenlabs_model.contains("turbo");
+    record(app, if cheap { "elevenFlashLetters" } else { "elevenLetters" }, words.chars().count() as f64);
+    Ok(audio)
 }
 
 async fn audio_from(who: &str, answer: reqwest::Response) -> Result<(Vec<u8>, &'static str), (StatusCode, String)> {
@@ -773,6 +780,64 @@ pub fn speakable(text: &str) -> String {
     let cut: String = out.chars().take(SPEAK_MAX).collect();
     let end = cut.rfind(['.', '!', '?']).map(|i| i + 1).unwrap_or(cut.len());
     format!("{} The rest is in the chat.", &cut[..end])
+}
+
+// ---- What online voice spends ------------------------------------------------------------------
+
+const SPENT: &str = "voice_spend";
+/// About what each costs, in dollars, as listed on 2026-11-24 (an estimate: plans differ).
+const PRICES: [(&str, f64, &str); 4] = [
+    ("openaiListenSeconds", 0.003 / 60.0, "OpenAI listening"),
+    // gpt-4o-mini-tts: about 1.5¢ a minute of speech, about 900 letters.
+    ("openaiSpeakLetters", 0.015 / 900.0, "OpenAI speaking"),
+    ("elevenLetters", 0.10 / 1000.0, "ElevenLabs"),
+    ("elevenFlashLetters", 0.05 / 1000.0, "ElevenLabs (Flash)"),
+];
+
+static SPENDING: Mutex<()> = Mutex::new(());
+
+/// Adds to today's count of something online voice used (kept a year, by day).
+fn record(app: &App, what: &str, amount: f64) {
+    if amount <= 0.0 {
+        return;
+    }
+    let _one = SPENDING.lock().expect("voice spend lock");
+    let mut days = app.with_store(|store| store.setting(SPENT)).flatten().unwrap_or_else(|| json!({}));
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let was = days[&today][what].as_f64().unwrap_or(0.0);
+    days[&today][what] = json!(was + amount);
+    if let Some(all) = days.as_object_mut() {
+        let year_ago = (chrono::Local::now() - chrono::Duration::days(400)).format("%Y-%m-%d").to_string();
+        all.retain(|day, _| *day >= year_ago);
+    }
+    app.with_store(|store| store.set_setting(SPENT, &days));
+}
+
+/// What online voice used between two times (by local day), and about what it cost.
+pub fn spent(app: &App, from: chrono::DateTime<chrono::Utc>, to: chrono::DateTime<chrono::Utc>) -> Value {
+    let days = app.with_store(|store| store.setting(SPENT)).flatten().unwrap_or_else(|| json!({}));
+    let (first, last) = (from.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string(), to.with_timezone(&chrono::Local).format("%Y-%m-%d").to_string());
+    let mut lines = Vec::new();
+    let mut total = 0.0;
+    for (key, price, label) in PRICES {
+        let amount: f64 = days.as_object().into_iter().flatten().filter(|(day, _)| **day >= first && **day <= last).filter_map(|(_, v)| v[key].as_f64()).sum();
+        if amount > 0.0 {
+            let cost = amount * price;
+            total += cost;
+            let used = if key.ends_with("Seconds") { format!("{:.0} min", (amount / 60.0).ceil()) } else { format!("{} letters", amount.round()) };
+            lines.push(json!({ "label": label, "used": used, "costUsd": (cost * 10000.0).round() / 10000.0 }));
+        }
+    }
+    json!({ "lines": lines, "costUsd": (total * 10000.0).round() / 10000.0 })
+}
+
+/// How long a WAV recording is, in seconds (0 for anything else).
+fn seconds_of(audio: &[u8]) -> f64 {
+    if !audio.starts_with(b"RIFF") || audio.len() < 44 {
+        return 0.0;
+    }
+    let bytes_a_second = u32::from_le_bytes([audio[28], audio[29], audio[30], audio[31]]);
+    if bytes_a_second == 0 { 0.0 } else { (audio.len() - 44) as f64 / f64::from(bytes_a_second) }
 }
 
 // ---- Running the programs ----------------------------------------------------------------------
@@ -933,6 +998,14 @@ mod tests {
         assert_eq!(voiced.bots["b1"]["kokoro"], "11");
         let cleared = changed(voiced, &json!({ "bots": { "b1": { "kokoro": "" } } })).unwrap();
         assert!(cleared.bots.is_empty(), "an empty voice goes back to the default");
+    }
+
+    #[test]
+    fn a_recordings_length_is_read_from_its_header() {
+        let mut wav = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x80\x3e\0\0\0\x7d\0\0\x02\0\x10\0data\0\0\0\0".to_vec();
+        wav.extend(vec![0u8; 64_000]);
+        assert_eq!(seconds_of(&wav), 2.0);
+        assert_eq!(seconds_of(b"ID3"), 0.0);
     }
 
     #[test]

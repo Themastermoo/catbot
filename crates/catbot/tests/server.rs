@@ -3778,6 +3778,11 @@ async fn voice_listens_and_speaks_here_and_online_and_checks_what_it_downloads()
         assert_eq!((seen[1]["speech"]["voice"].as_str(), seen[1]["speech"]["input"].as_str()), (Some("coral"), Some("Hello there")));
         assert_eq!((seen[2]["eleven"].as_str(), seen[2]["key"].as_str()), (Some("v-rose"), Some("sk-elevenlabs-1234")), "the account's first voice");
     }
+    // Settings › Spending shows what online voice used, and about what it cost.
+    let (_, usage) = s.call("GET", "/api/usage?period=this-month", None).await;
+    let lines: Vec<String> = usage["voice"]["lines"].as_array().unwrap().iter().map(|l| format!("{} {}", l["label"].as_str().unwrap(), l["used"].as_str().unwrap())).collect();
+    assert_eq!(lines, ["OpenAI speaking 11 letters", "ElevenLabs (Flash) 5 letters"], "{usage}");
+    assert!(usage["voice"]["costUsd"].as_f64().unwrap() > 0.0);
     // Away from home, keys and downloads aren't offered.
     let (code, key) = {
         let (_, pairing) = s.call("POST", "/api/devices/pairing", None).await;
