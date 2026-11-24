@@ -64,6 +64,16 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
             Ok((StatusCode::OK, json!({ "signIn": null })))
         }
         (_, ["codex", "sign-in"]) => Err((StatusCode::NOT_FOUND, "Codex signs in at home".into())),
+        (&Method::POST, [id, "terminal"]) if at_home => {
+            let engine = find(id)?;
+            let body: Value = json_body(req).await?;
+            super::terminal::terminal(engine, &body)
+        }
+        (&Method::PUT, [id, "path"]) if at_home => {
+            let engine = find(id)?;
+            let body: Value = json_body(req).await?;
+            super::terminal::set_path(app, engine, &body).await
+        }
         (&Method::POST, [id, "install"]) if at_home => {
             let engine = find(id)?;
             if engine.download.is_none() || engines::asset(engine).is_none() {
@@ -331,5 +341,11 @@ fn describe(app: &App, engine: &Engine) -> Value {
         "work": work(app, engine.id),
         "install": engine.install,
         "signIn": engine.sign_in,
+        // Where its program is (stage 19.7.2): in use, found by name, and chosen by the person.
+        "program": matches!(engine.kind, Kind::Agent | Kind::Codex | Kind::Pi).then(|| engines::agent_program(engine)).flatten(),
+        "foundProgram": matches!(engine.kind, Kind::Agent | Kind::Codex | Kind::Pi).then(|| engines::found_program(engine)).flatten(),
+        "chosenProgram": engines::chosen_path(engine.id),
+        "terminalInstall": engines::terminal_command(engine.install).filter(|c| engines::runs_here(c)),
+        "terminalSignIn": engines::terminal_command(engine.sign_in).filter(|c| engines::runs_here(c)),
     })
 }

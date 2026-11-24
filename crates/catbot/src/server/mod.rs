@@ -18,6 +18,7 @@ pub mod channels;
 pub mod skills;
 pub mod team;
 pub mod teams;
+pub mod terminal;
 pub mod grok_move;
 pub mod chief;
 pub mod handoffs;
@@ -303,6 +304,8 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
         }
     }
 
+    // The AI programs the person pointed Catbot to (stage 19.7.2).
+    terminal::load(&app);
     // The same-Wi-Fi door and keeping awake, as last set (stage 19.7.1).
     reach::start(&app).await;
     tokio::spawn(tidy(app.clone(), archive_after_days()));

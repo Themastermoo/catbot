@@ -432,14 +432,45 @@ pub const ALL: &[Engine] = &[
 ];
 
 /// An agent's program: `CATBOT_AGENT_<ID>` if set (`CATBOT_AGENT_GROK_CLI=/opt/grok/bin/grok`),
-/// else found by name.
+/// else the path the person chose in Settings › AI (stage 19.7.2), else found by name.
 pub fn agent_program(engine: &Engine) -> Option<std::path::PathBuf> {
     let variable = format!("CATBOT_AGENT_{}", engine.id.to_uppercase().replace('-', "_"));
     if let Some(path) = std::env::var_os(&variable).filter(|p| !p.is_empty()) {
         let path = std::path::PathBuf::from(path);
         return path.is_file().then_some(path);
     }
+    if let Some(path) = chosen_path(engine.id) {
+        return path.is_file().then_some(path);
+    }
+    found_program(engine)
+}
+
+/// The program as Catbot finds it by itself: by name, or the copy it downloaded.
+pub fn found_program(engine: &Engine) -> Option<std::path::PathBuf> {
     find_program(engine.program).or_else(|| downloaded(engine))
+}
+
+/// The programs the person pointed Catbot to, by engine (kept in the settings, `engine-paths`).
+static CHOSEN: std::sync::Mutex<Option<std::collections::HashMap<String, std::path::PathBuf>>> = std::sync::Mutex::new(None);
+
+pub fn set_chosen_paths(paths: std::collections::HashMap<String, std::path::PathBuf>) {
+    *CHOSEN.lock().expect("chosen paths lock") = Some(paths);
+}
+
+pub fn chosen_path(id: &str) -> Option<std::path::PathBuf> {
+    CHOSEN.lock().expect("chosen paths lock").as_ref().and_then(|paths| paths.get(id).cloned())
+}
+
+/// A command to type into a terminal, from an install or sign-in line: what follows a
+/// parenthesis is a note for people ("gemini (then follow its sign-in)" runs `gemini`).
+pub fn terminal_command(line: &str) -> Option<String> {
+    let command = line.split(" (").next().unwrap_or_default().trim();
+    (!command.is_empty()).then(|| command.to_string())
+}
+
+/// Whether a command can run in this computer's terminal: a `| bash` installer can't on Windows.
+pub fn runs_here(command: &str) -> bool {
+    !(cfg!(windows) && (command.contains("| bash") || command.contains("| sh")))
 }
 
 static AGENTS_DIR: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
@@ -729,6 +760,13 @@ mod tests {
         assert!(access(lm, None).is_some_and(|a| a.key.is_none()));
         let moved = crate::store::EngineKey { key: String::new(), url: Some("http://10.0.0.5:1234/v1/".into()), updated_at: String::new() };
         assert_eq!(access(lm, Some(&moved)).unwrap().url, "http://10.0.0.5:1234/v1");
+    }
+
+    #[test]
+    fn terminal_commands_leave_the_notes_out() {
+        assert_eq!(terminal_command("gemini (then follow its sign-in)").as_deref(), Some("gemini"));
+        assert_eq!(terminal_command("npm install -g @openai/codex").as_deref(), Some("npm install -g @openai/codex"));
+        assert_eq!(terminal_command("  "), None);
     }
 
     #[test]

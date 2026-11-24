@@ -176,13 +176,149 @@ pub fn EngineSetup(engine: Value) -> Element {
                     } else {
                         p { "Install it on this computer, as the same user that runs Catbot:" }
                         if !install.is_empty() {
-                            code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{install}" }
+                            Command { engine: engine.clone(), what: "install", text: install.clone() }
                         }
                         if !sign_in.is_empty() {
-                            p { class: "mt-1", "then sign it in: " code { class: "rounded bg-inset px-1 font-mono text-[12px]", "{sign_in}" } }
+                            p { class: "mt-1", "then sign it in:" }
+                            Command { engine: engine.clone(), what: "signIn", text: sign_in.clone() }
                         }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// An install or sign-in command (stage 19.7.2): shown, with Copy, and at home "Open in
+/// Terminal", which runs that AI's own command in a terminal window on this computer.
+#[component]
+fn Command(engine: Value, what: &'static str, text: String) -> Element {
+    let mut copied = use_signal(|| false);
+    let mut opened = use_signal(|| None::<Result<String, String>>);
+    let id = str_of(&engine, "id");
+    let runnable = !engine[if what == "install" { "terminalInstall" } else { "terminalSignIn" }].is_null();
+    let at_home = crate::link::active().is_none();
+    let label = if what == "install" { "Open install in Terminal" } else { "Open sign-in in Terminal" };
+    let copy_text = text.clone();
+    let open = move |_| {
+        let id = id.clone();
+        opened.set(None);
+        spawn(async move {
+            let answer = api::post(&format!("/api/engines/{id}/terminal"), &serde_json::json!({ "what": what })).await;
+            opened.set(Some(answer.map(|a| a["opened"].as_str().unwrap_or("A terminal").to_string())));
+        });
+    };
+    if text.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { "data-command": what, class: "mt-1",
+            code { class: "block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{text}" }
+            div { class: "mt-1 flex flex-wrap items-center gap-1.5",
+                button { r#type: "button", "data-copy-command": what,
+                    class: "rounded-full bg-control px-2.5 py-0.5 text-[12px] font-medium text-ink hover:bg-raised",
+                    onclick: move |_| {
+                        let quoted = serde_json::to_string(&copy_text).unwrap_or_default();
+                        document::eval(&format!("navigator.clipboard?.writeText({quoted});"));
+                        copied.set(true);
+                    },
+                    if copied() { "Copied" } else { "Copy" }
+                }
+                if at_home && runnable {
+                    button { r#type: "button", "data-open-terminal": what,
+                        class: "rounded-full bg-control px-2.5 py-0.5 text-[12px] font-medium text-ink hover:bg-raised",
+                        onclick: open,
+                        "{label}"
+                    }
+                }
+                match opened() {
+                    Some(Ok(name)) => rsx! { span { role: "status", class: "text-[12px] text-ink-secondary", "Opened in {name}. When it's done, choose Check again." } },
+                    Some(Err(err)) => rsx! { span { role: "alert", class: "text-[12px] text-danger", "{err}" } },
+                    None => rsx! {},
+                }
+            }
+        }
+    }
+}
+
+/// Where an AI's program is (stage 19.7.2): found by name, or a path the person gives when it
+/// isn't found (tried with --version first; kept anyway if they say so).
+#[component]
+fn ProgramPath(engine: Value) -> Element {
+    let mut open = use_signal(|| false);
+    let mut typed = use_signal(|| engine["chosenProgram"].as_str().unwrap_or_default().to_string());
+    let mut outcome = use_signal(|| None::<Result<String, String>>);
+    let mut failed_once = use_signal(|| false);
+    let mut busy = use_signal(|| false);
+    if crate::link::active().is_some() {
+        return rsx! {};
+    }
+    let id = str_of(&engine, "id");
+    let program = engine["program"].as_str().map(str::to_string);
+    let chosen = engine["chosenProgram"].as_str().map(str::to_string);
+    let line = match (&chosen, &program) {
+        (Some(path), _) => format!("Uses {path}, the program you chose."),
+        (None, Some(path)) => format!("Found at {path}."),
+        (None, None) => "Not found. Already installed? Point Catbot to its program.".to_string(),
+    };
+    let save = move |path: Option<String>, force: bool| {
+        let id = id.clone();
+        busy.set(true);
+        outcome.set(None);
+        spawn(async move {
+            let body = serde_json::json!({ "path": path, "force": force });
+            match api::call("PUT", &format!("/api/engines/{id}/path"), Some(&body)).await {
+                Ok(answer) => {
+                    failed_once.set(false);
+                    outcome.set(Some(Ok(answer["version"].as_str().map(|v| format!("Test passed: {v}")).unwrap_or_else(|| "Back to finding it by name.".into()))));
+                }
+                Err(err) => {
+                    failed_once.set(err.starts_with("Test failed"));
+                    outcome.set(Some(Err(err)));
+                }
+            }
+            busy.set(false);
+        });
+    };
+    let (save_try, save_force, save_clear) = (save.clone(), save.clone(), save);
+    rsx! {
+        div { "data-program-path": true, class: "mt-2 border-t border-hairline/40 pt-2 text-[12px] text-ink-secondary",
+            div { class: "flex items-center gap-2",
+                span { class: "min-w-0 flex-1 [overflow-wrap:anywhere]", "{line}" }
+                button { r#type: "button", "data-edit-path": true, class: "shrink-0 rounded-md px-2 py-0.5 text-[12px] font-medium text-ink hover:bg-raised",
+                    onclick: move |_| open.toggle(),
+                    if open() { "Close" } else if chosen.is_some() { "Edit path" } else { "Set path…" }
+                }
+            }
+            if open() {
+                div { class: "mt-1.5 flex flex-wrap items-center gap-1.5",
+                    input { "data-path-input": true, value: "{typed}", placeholder: "/home/you/.local/bin/program", "aria-label": "Program path",
+                        class: "min-w-[220px] flex-1 rounded-md bg-inset px-2 py-1 font-mono text-[12px] text-ink outline-none focus:ring-1 focus:ring-accent",
+                        oninput: move |e| { typed.set(e.value()); failed_once.set(false); },
+                    }
+                    button { r#type: "button", "data-test-path": true, disabled: busy() || typed.read().trim().is_empty(),
+                        class: "rounded-full bg-control px-2.5 py-0.5 text-[12px] font-medium text-ink hover:bg-raised disabled:opacity-50",
+                        onclick: move |_| { let mut s = save_try.clone(); s(Some(typed.peek().trim().to_string()), false) },
+                        "Test and use"
+                    }
+                    if failed_once() {
+                        button { r#type: "button", "data-force-path": true, class: "rounded-full px-2.5 py-0.5 text-[12px] font-medium text-warning hover:bg-raised",
+                            onclick: move |_| { let mut s = save_force.clone(); s(Some(typed.peek().trim().to_string()), true) },
+                            "Use it anyway"
+                        }
+                    }
+                    if chosen.is_some() {
+                        button { r#type: "button", "data-clear-path": true, class: "rounded-full px-2.5 py-0.5 text-[12px] text-ink-secondary hover:bg-raised",
+                            onclick: move |_| { typed.set(String::new()); let mut s = save_clear.clone(); s(None, false) },
+                            "Find it by name"
+                        }
+                    }
+                }
+            }
+            match outcome() {
+                Some(Ok(words)) => rsx! { p { role: "status", class: "mt-1 text-success", "{words}" } },
+                Some(Err(err)) => rsx! { p { role: "alert", class: "mt-1 text-danger", "{err}" } },
+                None => rsx! {},
             }
         }
     }
@@ -201,20 +337,21 @@ fn PiBox(engine: Value, listed: Option<usize>) -> Element {
         div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-agent": "pi",
             if !installed {
                 p { "Pi isn't installed on this computer. Install it in a terminal:" }
-                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{install}" }
+                Command { engine: engine.clone(), what: "install", text: install.clone() }
                 p { class: "mt-1", "then sign it in to a provider (Anthropic, OpenAI, Google and others, with an account or a key):" }
-                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+                Command { engine: engine.clone(), what: "signIn", text: sign_in.clone() }
             } else if listed == Some(0) {
                 p { "Pi is installed but has no models with a sign-in yet. Sign it in to a provider in a terminal, then come back:" }
-                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+                Command { engine: engine.clone(), what: "signIn", text: sign_in.clone() }
             } else {
                 p { "Pi uses your own providers and keys. The models above are the ones it's signed in to; to add more, run:" }
-                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+                Command { engine: engine.clone(), what: "signIn", text: sign_in.clone() }
             }
             p { class: "mt-1.5 text-[12px] text-ink-tertiary",
                 "Commands and edits wait for your yes on a card, as with the other AIs. More: "
                 a { href: "{page}", target: "_blank", rel: "noreferrer", class: "text-accent underline", "{page}" }
             }
+            ProgramPath { engine: engine.clone() }
         }
     }
 }
@@ -236,17 +373,18 @@ fn AgentBox(engine: Value) -> Element {
         div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-agent": "{id}",
             if installed {
                 p { "{name} is installed. It uses its own sign-in and plan; if it isn't signed in yet, run this once in a terminal:" }
-                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+                Command { engine: engine.clone(), what: "signIn", text: sign_in.clone() }
             } else {
                 p { "{name} isn't installed on this computer. Install it in a terminal:" }
-                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{install}" }
+                Command { engine: engine.clone(), what: "install", text: install.clone() }
                 p { class: "mt-1", "then sign in:" }
-                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{sign_in}" }
+                Command { engine: engine.clone(), what: "signIn", text: sign_in.clone() }
             }
             p { class: "mt-1.5 text-[12px] text-ink-tertiary",
                 "More: "
                 a { href: "{page}", target: "_blank", rel: "noreferrer", class: "text-accent underline", "{page}" }
             }
+            ProgramPath { engine: engine.clone() }
         }
     }
 }
@@ -424,7 +562,7 @@ fn CodexBox(engine: Value) -> Element {
         div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-codex": true,
             if !installed {
                 p { "Codex isn't installed on this computer. Install it in a terminal:" }
-                code { class: "mt-1 block break-all rounded bg-inset px-2 py-1 font-mono text-[12px]", "{install}" }
+                Command { engine: engine.clone(), what: "install", text: install.clone() }
                 p { class: "mt-1", "then sign in here." }
             } else if signed_in {
                 p { "data-codex-account": true, "{who}" }
@@ -461,6 +599,7 @@ fn CodexBox(engine: Value) -> Element {
             if let Some(err) = failed.or(problem()) {
                 p { role: "alert", class: "mt-1 text-[12px] text-danger", "{err}" }
             }
+            ProgramPath { engine: engine.clone() }
         }
     }
 }

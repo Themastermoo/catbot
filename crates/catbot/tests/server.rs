@@ -321,6 +321,43 @@ async fn bots_become_desktop_pets_when_ticked() {
 }
 
 #[tokio::test]
+async fn an_ai_program_can_be_pointed_to_and_is_tried_first() {
+    let s = setup().await;
+    let dir = tempfile::tempdir().unwrap();
+    let write = |name: &str, body: &str| {
+        let path = dir.path().join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path.to_string_lossy().into_owned()
+    };
+    let good = write("kiro-good", "echo 'kiro-cli 1.2.3'");
+    let bad = write("kiro-bad", "echo 'broken' >&2; exit 3");
+    assert_eq!(s.call("PUT", "/api/engines/kiro/path", Some(json!({ "path": "kiro-cli" }))).await.0, 400, "a full path");
+    assert_eq!(s.call("PUT", "/api/engines/kiro/path", Some(json!({ "path": "/nowhere/kiro" }))).await.0, 400);
+    let (status, failed) = s.call("PUT", "/api/engines/kiro/path", Some(json!({ "path": bad }))).await;
+    assert_eq!(status, 422, "{failed}");
+    assert!(failed["error"].as_str().unwrap_or_default().contains("broken"), "{failed}");
+    let (status, kept) = s.call("PUT", "/api/engines/kiro/path", Some(json!({ "path": bad, "force": true }))).await;
+    assert_eq!((status, kept["chosen"].as_str()), (200, Some(bad.as_str())), "kept anyway when asked");
+    let (_, set) = s.call("PUT", "/api/engines/kiro/path", Some(json!({ "path": good }))).await;
+    assert_eq!((set["version"].as_str(), set["program"].as_str()), (Some("kiro-cli 1.2.3"), Some(good.as_str())));
+    let (_, list) = s.call("GET", "/api/engines", None).await;
+    let kiro = list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "kiro").unwrap().clone();
+    assert_eq!((kiro["installed"].as_bool(), kiro["chosenProgram"].as_str()), (Some(true), Some(good.as_str())), "{kiro}");
+    assert_eq!(kiro["terminalSignIn"], "kiro-cli login");
+    let (_, cleared) = s.call("PUT", "/api/engines/kiro/path", Some(json!({ "path": null }))).await;
+    assert_eq!(cleared["chosen"], Value::Null);
+    // The terminal runs only an AI's own commands, named by which.
+    assert_eq!(s.call("POST", "/api/engines/kiro/terminal", Some(json!({ "what": "rm -rf ~" }))).await.0, 400);
+    assert_eq!(s.call("POST", "/api/engines/openai/terminal", Some(json!({ "what": "install" }))).await.0, 400);
+    assert_eq!(s.call("PUT", "/api/engines/openai/path", Some(json!({ "path": good }))).await.0, 400);
+}
+
+#[tokio::test]
 async fn same_wifi_opens_a_second_door_and_the_check_says_what_reaches() {
     let s = setup().await;
     let (_, reach) = s.call("GET", "/api/devices/reach", None).await;
