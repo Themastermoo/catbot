@@ -105,7 +105,12 @@ pub fn UsageDialog(on_close: EventHandler<()>, #[props(default)] embedded: bool)
                         match table() {
                             None => rsx! { p { class: "text-[13px] text-ink-tertiary", "Adding it up…" } },
                             Some(Err(err)) => rsx! { p { role: "alert", class: "text-[13px] text-danger", "{err}" } },
-                            Some(Ok(found)) => rsx! { Breakdown { found } },
+                            Some(Ok(found)) => rsx! {
+                                Compare { found: found.clone() }
+                                DailyChart { found: found.clone() }
+                                Breakdown { found }
+                                Export { period: period() }
+                            },
                         }
                     }
                 }
@@ -299,6 +304,117 @@ fn Breakdown(found: Value) -> Element {
     }
 }
 
+/// This period beside the same length of time before it (stage 19.7.3).
+#[component]
+fn Compare(found: Value) -> Element {
+    let now = &found["total"];
+    let before = &found["previous"]["total"];
+    if before.is_null() {
+        return rsx! {};
+    }
+    let span = match found["period"].as_str() {
+        Some("this-month") => "the same days last month",
+        Some("last-month") => "the month before",
+        _ => "the 30 days before",
+    };
+    let (a, b) = (now["newTokens"].as_u64().unwrap_or(0), before["newTokens"].as_u64().unwrap_or(0));
+    let change = change_words(a as f64, b as f64);
+    let money_line = if now["costUsd"].is_number() || before["costUsd"].is_number() {
+        format!(" · cost {} → {}", money(&before["costUsd"]), money(&now["costUsd"]))
+    } else {
+        String::new()
+    };
+    rsx! {
+        p { "data-usage-compare": true, class: "mb-3 text-[13px] text-ink-secondary",
+            "Against {span}: "
+            span { class: "font-medium text-ink", "{tokens_words(b, false)} → {tokens_words(a, false)} new tokens" }
+            if let Some(change) = change {
+                span { class: "text-ink-tertiary", " ({change})" }
+            }
+            "{money_line}"
+        }
+    }
+}
+
+/// "+23%", "−40%", "new" or nothing.
+pub fn change_words(now: f64, before: f64) -> Option<String> {
+    if before <= 0.0 {
+        return (now > 0.0).then(|| "new".to_string());
+    }
+    let percent = ((now - before) / before * 100.0).round();
+    Some(if percent > 0.0 { format!("+{percent:.0}%") } else if percent < 0.0 { format!("−{:.0}%", -percent) } else { "same".to_string() })
+}
+
+/// The period day by day: new tokens as bars, with each day's figures on hover.
+#[component]
+fn DailyChart(found: Value) -> Element {
+    let days = found["daily"].as_array().cloned().unwrap_or_default();
+    if days.is_empty() {
+        return rsx! {};
+    }
+    let top = days.iter().filter_map(|d| d["newTokens"].as_u64()).max().unwrap_or(0).max(1) as f64;
+    let (width, height) = (days.len() as f64 * 12.0, 96.0);
+    let label_of = |d: &Value| d["day"].as_str().unwrap_or_default().get(5..).unwrap_or_default().replace('-', "/");
+    let first = days.first().map(label_of).unwrap_or_default();
+    let last = days.last().map(label_of).unwrap_or_default();
+    rsx! {
+        figure { "data-usage-chart": true, class: "mb-4",
+            svg { role: "img", "aria-label": "New tokens each day", view_box: "0 0 {width} {height}", preserve_aspect_ratio: "none", class: "h-24 w-full",
+                for (i, day) in days.iter().enumerate() {
+                    {
+                        let tokens = day["newTokens"].as_u64().unwrap_or(0);
+                        let h = if tokens == 0 { 1.0 } else { (tokens as f64 / top * (height - 4.0)).max(2.0) };
+                        let title = format!("{}: {} new tokens, {} turns, {}", day["day"].as_str().unwrap_or_default(), tokens_words(tokens, day["estimated"] == true), day["turns"].as_u64().unwrap_or(0), money(&day["costUsd"]));
+                        let fill = if tokens == 0 { "fill-ink/10" } else { "fill-accent" };
+                        rsx! {
+                            rect { key: "{i}", x: "{i as f64 * 12.0 + 2.0}", y: "{height - h}", width: "8", height: "{h}", rx: "1.5", class: fill,
+                                title { "{title}" }
+                            }
+                        }
+                    }
+                }
+            }
+            figcaption { class: "mt-1 flex justify-between text-[11px] tabular-nums text-ink-tertiary",
+                span { "{first}" }
+                span { "New tokens each day" }
+                span { "{last}" }
+            }
+        }
+    }
+}
+
+/// The period's turns as a spreadsheet: downloaded in a browser, saved to Downloads by the app.
+#[component]
+fn Export(period: String) -> Element {
+    let mut saved = use_signal(|| None::<Result<String, String>>);
+    if crate::link::active().is_some() {
+        return rsx! {};
+    }
+    let export = move |_| {
+        let period = period.clone();
+        if cfg!(target_arch = "wasm32") {
+            let href = serde_json::to_string(&format!("/api/usage/csv?period={period}")).unwrap_or_default();
+            document::eval(&format!("const a = document.createElement('a'); a.href = {href}; a.download = ''; document.body.appendChild(a); a.click(); a.remove();"));
+            saved.set(Some(Ok("Downloading the spreadsheet.".into())));
+            return;
+        }
+        spawn(async move {
+            let answer = api::post(&format!("/api/usage/csv/save?period={period}"), &serde_json::json!({})).await;
+            saved.set(Some(answer.map(|a| format!("Saved to {}", a["path"].as_str().unwrap_or("your Downloads folder")))));
+        });
+    };
+    rsx! {
+        div { class: "mt-3 flex flex-wrap items-center gap-2",
+            button { r#type: "button", "data-usage-export": true, class: "rounded-full bg-control px-3 py-1 text-[13px] font-medium text-ink hover:bg-raised", onclick: export, "Export CSV" }
+            match saved() {
+                Some(Ok(words)) => rsx! { span { role: "status", class: "text-[12px] text-ink-secondary [overflow-wrap:anywhere]", "{words}" } },
+                Some(Err(err)) => rsx! { span { role: "alert", class: "text-[12px] text-danger", "{err}" } },
+                None => rsx! {},
+            }
+        }
+    }
+}
+
 /// Catbot's limits: the spend this month, then each AI's session and week. Edited in place.
 #[component]
 fn Limits(found: Value) -> Element {
@@ -470,6 +586,15 @@ fn money(cost: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changes_read_as_percentages() {
+        assert_eq!(change_words(150.0, 100.0).as_deref(), Some("+50%"));
+        assert_eq!(change_words(60.0, 100.0).as_deref(), Some("−40%"));
+        assert_eq!(change_words(5.0, 0.0).as_deref(), Some("new"));
+        assert_eq!(change_words(0.0, 0.0), None);
+        assert_eq!(change_words(100.0, 100.0).as_deref(), Some("same"));
+    }
 
     #[test]
     fn numbers_read_well() {

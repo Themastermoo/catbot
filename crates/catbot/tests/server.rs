@@ -1170,6 +1170,16 @@ async fn usage_is_recorded_broken_down_and_the_plan_read() {
     assert_eq!((openai["newTokens"].as_u64(), openai["cachedTokens"].as_u64(), openai["estimated"].as_bool()), (Some(260), Some(40), Some(false)));
     let (_, by_day) = s.call("GET", "/api/usage?period=this-month&by=day", None).await;
     assert_eq!(by_day["total"]["turns"], 2);
+    // Each day for the chart, the same span before to compare with, and a spreadsheet.
+    let days = by_day["daily"].as_array().unwrap();
+    assert_eq!(days.iter().map(|d| d["turns"].as_u64().unwrap()).sum::<u64>(), 2, "{by_day}");
+    assert_eq!(by_day["previous"]["total"]["turns"], 0);
+    let sheet = reqwest::get(format!("{}/api/usage/csv?period=this-month", s.base)).await.unwrap();
+    assert!(sheet.headers()["content-disposition"].to_str().unwrap().contains("catbot-usage-this-month.csv"));
+    let text = sheet.text().await.unwrap();
+    assert_eq!(text.lines().count(), 3, "a heading and two turns: {text}");
+    assert!(text.lines().nth(1).unwrap().contains(",Scout,Claude,"), "{text}");
+    assert_eq!(reqwest::get(format!("{}/api/usage/csv?period=forever", s.base)).await.unwrap().status(), 400);
     assert_eq!(s.call("GET", "/api/usage?period=forever", None).await.0, 400);
 
     // Claude's plan windows, read with Claude Code's sign-in.

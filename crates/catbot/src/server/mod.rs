@@ -360,6 +360,20 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "events"] if method == Method::GET => events::events(app, req, events::Door::Home).await,
         ["api", "memory", rest @ ..] if method == Method::GET => respond(memory::route(&app, rest, &req)),
         ["api", "attachments", id] if method == Method::GET => attachments::serve(&app, id).await,
+        ["api", "usage", "csv"] if method == Method::GET => {
+            // A spreadsheet of the period's turns, downloaded (stage 19.7.3).
+            let period = usage_query(&req).get("period").cloned().unwrap_or_else(|| "this-month".into());
+            match usage::csv_text(&app, &period) {
+                Ok(text) => (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/csv; charset=utf-8".to_string()), (header::CONTENT_DISPOSITION, format!("attachment; filename=\"catbot-usage-{period}.csv\""))],
+                    text,
+                )
+                    .into_response(),
+                Err(err) => respond(Err(err)),
+            }
+        }
+        ["api", "usage", "csv", "save"] if method == Method::POST => usage_route(&app, &["csv", "save"], usage_query(&req)).await,
         ["api", "usage", rest @ ..] if method == Method::GET => usage_route(&app, rest, usage_query(&req)).await,
         ["api", "inbox", rest @ ..] => respond(inbox::route(&app, &method, rest)),
         ["api", "departments", rest @ ..] | ["api", "team-map", rest @ ..] => {

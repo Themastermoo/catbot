@@ -69,8 +69,94 @@ pub async fn route(app: &Arc<App>, rest: &[&str], query: impl Fn(&str) -> Option
             }
             Ok((StatusCode::OK, plans(app).await))
         }
+        ["csv", "save"] => save_csv(app, query("period").as_deref().unwrap_or("this-month")),
         _ => Err((StatusCode::NOT_FOUND, "no such usage".into())),
     }
+}
+
+/// The period before a period, as long as it (stage 19.7.3): for this month so far, the same
+/// days of last month; for last month, the month before; for 30 days, the 30 before those.
+pub fn previous(name: &str, now: DateTime<Utc>) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let (from, to) = period(name, now)?;
+    match name {
+        "this-month" => {
+            let (last, _) = period("last-month", now)?;
+            Some((last, last + (to - from)))
+        }
+        "last-month" => {
+            let local = from.with_timezone(&chrono::Local);
+            let (year, month) = if local.month() == 1 { (local.year() - 1, 12) } else { (local.year(), local.month() - 1) };
+            Some((chrono::Local.with_ymd_and_hms(year, month, 1, 0, 0, 0).single()?.with_timezone(&Utc), from))
+        }
+        _ => Some((from - (to - from), from)),
+    }
+}
+
+fn rows_between(app: &App, from: DateTime<Utc>, to: DateTime<Utc>) -> Result<Vec<UsageRow>, (StatusCode, String)> {
+    let since = from.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let until = to.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    Ok(app.try_store(|store| store.usage_since(&since)).map_err(fail)?.into_iter().filter(|r| r.at <= until).collect())
+}
+
+/// Each day of a period, oldest first, with its new tokens and cost: what the chart draws.
+fn daily(rows: &[UsageRow], from: DateTime<Utc>, to: DateTime<Utc>) -> Vec<Value> {
+    let day = |t: DateTime<Utc>| t.with_timezone(&chrono::Local).date_naive();
+    let mut days: BTreeMap<chrono::NaiveDate, Sum> = BTreeMap::new();
+    let mut d = day(from);
+    while d <= day(to) {
+        days.insert(d, Sum::default());
+        d = d.succ_opt().unwrap_or(d);
+        if days.len() > 400 {
+            break;
+        }
+    }
+    for row in rows {
+        if let Ok(at) = DateTime::parse_from_rfc3339(&row.at) {
+            days.entry(day(at.with_timezone(&Utc))).or_default().add(&Sum::of(row));
+        }
+    }
+    days.into_iter()
+        .map(|(d, sum)| {
+            let mut wire = sum.wire();
+            wire["day"] = json!(d.format("%Y-%m-%d").to_string());
+            wire
+        })
+        .collect()
+}
+
+/// One line of the spreadsheet per turn.
+pub fn csv(rows: &[UsageRow], names: &BTreeMap<String, String>) -> String {
+    let field = |text: &str| if text.contains([',', '"', '\n']) { format!("\"{}\"", text.replace('"', "\"\"")) } else { text.to_string() };
+    let mut out = String::from("time,bot,ai,model,billing,input tokens,output tokens,cache read tokens,cache write tokens,estimated,cost usd\n");
+    for r in rows {
+        let bot = names.get(&r.bot_id).cloned().unwrap_or_else(|| "A deleted bot".into());
+        let engine = engines::find(&r.engine).map(|e| e.name.to_string()).unwrap_or_else(|| r.engine.clone());
+        let cost = r.cost_usd.map(|c| format!("{c:.6}")).unwrap_or_default();
+        out.push_str(&format!(
+            "{},{},{},{},{},{},{},{},{},{},{}\n",
+            field(&r.at), field(&bot), field(&engine), field(&r.model), field(&r.billing), r.input, r.output, r.cache_read, r.cache_write, r.estimated, cost
+        ));
+    }
+    out
+}
+
+/// The period's turns as a spreadsheet in this computer's Downloads folder (the desktop app's
+/// export; in a browser the file is downloaded from `/api/usage/csv` instead).
+fn save_csv(app: &App, period_name: &str) -> Answer {
+    let text = csv_text(app, period_name)?;
+    let home = crate::store::user_home();
+    let folder = [home.join("Downloads"), home.clone()].into_iter().find(|d| d.is_dir()).unwrap_or(home);
+    let path = folder.join(format!("catbot-usage-{period_name}-{}.csv", chrono::Local::now().format("%Y-%m-%d")));
+    std::fs::write(&path, text).map_err(|e| fail(Box::new(e)))?;
+    Ok((StatusCode::OK, json!({ "path": path })))
+}
+
+/// The CSV for a period.
+pub fn csv_text(app: &App, period_name: &str) -> Result<String, (StatusCode, String)> {
+    let (from, to) = period(period_name, Utc::now()).ok_or_else(|| bad("which period?"))?;
+    let rows = rows_between(app, from, to)?;
+    let names: BTreeMap<String, String> = app.with_store(|store| store.bots()).unwrap_or_default().into_iter().map(|b| (b.id.clone(), b.name.clone())).collect();
+    Ok(csv(&rows, &names))
 }
 
 /// The start (and end) of a period, in UTC.
@@ -95,7 +181,18 @@ fn breakdown(app: &App, period_name: &str, by: &str) -> Answer {
     }
     let since = from.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let until = to.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let rows: Vec<UsageRow> = app.try_store(|store| store.usage_since(&since)).map_err(fail)?.into_iter().filter(|r| r.at <= until).collect();
+    let rows: Vec<UsageRow> = rows_between(app, from, to)?;
+    // The same length of time before, to compare with (stage 19.7.3).
+    let before = match previous(period_name, Utc::now()) {
+        Some((f, t)) => {
+            let mut sum = Sum::default();
+            for row in rows_between(app, f, t)? {
+                sum.add(&Sum::of(&row));
+            }
+            json!({ "from": f.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), "to": t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true), "total": sum.wire() })
+        }
+        None => Value::Null,
+    };
     let names: BTreeMap<String, String> =
         app.with_store(|store| store.bots()).unwrap_or_default().into_iter().map(|b| (b.id.clone(), b.name.clone())).collect();
     let label = |r: &UsageRow| -> String {
@@ -128,7 +225,7 @@ fn breakdown(app: &App, period_name: &str, by: &str) -> Answer {
     } else {
         list.sort_by(|a, b| b["newTokens"].as_u64().cmp(&a["newTokens"].as_u64()));
     }
-    Ok((StatusCode::OK, json!({ "period": period_name, "by": by, "from": since, "to": until, "rows": list, "total": total.wire() })))
+    Ok((StatusCode::OK, json!({ "period": period_name, "by": by, "from": since, "to": until, "rows": list, "total": total.wire(), "daily": daily(&rows, from, to), "previous": before })))
 }
 
 /// Totals for a group of turns.
@@ -450,6 +547,47 @@ mod tests {
         assert!((resets.timestamp() - (now.timestamp() + 86400)).abs() < 2, "milliseconds read as seconds");
         assert_eq!(plan["headline"]["onTrack"], false);
         assert_eq!(parse_codex(&json!({ "rateLimits": {} }), now)["ok"], false);
+    }
+
+    #[test]
+    fn the_period_before_is_as_long() {
+        let now = Utc.with_ymd_and_hms(2026, 11, 24, 18, 0, 0).unwrap();
+        let (from, to) = period("30d", now).unwrap();
+        let (pf, pt) = previous("30d", now).unwrap();
+        assert_eq!((pt, pt - pf), (from, to - from));
+        let (from, to) = period("this-month", now).unwrap();
+        let (pf, pt) = previous("this-month", now).unwrap();
+        assert_eq!(pt - pf, to - from, "the same days of last month");
+        assert!(pf < from && pt < from);
+        let (lf, _) = period("last-month", now).unwrap();
+        let (_, before_end) = previous("last-month", now).unwrap();
+        assert_eq!(before_end, lf);
+    }
+
+    #[test]
+    fn turns_make_a_spreadsheet() {
+        let row = UsageRow {
+            bot_id: "b".into(),
+            conversation_id: "c".into(),
+            engine: "claude".into(),
+            model: "sonnet".into(),
+            billing: "plan".into(),
+            at: "2026-11-24T10:00:00Z".into(),
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            estimated: false,
+            cost_usd: Some(0.0125),
+        };
+        let mut names = BTreeMap::new();
+        names.insert("b".to_string(), "Kiwi, the \"chief\"".to_string());
+        let text = csv(&[row], &names);
+        let mut lines = text.lines();
+        assert!(lines.next().unwrap().starts_with("time,bot,ai,model"));
+        assert_eq!(lines.next().unwrap(), "2026-11-24T10:00:00Z,\"Kiwi, the \"\"chief\"\"\",Claude,sonnet,plan,10,5,0,0,false,0.012500");
+        let days = daily(&[], Utc.with_ymd_and_hms(2026, 11, 1, 12, 0, 0).unwrap(), Utc.with_ymd_and_hms(2026, 11, 3, 12, 0, 0).unwrap());
+        assert_eq!(days.len(), 3, "every day, used or not");
     }
 
     #[test]
