@@ -62,6 +62,7 @@ pub fn DevicesDialog(on_close: EventHandler<()>, #[props(default)] embedded: boo
     let mut removing = use_signal(|| None::<String>);
     let mut just_paired = use_signal(|| None::<String>);
     let mut left = use_signal(|| 0u64);
+    let mut on_wifi = use_signal(|| false);
 
     // Fetched when the dialog opens and whenever a `devices` frame says something changed.
     use_effect(move || {
@@ -112,7 +113,11 @@ pub fn DevicesDialog(on_close: EventHandler<()>, #[props(default)] embedded: boo
     let (mut start, mut cancel, mut remove) = (change, change, change);
 
     let data = overview();
-    let public = data.as_ref().and_then(|o| o["publicUrl"].as_str().map(str::to_string));
+    let tailnet = data.as_ref().and_then(|o| o["publicUrl"].as_str().map(str::to_string));
+    let lan = data.as_ref().and_then(|o| o["lanUrl"].as_str().map(str::to_string));
+    // Paired over the internet unless the person picks this Wi-Fi (or it's the only way).
+    let over_wifi = lan.is_some() && (on_wifi() || tailnet.is_none());
+    let public = if over_wifi { lan.clone() } else { tailnet.clone() };
     let door = data.as_ref().and_then(|o| o["remote"].as_str().map(str::to_string));
     let code = data.as_ref().and_then(|o| o["pairing"]["code"].as_str().map(str::to_string)).filter(|_| left() > 0);
     let devices: Vec<Value> = data.as_ref().and_then(|o| o["devices"].as_array().cloned()).unwrap_or_default();
@@ -148,6 +153,16 @@ pub fn DevicesDialog(on_close: EventHandler<()>, #[props(default)] embedded: boo
                 } else {
                     if let Some(name) = just_paired() {
                         p { role: "status", "data-just-paired": true, class: "mb-3 rounded-lg bg-success/15 p-3 text-[13px] font-medium text-ink", "Paired: {name}" }
+                    }
+                    if lan.is_some() && tailnet.is_some() {
+                        div { role: "radiogroup", "aria-label": "Pair over", "data-pair-over": true, class: "mb-3 flex gap-1 rounded-full bg-raised p-1 text-[13px]",
+                            button { r#type: "button", role: "radio", "aria-checked": "{!over_wifi}",
+                                class: if over_wifi { "flex-1 rounded-full px-3 py-1 text-ink-secondary" } else { "flex-1 rounded-full bg-panel px-3 py-1 font-medium text-ink shadow-sm" },
+                                onclick: move |_| on_wifi.set(false), "Anywhere (Tailscale)" }
+                            button { r#type: "button", role: "radio", "aria-checked": "{over_wifi}", "data-pair-wifi": true,
+                                class: if over_wifi { "flex-1 rounded-full bg-panel px-3 py-1 font-medium text-ink shadow-sm" } else { "flex-1 rounded-full px-3 py-1 text-ink-secondary" },
+                                onclick: move |_| on_wifi.set(true), "This Wi-Fi only" }
+                        }
                     }
                     if public.is_none() {
                         div { class: "mb-3 rounded-lg bg-raised p-3 text-[13px] leading-[19px] text-ink",
@@ -245,10 +260,130 @@ pub fn DevicesDialog(on_close: EventHandler<()>, #[props(default)] embedded: boo
                         }
                     }
                 }
+                if door.is_some() {
+                    Reach {}
+                }
                 if let Some(err) = problem() {
                     p { role: "alert", class: "mt-3 text-[13px] text-danger", "{err}" }
                 }
             }
+        }
+    }
+}
+
+/// How phones reach this computer (stage 19.7.1): Same Wi-Fi, keeping awake, and a check of
+/// each way in, as MausBot's "How phones reach" group.
+#[component]
+fn Reach() -> Element {
+    let state = use_context::<Signal<State>>();
+    let mut reach = use_signal(|| None::<Value>);
+    let mut busy = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let mut checks = use_signal(|| None::<Vec<Value>>);
+    let mut checking = use_signal(|| false);
+    use_effect(move || {
+        let _ = state.read().devices_changed;
+        spawn(async move {
+            if let Ok(answer) = api::get("/api/devices/reach").await {
+                reach.set(Some(answer));
+            }
+        });
+    });
+    let mut flip = move |key: &'static str| {
+        let Some(now) = reach.peek().clone() else { return };
+        if busy() {
+            return;
+        }
+        busy.set(true);
+        problem.set(None);
+        let body = serde_json::json!({ key: now[key] != true });
+        spawn(async move {
+            match api::call("PUT", "/api/devices/reach", Some(&body)).await {
+                Ok(answer) => reach.set(Some(answer)),
+                Err(err) => problem.set(Some(err)),
+            }
+            busy.set(false);
+        });
+    };
+    let check = move |_| {
+        checking.set(true);
+        spawn(async move {
+            match api::post("/api/devices/check", &serde_json::json!({})).await {
+                Ok(answer) => checks.set(answer["checks"].as_array().cloned()),
+                Err(err) => problem.set(Some(err)),
+            }
+            checking.set(false);
+        });
+    };
+    let Some(now) = reach() else { return rsx! {} };
+    let same_wifi = now["sameWifi"] == true;
+    let keep_awake = now["keepAwake"] == true;
+    let wifi_line = match (now["lanUrl"].as_str(), now["wifiProblem"].as_str()) {
+        (_, Some(why)) => format!("Couldn't open it: {why}."),
+        (Some(url), _) => format!("On at {url}. Use only on a trusted network."),
+        _ => "Pair a phone over your home network, without Tailscale. Use only on a trusted network where both devices can see each other.".to_string(),
+    };
+    let awake_line = match (now["awakeProblem"].as_str(), now["awake"] == true) {
+        (Some(why), _) => {
+            let mut letters = why.chars();
+            format!("{}{}.", letters.next().map(|c| c.to_uppercase().to_string()).unwrap_or_default(), letters.as_str())
+        }
+        (None, true) => "Kept awake now, so paired phones can reach it overnight.".to_string(),
+        _ => "While phones can reach Catbot, the computer doesn't go to sleep.".to_string(),
+    };
+    rsx! {
+        div { "data-reach": true, class: "mt-5 flex flex-col gap-1",
+            span { class: "px-1 text-[12px] font-medium uppercase tracking-wide text-ink-secondary", "How phones reach this computer" }
+            div { class: "flex items-center gap-3 rounded-lg px-2 py-2",
+                div { class: "min-w-0 flex-1",
+                    p { class: "text-[14px] font-medium text-ink", "Same Wi-Fi" }
+                    p { "data-wifi-line": true, class: "text-[12px] leading-4 text-ink-secondary [overflow-wrap:anywhere]", "{wifi_line}" }
+                }
+                crate::settings::Switch { checked: same_wifi, disabled: busy(), label: "Same Wi-Fi".to_string(), on_toggle: move |_| flip("sameWifi") }
+            }
+            div { class: "flex items-center gap-3 rounded-lg px-2 py-2",
+                div { class: "min-w-0 flex-1",
+                    p { class: "text-[14px] font-medium text-ink", "Keep this computer awake" }
+                    p { "data-awake-line": true, class: "text-[12px] leading-4 text-ink-secondary", "{awake_line}" }
+                }
+                crate::settings::Switch { checked: keep_awake, disabled: busy(), label: "Keep this computer awake while phones can reach it".to_string(), on_toggle: move |_| flip("keepAwake") }
+            }
+            div { class: "flex items-center gap-3 rounded-lg px-2 py-2",
+                div { class: "min-w-0 flex-1",
+                    p { class: "text-[14px] font-medium text-ink", "Connection check" }
+                    p { class: "text-[12px] leading-4 text-ink-secondary", "Tries each way in, the way a phone would." }
+                }
+                button { r#type: "button", "data-check-connection": true, disabled: checking(),
+                    class: "shrink-0 rounded-full bg-control px-3 py-1 text-[13px] font-medium text-ink hover:bg-raised disabled:opacity-50",
+                    onclick: check,
+                    if checking() { "Checking…" } else { "Check" }
+                }
+            }
+            if let Some(list) = checks() {
+                ul { "data-checks": true, class: "mx-2 mb-1 flex flex-col gap-1 rounded-lg bg-raised p-3",
+                    for item in list {
+                        CheckLine {
+                            key: "{item[\"id\"]}",
+                            id: item["id"].as_str().unwrap_or_default().to_string(),
+                            ok: item["ok"] == true,
+                            line: item["line"].as_str().unwrap_or_default().to_string(),
+                        }
+                    }
+                }
+            }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "px-2 text-[13px] text-danger", "{err}" }
+            }
+        }
+    }
+}
+
+#[component]
+fn CheckLine(id: String, ok: bool, line: String) -> Element {
+    rsx! {
+        li { "data-check": "{id}", "data-ok": "{ok}", class: "flex items-start gap-2 text-[13px] leading-[18px] text-ink",
+            span { class: if ok { "mt-1 size-2 shrink-0 rounded-full bg-success" } else { "mt-1 size-2 shrink-0 rounded-full bg-danger" } }
+            span { class: "[overflow-wrap:anywhere]", "{line}" }
         }
     }
 }

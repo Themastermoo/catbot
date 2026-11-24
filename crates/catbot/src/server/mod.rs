@@ -38,6 +38,7 @@ pub mod events;
 pub mod hooks;
 pub mod hub;
 pub mod memory;
+pub mod reach;
 pub mod remote;
 pub mod runs;
 pub mod triggers;
@@ -302,6 +303,8 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
         }
     }
 
+    // The same-Wi-Fi door and keeping awake, as last set (stage 19.7.1).
+    reach::start(&app).await;
     tokio::spawn(tidy(app.clone(), archive_after_days()));
     tokio::spawn(chief::keep_watch(app.clone()));
     tokio::spawn(triggers::keep_time(app.clone()));
@@ -542,6 +545,12 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
             respond(engines::route(&app, &method, &rest, req, true).await)
         }
+        ["api", "devices", "reach"] if method == Method::GET => respond(reach::get(&app)),
+        ["api", "devices", "reach"] if method == Method::PUT => respond(match json_body(req).await {
+            Ok(body) => reach::put(&app, &body).await,
+            Err(err) => Err(err),
+        }),
+        ["api", "devices", "check"] if method == Method::POST => respond(reach::check(&app).await),
         ["api", "devices", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

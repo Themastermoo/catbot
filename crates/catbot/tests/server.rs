@@ -321,6 +321,28 @@ async fn bots_become_desktop_pets_when_ticked() {
 }
 
 #[tokio::test]
+async fn same_wifi_opens_a_second_door_and_the_check_says_what_reaches() {
+    let s = setup().await;
+    let (_, reach) = s.call("GET", "/api/devices/reach", None).await;
+    assert_eq!((reach["sameWifi"].as_bool(), reach["keepAwake"].as_bool(), reach["lanUrl"].clone()), (Some(false), Some(false), Value::Null), "off to start");
+    assert_eq!(s.call("PUT", "/api/devices/reach", Some(json!({ "sameWifi": "yes" }))).await.0, 400);
+    let (status, on) = s.call("PUT", "/api/devices/reach", Some(json!({ "sameWifi": true }))).await;
+    assert_eq!((status, on["sameWifi"].as_bool(), on["wifiProblem"].clone()), (200, Some(true), Value::Null), "{on}");
+    let (_, checked) = s.call("POST", "/api/devices/check", None).await;
+    let checks = checked["checks"].as_array().unwrap();
+    assert_eq!((checks[0]["id"].as_str(), checks[0]["ok"].as_bool()), (Some("door"), Some(true)), "{checked}");
+    // The Wi-Fi door is the remote door: unpaired, it says so.
+    if let Some(url) = on["lanUrl"].as_str() {
+        let wifi = checks.iter().find(|c| c["id"] == "wifi").unwrap();
+        assert_eq!(wifi["ok"], true, "{checked}");
+        let (_, devices) = s.call("GET", "/api/devices", None).await;
+        assert_eq!(devices["lanUrl"].as_str(), Some(url));
+    }
+    let (_, off) = s.call("PUT", "/api/devices/reach", Some(json!({ "sameWifi": false }))).await;
+    assert_eq!((off["sameWifi"].as_bool(), off["lanUrl"].clone()), (Some(false), Value::Null));
+}
+
+#[tokio::test]
 async fn the_inbox_lists_asks_news_and_unread_chats() {
     let s = setup().await;
     let mut events = s.events().await;

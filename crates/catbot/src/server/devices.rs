@@ -165,6 +165,8 @@ async fn overview(app: &Arc<App>) -> Answer {
             "devices": devices.iter().map(device_wire).collect::<Vec<_>>(),
             "pairing": waiting,
             "publicUrl": public_url().await,
+            // The home-network address, while Same Wi-Fi is on (`reach.rs`).
+            "lanUrl": super::reach::lan_url(),
             "remote": app.remote.get().map(|addr| addr.to_string()),
         }),
     ))
