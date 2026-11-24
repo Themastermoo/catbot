@@ -242,6 +242,8 @@ const FOLLOW_WITHIN: f64 = 120.0;
 pub fn Chat(bot: Bot) -> Element {
     let thread = bot.thread_id.clone();
     let mut state = use_context::<Signal<State>>();
+    // Reading replies aloud and voice chat (stage 22), one for each chat.
+    let speaker = use_context_provider(|| crate::voice::Speaker::new(bot.id.clone()));
     let mut loading = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
     // Whether the person is at the end of the conversation; new messages then scroll into view.
@@ -323,6 +325,10 @@ pub fn Chat(bot: Bot) -> Element {
         })
         .collect();
     let working = bot.activity != Activity::Idle || live.is_some();
+    let replies: Vec<(String, String)> = messages.iter().filter_map(|m| match &m.body {
+        Body::Reply(text) => Some((m.id.clone(), text.clone())),
+        _ => None,
+    }).collect();
     // Questions waiting for the person: unanswered cards, while the bot is actually waiting.
     // (A card left unanswered by a turn that's gone, say after a restart, isn't asking anymore.)
     let asking = bot.activity == Activity::WaitingOnYou;
@@ -382,7 +388,12 @@ pub fn Chat(bot: Bot) -> Element {
                     }
                 }
             }
-            Composer { bot: bot.clone(), working, pending, on_send: move |_| following.set(true) }
+            crate::voice::Reader { replies, loaded }
+            if (speaker.chat_open)() {
+                crate::voice::VoiceChat { bot_id: bot.id.clone(), thread: bot.thread_id.clone(), name: bot.name.clone(), working }
+            } else {
+                Composer { bot: bot.clone(), working, pending, on_send: move |_| following.set(true) }
+            }
         }
     }
 }
@@ -585,6 +596,22 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                 set_box(&words);
             }
         });
+    };
+
+    // The microphone (stage 22): its words go in the box, or are sent, as Settings › Voice says.
+    let voice = use_context::<crate::voice::VoiceInfo>();
+    let speaker = use_context::<crate::voice::Speaker>();
+    let talk_on = voice.listen_on() && !waiting_on_you;
+    let heard = move |words: String| {
+        let typed = text.peek().trim().to_string();
+        let next = if typed.is_empty() { words } else { format!("{typed} {words}") };
+        text.set(next.clone());
+        set_box(&next);
+        if voice.send_at_once() {
+            submit();
+        } else {
+            document::eval(r#"document.getElementById("composer-box")?.focus();"#);
+        }
     };
 
     let stop_bot = bot.clone();
@@ -792,6 +819,18 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                                         class: "{SIMPLE_CONTROL}",
                                         onclick: move |_| stop(()),
                                         svg { width: "11", height: "11", view_box: "0 0 24 24", fill: "currentColor", rect { x: "3", y: "3", width: "18", height: "18", rx: "3" } }
+                                    }
+                                }
+                                if talk_on {
+                                    crate::voice::MicButton { disabled: false, on_words: heard, on_problem: move |p: String| problem.set(Some(p)) }
+                                    button {
+                                        r#type: "button",
+                                        "aria-label": "Voice chat",
+                                        title: "Voice chat",
+                                        "data-voice-chat-open": true,
+                                        class: "{SIMPLE_CONTROL}",
+                                        onclick: move |_| { let mut open = speaker.chat_open; open.set(true); },
+                                        crate::sidebar::Icon { name: "audio-lines", size: 15 }
                                     }
                                 }
                                 if !waiting_on_you {
@@ -1185,6 +1224,7 @@ fn Row(
                         div { class: "{shape}", title: "{full_time}",
                             div { class: "chat-md min-w-0 [&>*+*]:mt-2", dangerous_inner_html: "{html}" }
                         }
+                        crate::voice::SpeakButton { id: message.id.clone(), text: text.clone() }
                         span { class: "ml-2 self-end pb-1 text-[11px] tabular-nums text-ink-tertiary opacity-0 transition-opacity group-hover:opacity-100", "{when}" }
                     }
                     if !message.attachments.is_empty() {

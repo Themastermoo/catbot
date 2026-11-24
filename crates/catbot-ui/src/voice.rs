@@ -1,15 +1,21 @@
-//! Voice (stage 22): Settings › Voice, each bot's voice, and playing what Catbot says.
+//! Voice (stage 22): Settings › Voice, each bot's voice, the microphone, voice chat, and reading
+//! replies aloud.
 //!
 //! Moo's choices (2026-11-24): two switches, "Talk to bots" and "Turn on voice reply", each run on
 //! this computer or by an online service; Whisper and Kokoro or Piper here, OpenAI online (and
 //! ElevenLabs for replies); a setting for checking the words first or sending them at once;
-//! replies read aloud; a voice per bot. Catbot's server does the work (`server/voice.rs`); this
+//! replies read aloud; a voice per bot. And (Moo, the same day) voice chat as the Claude and
+//! ChatGPT phone apps have it: Catbot listens, sends what you said when you stop, reads the reply,
+//! listens again, with a mute button so it doesn't pick up the room. Catbot's server does the work (`server/voice.rs`); this
 //! side only records and plays.
 
 use dioxus::prelude::*;
 use serde_json::{Value, json};
 
+use std::collections::{HashSet, VecDeque};
+
 use crate::api;
+use crate::live::State;
 use crate::sidebar::Icon;
 
 const CARD: &str = "overflow-hidden rounded-xl bg-composer ring-1 ring-inset ring-ink/[0.07]";
@@ -43,6 +49,10 @@ impl VoiceInfo {
 
     pub fn reply_on(&self) -> bool {
         self.0.read()["settings"]["reply"]["on"] == true
+    }
+
+    pub fn send_at_once(&self) -> bool {
+        self.0.read()["settings"]["listen"]["sendAtOnce"] == true
     }
 
     /// The engine replies are spoken with now: "kokoro", "piper", "openai" or "elevenlabs".
@@ -413,7 +423,7 @@ if (!window.catbotVoice) {
     Object.assign(V, { ear, chunks: [], pre: [], talking: false, loud: 0, quiet: 0, heard: 0, muted: false, paused: false });
     V.node.onaudioprocess = (e) => {
       const d = e.inputBuffer.getChannelData(0);
-      if (V.muted || V.paused) { V.loud = 0; return; }
+      if (!V.ctx || V.muted || V.paused) { V.loud = 0; return; }
       let sum = 0; for (let i = 0; i < d.length; i++) sum += d[i] * d[i];
       const rms = Math.sqrt(sum / d.length), copy = new Float32Array(d), secs = d.length / V.ctx.sampleRate;
       if (!V.ear) { V.chunks.push(copy); return; }
@@ -486,6 +496,10 @@ pub async fn play(audio: &[u8], kind: &str) {
     let _ = ev.recv::<bool>().await;
 }
 
+pub fn stop_playing() {
+    document::eval("window.catbotVoice && window.catbotVoice.stopPlaying();");
+}
+
 const B64: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 pub fn b64_encode(bytes: &[u8]) -> String {
@@ -503,15 +517,379 @@ pub fn b64_encode(bytes: &[u8]) -> String {
     out
 }
 
+pub fn b64_decode(text: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(text.len() / 4 * 3);
+    let (mut buf, mut bits) = (0u32, 0);
+    for c in text.bytes() {
+        let Some(v) = B64.iter().position(|&b| b == c) else { continue };
+        buf = (buf << 6) | v as u32;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            out.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    out
+}
+
+// ---- In the chat ---------------------------------------------------------------------------------
+
+/// What's being read aloud in this chat, and whether voice chat is open. One per chat.
+#[derive(Clone, Copy)]
+pub struct Speaker {
+    /// Voice chat is open (instead of the message box).
+    pub chat_open: Signal<bool>,
+    /// The reply being read now.
+    pub playing: Signal<Option<String>>,
+    queue: Signal<VecDeque<(String, String)>>,
+    pub problem: Signal<Option<String>>,
+    bot: Signal<String>,
+}
+
+impl Speaker {
+    pub fn new(bot: String) -> Self {
+        Speaker { chat_open: Signal::new(false), playing: Signal::new(None), queue: Signal::new(VecDeque::new()), problem: Signal::new(None), bot: Signal::new(bot) }
+    }
+
+    /// Reads a reply after any before it.
+    pub fn read(mut self, id: String, text: String) {
+        self.queue.write().push_back((id, text));
+        if self.playing.peek().is_none() {
+            self.next();
+        }
+    }
+
+    /// Reads this reply now, stopping whatever was being read.
+    pub fn read_now(mut self, id: String, text: String) {
+        self.queue.write().clear();
+        stop_playing();
+        self.queue.write().push_back((id, text));
+        self.playing.set(None);
+        self.next();
+    }
+
+    pub fn stop(mut self) {
+        self.queue.write().clear();
+        stop_playing();
+        self.playing.set(None);
+    }
+
+    fn next(mut self) {
+        let Some((id, text)) = self.queue.write().pop_front() else {
+            self.playing.set(None);
+            return;
+        };
+        self.playing.set(Some(id.clone()));
+        let bot = self.bot.peek().clone();
+        spawn(async move {
+            if let Err(err) = say(&text, Some(&bot)).await {
+                let mut problem = self.problem;
+                problem.set(Some(err));
+                self.queue.write().clear();
+            }
+            // Only if nothing else took over meanwhile.
+            if self.playing.peek().as_deref() == Some(id.as_str()) {
+                self.next();
+            }
+        });
+    }
+}
+
+/// Reads new replies aloud as they arrive (with voice reply on, or in voice chat). Replies already
+/// there when the chat opened are left alone.
+#[component]
+pub fn Reader(replies: Vec<(String, String)>, loaded: bool) -> Element {
+    let info = use_context::<VoiceInfo>();
+    let speaker = use_context::<Speaker>();
+    let mut seen = use_signal(|| None::<HashSet<String>>);
+    use_drop(move || speaker.stop());
+    use_effect(use_reactive!(|replies, loaded| {
+        if !loaded {
+            return;
+        }
+        let first = seen.peek().is_none();
+        if first {
+            seen.set(Some(replies.iter().map(|(id, _)| id.clone()).collect()));
+            return;
+        }
+        let new: Vec<(String, String)> = replies.iter().filter(|(id, _)| !seen.peek().as_ref().is_some_and(|s| s.contains(id))).cloned().collect();
+        if new.is_empty() {
+            return;
+        }
+        if let Some(s) = seen.write().as_mut() {
+            s.extend(new.iter().map(|(id, _)| id.clone()));
+        }
+        if info.reply_on() || *speaker.chat_open.peek() {
+            for (id, text) in new {
+                speaker.read(id, text);
+            }
+        }
+    }));
+    rsx! {}
+}
+
+/// The speaker button beside a reply: reads it (again), or stops it.
+#[component]
+pub fn SpeakButton(id: String, text: String) -> Element {
+    let info = use_context::<VoiceInfo>();
+    let Some(speaker) = try_use_context::<Speaker>() else { return rsx! {} };
+    if !(info.reply_on() || info.listen_on()) || id == "live" {
+        return rsx! {};
+    }
+    let on = speaker.playing.read().as_deref() == Some(id.as_str());
+    let label = if on { "Stop reading" } else { "Read aloud" };
+    let class = if on {
+        "flex size-6 shrink-0 items-center justify-center self-end rounded-md text-accent"
+    } else {
+        "flex size-6 shrink-0 items-center justify-center self-end rounded-md text-ink-tertiary opacity-0 transition-opacity hover:bg-raised hover:text-ink group-hover:opacity-100 focus:opacity-100"
+    };
+    rsx! {
+        button { r#type: "button", "aria-label": "{label}", title: "{label}", "data-speak": "{id}", class,
+            onclick: move |_| if on { speaker.stop() } else { speaker.read_now(id.clone(), text.clone()) },
+            Icon { name: "volume", size: 14 }
+        }
+    }
+}
+
+/// Opens the microphone (no ear: it records until stopped).
+async fn open_mic() -> Result<(), String> {
+    ready_js();
+    let mut ev = document::eval(
+        r#"try { await window.catbotVoice.open(false); dioxus.send(""); }
+           catch (e) { dioxus.send((e && e.name === "NotAllowedError") ? "denied" : String((e && e.message) || e)); }"#,
+    );
+    match ev.recv::<String>().await {
+        Ok(said) if said.is_empty() => Ok(()),
+        Ok(said) => Err(mic_problem(&said)),
+        Err(_) => Err("The microphone didn't start.".into()),
+    }
+}
+
+fn mic_problem(said: &str) -> String {
+    if said == "denied" {
+        "Catbot isn't allowed to use the microphone. Allow it for this app or page, then try again.".into()
+    } else if said.contains("mediaDevices") || said.contains("undefined") {
+        "This window can't reach a microphone. In a browser, Catbot needs to be opened on this computer (localhost) or over https.".into()
+    } else {
+        format!("The microphone didn't start: {said}")
+    }
+}
+
+/// What was recorded, written out by Catbot (here or online, as set).
+async fn words_in(wav_b64: &str) -> Result<String, String> {
+    let bytes = b64_decode(wav_b64);
+    let answer = api::upload("/api/voice/listen", "speech.wav", "audio/wav", bytes).await?;
+    Ok(answer["text"].as_str().unwrap_or_default().trim().to_string())
+}
+
+/// The microphone beside Send: tap to talk, tap again to stop; the words then go to `on_words`.
+#[component]
+pub fn MicButton(disabled: bool, on_words: EventHandler<String>, on_problem: EventHandler<String>) -> Element {
+    let mut recording = use_signal(|| false);
+    let mut writing = use_signal(|| false);
+    use_drop(move || {
+        if *recording.peek() {
+            document::eval("window.catbotVoice && window.catbotVoice.close();");
+        }
+    });
+    let toggle = move |_| {
+        if writing() {
+            return;
+        }
+        if !recording() {
+            spawn(async move {
+                match open_mic().await {
+                    Ok(()) => recording.set(true),
+                    Err(err) => on_problem.call(err),
+                }
+            });
+            return;
+        }
+        recording.set(false);
+        writing.set(true);
+        spawn(async move {
+            let mut ev = document::eval("const V = window.catbotVoice; const w = V.wav(); V.close(); dioxus.send(w);");
+            let wav = ev.recv::<String>().await.unwrap_or_default();
+            match words_in(&wav).await {
+                Ok(words) if words.is_empty() => on_problem.call("Catbot didn't catch any words.".into()),
+                Ok(words) => on_words.call(words),
+                Err(err) => on_problem.call(err),
+            }
+            writing.set(false);
+        });
+    };
+    let (label, class) = if recording() {
+        ("Stop and write out", "flex size-7 shrink-0 animate-pulse items-center justify-center rounded-full bg-danger text-white")
+    } else if writing() {
+        ("Writing out what you said", "flex size-7 shrink-0 items-center justify-center rounded-full bg-ink/[0.06] text-ink-tertiary")
+    } else {
+        ("Talk", "flex size-7 shrink-0 items-center justify-center rounded-full bg-ink/[0.06] text-ink-tertiary ring-[0.5px] ring-inset ring-ink/[0.08] hover:bg-ink/[0.09] hover:text-ink disabled:opacity-40")
+    };
+    rsx! {
+        button { r#type: "button", "aria-label": "{label}", title: "{label}", "data-mic": if recording() { "recording" } else if writing() { "writing" } else { "idle" }, disabled: disabled || writing(), class, onclick: toggle,
+            if writing() {
+                span { class: "inline-block size-3.5 animate-spin rounded-full border-2 border-ink-tertiary border-t-transparent" }
+            } else {
+                Icon { name: "mic", size: 15 }
+            }
+        }
+    }
+}
+
+/// Where voice chat is.
+#[derive(Clone, Debug, PartialEq)]
+enum Phase {
+    Starting,
+    Listening,
+    Hearing,
+    Writing,
+    Waiting,
+    Problem(String),
+}
+
+/// Voice chat, in place of the message box: Catbot listens, sends what was said when the person
+/// stops, reads the reply, and listens again. Mute stops it hearing the room; End closes it.
+#[component]
+pub fn VoiceChat(bot_id: String, thread: String, name: String, working: bool) -> Element {
+    let mut state = use_context::<Signal<State>>();
+    let speaker = use_context::<Speaker>();
+    let mut phase = use_signal(|| Phase::Starting);
+    let mut muted = use_signal(|| false);
+    let mut heard = use_signal(String::new);
+    let target = use_signal(|| (bot_id.clone(), thread.clone()));
+    // Opens the microphone with its ear on; what it hears comes back here.
+    use_hook(move || {
+        ready_js();
+        spawn(async move {
+            let mut ev = document::eval(
+                r#"const V = window.catbotVoice; V.emit = (m) => dioxus.send(m);
+                   try { await V.open(true); dioxus.send({ kind: "open" }); }
+                   catch (e) { dioxus.send({ kind: "problem", text: (e && e.name === "NotAllowedError") ? "denied" : String((e && e.message) || e) }); }
+                   await new Promise(() => {});"#,
+            );
+            while let Ok(m) = ev.recv::<Value>().await {
+                match m["kind"].as_str().unwrap_or_default() {
+                    "open" => phase.set(Phase::Listening),
+                    "talking" => phase.set(Phase::Hearing),
+                    "problem" => phase.set(Phase::Problem(mic_problem(m["text"].as_str().unwrap_or_default()))),
+                    "said" => {
+                        phase.set(Phase::Writing);
+                        document::eval("window.catbotVoice.pause(true);");
+                        let wav = m["wav"].as_str().unwrap_or_default().to_string();
+                        match words_in(&wav).await {
+                            Ok(words) if words.is_empty() => {
+                                phase.set(Phase::Listening);
+                                document::eval("window.catbotVoice.pause(false);");
+                            }
+                            Ok(words) => {
+                                heard.set(words.clone());
+                                phase.set(Phase::Waiting);
+                                let (bot, thread) = target.peek().clone();
+                                let send = crate::live::send_id();
+                                state.write().sending(&thread, crate::live::optimistic(&words, &send, crate::chat::js_now(), Vec::new()));
+                                let body = json!({ "text": words, "threadId": thread, "sendId": send, "attachments": [] });
+                                if let Err(err) = api::post(&format!("/api/bots/{bot}/messages"), &body).await {
+                                    state.write().unsend(&thread, &send);
+                                    phase.set(Phase::Problem(err));
+                                }
+                            }
+                            Err(err) => phase.set(Phase::Problem(err)),
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        });
+    });
+    let mut open = speaker.chat_open;
+    use_drop(move || {
+        document::eval("window.catbotVoice && window.catbotVoice.close();");
+        speaker.stop();
+        open.set(false);
+    });
+    // The bot done and nothing left to read: listen again. While a reply is read, the microphone
+    // rests, so it doesn't hear the bot.
+    let playing = speaker.playing.read().is_some();
+    let now = phase();
+    use_effect(use_reactive!(|working, playing, now| {
+        if now == Phase::Waiting && !working && !playing {
+            phase.set(Phase::Listening);
+        }
+        let rest = playing || matches!(now, Phase::Writing | Phase::Waiting);
+        document::eval(&format!("window.catbotVoice && window.catbotVoice.pause({rest});"));
+    }));
+    let toggle_mute = move |_| {
+        let on = !muted();
+        muted.set(on);
+        document::eval(&format!("window.catbotVoice && window.catbotVoice.mute({on});"));
+        if !on && *phase.peek() == Phase::Hearing {
+            phase.set(Phase::Listening);
+        }
+    };
+    let (status, orb) = match (&now, muted(), playing) {
+        (Phase::Problem(_), _, _) => ("Voice chat stopped".to_string(), "bg-danger/20"),
+        (_, _, true) => (format!("{name} is speaking"), "animate-pulse bg-accent scale-110"),
+        (_, true, _) => ("Muted: Catbot isn't listening".to_string(), "bg-control"),
+        (Phase::Starting, _, _) => ("Opening the microphone…".to_string(), "bg-control animate-pulse"),
+        (Phase::Listening, _, _) => ("Listening".to_string(), "bg-accent/40 animate-pulse"),
+        (Phase::Hearing, _, _) => ("Hearing you…".to_string(), "bg-accent scale-110"),
+        (Phase::Writing, _, _) => ("Writing out what you said…".to_string(), "bg-accent/60 animate-pulse"),
+        (Phase::Waiting, _, _) => (format!("{name} is thinking…"), "bg-accent/60 animate-pulse"),
+    };
+    let problem = match &now {
+        Phase::Problem(p) => Some(p.clone()),
+        _ => speaker.problem.read().clone(),
+    };
+    let mute_label = if muted() { "Unmute" } else { "Mute" };
+    let (orb_icon, mute_icon): (&'static str, &'static str) = if muted() { ("mic-off", "mic-off") } else { ("audio-lines", "mic") };
+    let mute_class = if muted() {
+        "flex h-11 items-center gap-2 rounded-full bg-danger px-4 text-[14px] font-medium text-white"
+    } else {
+        "flex h-11 items-center gap-2 rounded-full bg-raised px-4 text-[14px] font-medium text-ink ring-1 ring-ink/10 hover:bg-raised-hover"
+    };
+    rsx! {
+        div { class: "pointer-events-none relative shrink-0 px-5 pb-3",
+            div { class: "chat-column pointer-events-auto relative w-full",
+                div { "data-voice-chat": true, "data-voice-phase": "{status}", class: "flex flex-col items-center gap-3 rounded-[22px] bg-composer px-4 py-4 ring-1 ring-ink/[0.08] shadow-sm",
+                    div { class: "flex size-16 items-center justify-center rounded-full transition-transform duration-300 {orb}",
+                        span { class: "text-ink", Icon { name: orb_icon, size: 26 } }
+                    }
+                    p { role: "status", class: "text-[14px] font-medium text-ink", "{status}" }
+                    if !heard().is_empty() {
+                        p { class: "max-w-full truncate text-[12px] text-ink-tertiary", "You said: {heard}" }
+                    }
+                    if let Some(p) = problem {
+                        p { role: "alert", class: "text-center text-[12px] text-danger", "{p}" }
+                    }
+                    div { class: "flex items-center gap-2",
+                        button { r#type: "button", "data-voice-mute": if muted() { "on" } else { "off" }, "aria-pressed": "{muted()}", class: mute_class, onclick: toggle_mute,
+                            Icon { name: mute_icon, size: 16 }
+                            "{mute_label}"
+                        }
+                        if playing {
+                            button { r#type: "button", "data-voice-skip": true, class: "flex h-11 items-center gap-2 rounded-full bg-raised px-4 text-[14px] text-ink ring-1 ring-ink/10 hover:bg-raised-hover", onclick: move |_| speaker.stop(), "Stop speaking" }
+                        }
+                        button { r#type: "button", "data-voice-end": true, class: "flex h-11 items-center gap-2 rounded-full bg-raised px-4 text-[14px] text-ink ring-1 ring-ink/10 hover:bg-raised-hover", onclick: move |_| open.set(false),
+                            Icon { name: "x", size: 16 }
+                            "End"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn base64_is_written_out() {
+    fn base64_goes_both_ways() {
         for text in ["", "a", "ab", "abc", "RIFF\u{0}\u{1}\u{ff}voice"] {
             let bytes = text.as_bytes();
-            assert_eq!(b64_encode(bytes).len(), bytes.len().div_ceil(3) * 4);
+            assert_eq!(b64_decode(&b64_encode(bytes)), bytes);
         }
         assert_eq!(b64_encode(b"Catbot"), "Q2F0Ym90");
         assert_eq!(b64_encode(b"Cat"), "Q2F0");
