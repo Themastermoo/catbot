@@ -67,6 +67,8 @@ pub struct State {
     pub departments_changed: u64,
     /// Counts `team-map` frames: a hand-off started or ended.
     pub map_changed: u64,
+    /// Counts `scheduled` frames: a message was scheduled, changed, cancelled or sent.
+    pub scheduled_changed: u64,
 }
 
 /// What a frame asks of the app beyond changing `State`.
@@ -137,6 +139,7 @@ impl State {
             Some("inbox") => self.inbox_changed += 1,
             Some("departments") => self.departments_changed += 1,
             Some("team-map") => self.map_changed += 1,
+            Some("scheduled") => self.scheduled_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();
                 self.bots.retain(|b| b.id != id);
@@ -247,7 +250,7 @@ fn random() -> f64 {
 
 /// The person's message as it's shown before the server has it.
 pub fn optimistic(text: &str, send_id: &str, now: f64, attachments: Vec<crate::attach::Attached>) -> Msg {
-    Msg { id: format!("optimistic-{send_id}"), at: now, send_id: Some(send_id.to_string()), body: Body::Person(text.to_string()), attachments, reactions: Vec::new(), bot_id: None }
+    Msg { id: format!("optimistic-{send_id}"), at: now, send_id: Some(send_id.to_string()), body: Body::Person(text.to_string()), attachments, reactions: Vec::new(), bot_id: None, scheduled: None }
 }
 
 #[cfg(test)]
@@ -344,7 +347,7 @@ mod tests {
     #[test]
     fn earlier_pages_go_in_front() {
         let mut s = state();
-        let m = |id: &str| Msg { id: id.into(), at: 0.0, send_id: None, body: Body::Reply(id.into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: None };
+        let m = |id: &str| Msg { id: id.into(), at: 0.0, send_id: None, body: Body::Reply(id.into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None };
         s.loaded("t1", vec![m("c"), m("d")], true, false);
         s.loaded("t1", vec![m("a"), m("b")], false, true);
         let ids: Vec<_> = s.threads["t1"].messages.iter().map(|m| m.id.as_str()).collect();

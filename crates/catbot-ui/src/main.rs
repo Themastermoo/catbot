@@ -4,6 +4,7 @@
 //! (Apache-2.0, see NOTICE), so the stylesheet's tokens and skins apply unchanged.
 
 mod api;
+mod scheduled;
 mod apps;
 mod computers;
 mod attach;

@@ -46,6 +46,9 @@ pub struct Msg {
     pub reactions: Vec<String>,
     /// The bot that said it (a channel has several).
     pub bot_id: Option<String>,
+    /// A message written earlier and sent at a set time: when it was for, and whether it went
+    /// out late (stage 21).
+    pub scheduled: Option<(f64, bool)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -136,7 +139,8 @@ impl Msg {
         let attachments = Attached::list(&wire["attachments"]);
         let reactions = wire["reactions"].as_array().map(|r| r.iter().filter_map(|e| e.as_str().map(str::to_string)).collect()).unwrap_or_default();
         let bot_id = wire["botId"].as_str().map(str::to_string);
-        Some(Msg { id, at, send_id, body, attachments, reactions, bot_id })
+        let scheduled = wire["scheduled"]["for"].as_f64().map(|due| (due, wire["scheduled"]["late"] == true));
+        Some(Msg { id, at, send_id, body, attachments, reactions, bot_id, scheduled })
     }
 
     fn is_step(&self) -> bool {
@@ -394,7 +398,7 @@ fn LiveTurn(live: Live) -> Element {
             if live.text.is_empty() {
                 Working {}
             } else {
-                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: None } }
+                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None } }
             }
         }
     }
@@ -557,6 +561,32 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         }
     };
 
+    // The clock beside Send: these words, at a time chosen (stage 21).
+    let mut scheduling = use_signal(|| false);
+    let later_target = use_signal(|| (bot.id.clone(), bot.thread_id.clone()));
+    let send_later = move |at: f64| {
+        scheduling.set(false);
+        let words = text.peek().trim().to_string();
+        if words.is_empty() {
+            return;
+        }
+        if !tray.peek().is_empty() {
+            problem.set(Some("A scheduled message carries words only: send the files now, or take them off first.".into()));
+            return;
+        }
+        problem.set(None);
+        text.set(String::new());
+        set_box("");
+        let (bot_id, thread) = later_target.peek().clone();
+        spawn(async move {
+            if let Err(err) = crate::scheduled::schedule(&bot_id, &thread, &words, at).await {
+                problem.set(Some(err));
+                text.set(words.clone());
+                set_box(&words);
+            }
+        });
+    };
+
     let stop_bot = bot.clone();
     let stop = use_callback(move |_: ()| {
         let bot = stop_bot.clone();
@@ -607,7 +637,8 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
             _ => Vec::new(),
         }
     };
-    let has_text = !text.read().trim().is_empty() || tray.read().iter().any(|t| matches!(t.state, TrayState::Ready(_)));
+    let has_words = !text.read().trim().is_empty();
+    let has_text = has_words || tray.read().iter().any(|t| matches!(t.state, TrayState::Ready(_)));
     let pick = move |e: FormEvent| {
         add_files(e.files());
         // Picking the same file again should work too.
@@ -626,6 +657,7 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                 if let Some(question) = pending.first() {
                     ApprovalPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len(), on_cancel_turn: move |_| stop(()) }
                 }
+                crate::scheduled::List { bot_id: bot.id.clone(), thread_id: bot.thread_id.clone() }
                 if let Some((words, files)) = queued() {
                     div { class: "mb-2 flex items-center gap-2 rounded-lg border border-hairline/40 bg-panel px-3 py-2 text-[13px] text-ink-secondary",
                         span { class: "min-w-0 flex-1 truncate",
@@ -763,6 +795,22 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                                     }
                                 }
                                 if !waiting_on_you {
+                                    span { class: "relative flex items-center",
+                                        button {
+                                            r#type: "button",
+                                            "aria-label": "Send later",
+                                            "aria-haspopup": "menu",
+                                            title: "Send later",
+                                            "data-schedule": true,
+                                            disabled: !has_words,
+                                            class: "{SIMPLE_CONTROL}",
+                                            onclick: move |_| scheduling.toggle(),
+                                            crate::sidebar::Icon { name: "clock", size: 15 }
+                                        }
+                                        if scheduling() {
+                                            crate::scheduled::Picker { on_pick: send_later, on_close: move |_| scheduling.set(false) }
+                                        }
+                                    }
                                     button {
                                         r#type: "button",
                                         "aria-label": if working { "Send when this turn finishes" } else { "Send" },
@@ -1078,6 +1126,12 @@ fn Row(
                         div { class: "chat-text", "{text}" }
                     }
                 }
+                }
+                if let Some((due, late)) = message.scheduled {
+                    span { "data-scheduled-note": if late { "late" } else { "on-time" }, class: "flex items-center gap-1 pr-1 text-[11px] text-ink-tertiary", title: "Written earlier and sent at the time set",
+                        crate::sidebar::Icon { name: "clock", size: 11 }
+                        if late { "Scheduled for {ahead_when(due)} · sent late" } else { "Scheduled" }
+                    }
                 }
                 crate::react::Reactions { thread: thread.clone(), message: message.id.clone(), reactions: message.reactions.clone(), end: true, bot_id: bot_id.clone(), working }
             }
@@ -1492,6 +1546,17 @@ pub fn short_when(at: f64) -> String {
     }
 }
 
+/// When something is due, ahead: "Today 8:00 PM", "Tomorrow 9:00 AM", "Thu, Nov 26, 9:00 AM"
+/// (or behind, for one that went out: "Yesterday 9:00 AM").
+pub fn ahead_when(at: f64) -> String {
+    match day(at) - day(js_now()) {
+        0 => format!("Today {}", clock(at)),
+        1 => format!("Tomorrow {}", clock(at)),
+        -1 => format!("Yesterday {}", clock(at)),
+        _ => format!("{}, {}", date_string(at, &[("weekday", "short"), ("month", "short"), ("day", "numeric")], false), clock(at)),
+    }
+}
+
 /// "Dec 1".
 pub fn month_day(at: f64) -> String {
     #[cfg(target_arch = "wasm32")]
@@ -1562,7 +1627,7 @@ mod tests {
     use serde_json::json;
 
     fn step(id: &str, name: &str, at: f64) -> Msg {
-        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) }, attachments: Vec::new(), reactions: Vec::new(), bot_id: None }
+        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) }, attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None }
     }
 
     #[test]
@@ -1584,7 +1649,7 @@ mod tests {
 
     #[test]
     fn steps_fold_into_runs() {
-        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: None };
+        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None };
         let items = group(&[step("a", "Read", 1.0), step("b", "Read", 1.0), step("c", "Bash", 2.0), reply.clone(), step("d", "Edit", 4.0)]);
         assert_eq!(items.len(), 3);
         assert!(matches!(&items[0], Item::Run(steps) if steps.len() == 3));

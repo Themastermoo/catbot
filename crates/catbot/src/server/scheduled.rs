@@ -11,8 +11,8 @@
 //! * `GET    /api/scheduled?botId=&threadId=`  the waiting ones, soonest first (all, unasked)
 //! * `POST   /api/scheduled`                   `{ botId, threadId?, text, at }` (`at` in ms)
 //! * `PATCH  /api/scheduled/:id`               `{ text?, at? }` while it waits
-//! * `DELETE /api/scheduled/:id`               cancel it
-//! * `POST   /api/scheduled/:id/send`          send it now
+//! * `DELETE /api/scheduled/:id`               cancel it (or take a failed one off the list)
+//! * `POST   /api/scheduled/:id/send`          send it now (or try a failed one again)
 //!
 //! A bot still busy when one is due gets it as soon as it's free (not marked late for that).
 //! Each change sends a `scheduled` frame.
@@ -274,7 +274,8 @@ pub fn route(app: &Arc<App>, method: &Method, rest: &[&str], bot: Option<String>
                 let _one = CHANGING.lock().expect("scheduled lock");
                 let mut list = load(app);
                 let before = list.len();
-                list.retain(|s| !(s.id == *id && s.state == "waiting"));
+                // A waiting one is cancelled; a failed one taken off the list.
+                list.retain(|s| !(s.id == *id && s.state != "sent"));
                 if list.len() == before {
                     return Err((StatusCode::NOT_FOUND, "nothing waiting by that id".into()));
                 }
