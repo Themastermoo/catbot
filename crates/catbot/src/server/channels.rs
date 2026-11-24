@@ -267,7 +267,7 @@ pub fn in_channel(mut bot: Bot, channel: &Channel, members: &[Bot]) -> Bot {
 }
 
 /// `POST …/ch-…/messages`: the person's message, then each responder's turn in order.
-fn send(app: &Arc<App>, channel: Channel, body: Value) -> Answer {
+pub(super) fn send(app: &Arc<App>, channel: Channel, body: Value) -> Answer {
     let conversation = app.try_store(|store| store.channel_conversation(&channel.id)).map_err(fail)?.ok_or_else(|| bad("the channel has no transcript"))?;
     if app.channel_busy(&channel.id) || app.turns.busy(&conversation.id) {
         return Err((StatusCode::CONFLICT, "the channel is still answering the last message".into()));
@@ -286,11 +286,16 @@ fn send(app: &Arc<App>, channel: Channel, body: Value) -> Answer {
     if let Some(id) = body["sendId"].as_str() {
         detail["sendId"] = json!(id);
     }
+    // Written earlier, set to go out now (stage 21).
+    if body["scheduled"].is_object() {
+        detail["scheduled"] = body["scheduled"].clone();
+    }
     let described: Vec<Value> = attached.iter().map(attachments::describe).collect();
     if !described.is_empty() {
         detail["attachments"] = json!(described);
     }
-    let reacted = super::reactions::untold_note(app, &conversation.id);
+    // Goes to each bot with the message, as reactions do: also that it went out late.
+    let reacted = format!("{}{}", super::reactions::untold_note(app, &conversation.id), super::scheduled::late_note(&body));
     if !reacted.is_empty() {
         detail["reactionNote"] = json!(reacted);
     }

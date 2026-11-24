@@ -43,6 +43,7 @@ pub mod memory;
 pub mod reach;
 pub mod remote;
 pub mod runs;
+pub mod scheduled;
 pub mod triggers;
 pub mod turns;
 pub mod wire;
@@ -109,6 +110,8 @@ pub struct App {
     pub remote: std::sync::OnceLock<SocketAddr>,
     /// The pairing code waiting for a device, if any (`devices.rs`).
     pub pairing: std::sync::Mutex<Option<devices::Pairing>>,
+    /// When this Catbot started, ms: a scheduled message due before then went out late.
+    pub started_ms: i64,
     /// The plans' usage windows as last fetched (`usage.rs`), and when.
     pub plan_usage: std::sync::Mutex<Option<(std::time::Instant, Value)>>,
     /// Channels whose bots are answering a message, one after another (`channels.rs`).
@@ -159,6 +162,7 @@ impl App {
             computers: computers::Computers::default(),
             codex_sign_in: crate::codex::SignIn::default(),
             agent_work: std::sync::Mutex::new(std::collections::HashMap::new()),
+            started_ms: chrono::Utc::now().timestamp_millis(),
         })
     }
 
@@ -314,6 +318,8 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
     tokio::spawn(triggers::keep_time(app.clone()));
     tokio::spawn(triggers::watch_mail(app.clone()));
     tokio::spawn(computers::keep_tidy(app.clone()));
+    // Scheduled messages, those missed while Catbot was off first (stage 21).
+    scheduled::start(app.clone());
     axum::serve(listener, router(app)).await?;
     Ok(())
 }
@@ -427,6 +433,20 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(limits::route(&app, &method, body, true).await)
         }
         ["api", "handoffs"] if method == Method::GET => respond(handoffs::route(&app, None)),
+        ["api", "scheduled", rest @ ..] => {
+            // Messages set to go out later (stage 21).
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let bot = query_param(&req, "botId").map(urlencoding_decode);
+            let thread = query_param(&req, "threadId").map(urlencoding_decode);
+            let body = if method == Method::GET { json!({}) } else {
+                match json_body(req).await {
+                    Ok(body) => body,
+                    Err(err) => return respond(Err(err)),
+                }
+            };
+            respond(scheduled::route(&app, &method, &rest, bot, thread, body))
+        }
         ["api", "email", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
@@ -949,6 +969,10 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     if let Some(id) = body["sendId"].as_str() {
         detail["sendId"] = json!(id);
     }
+    // Written earlier, set to go out now (stage 21).
+    if body["scheduled"].is_object() {
+        detail["scheduled"] = body["scheduled"].clone();
+    }
     let described: Vec<Value> = attached.iter().map(attachments::describe).collect();
     if !described.is_empty() {
         detail["attachments"] = json!(described);
@@ -974,7 +998,7 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     let told = format!("{}{}", handoffs::untold_note(app, &conversation.id, &bot.id), team::untold_note(app, &conversation.id));
     // `/skill-name …` runs one of the bot's skills: the bot reads which, and where its instructions are.
     let asked = skills::command(app, &bot, &text).unwrap_or_else(|| text.clone());
-    let said = format!("{asked}{}{reacted}{told}", attachments::note(&described));
+    let said = format!("{asked}{}{reacted}{told}{}", attachments::note(&described), scheduled::late_note(&body));
     let mut bot = bot;
     bot.instructions.push_str(&handoffs::roster_note(app, &bot));
     let bot = match switched {

@@ -213,6 +213,10 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
             if let Some(attached) = detail.get("attachments").filter(|a| a.is_array()) {
                 fields["attachments"] = attached.clone();
             }
+            // Written earlier and sent at a set time (stage 21): `{ for, late }`.
+            if detail["scheduled"].is_object() {
+                fields["scheduled"] = detail["scheduled"].clone();
+            }
             fields
         }
         Role::Bot => {

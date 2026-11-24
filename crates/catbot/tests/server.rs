@@ -3568,3 +3568,86 @@ async fn a_grok_bot_comes_over_from_its_export() {
     let (_, library) = s.call("GET", "/api/skills", None).await;
     assert_eq!(library["skills"].as_array().unwrap().iter().filter(|k| k["name"].as_str().unwrap().starts_with("weekly-digest")).count(), 1);
 }
+
+#[tokio::test]
+async fn messages_are_scheduled_changed_cancelled_and_sent_on_time_or_late() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let now = chrono::Utc::now().timestamp_millis();
+
+    // Only for a time ahead, within a year, with words, to a bot there is.
+    for (body, why) in [
+        (json!({ "botId": bot, "text": "hi", "at": now - 1000 }), "past"),
+        (json!({ "botId": bot, "text": "hi", "at": now + 400 * 24 * 3600 * 1000 }), "too far"),
+        (json!({ "botId": bot, "text": "  ", "at": now + 60_000 }), "empty"),
+    ] {
+        assert_eq!(s.call("POST", "/api/scheduled", Some(body)).await.0, 400, "{why}");
+    }
+    assert_eq!(s.call("POST", "/api/scheduled", Some(json!({ "botId": "nobody", "text": "hi", "at": now + 60_000 }))).await.0, 404);
+
+    // One for later, changed then cancelled.
+    let (status, later) = s.call("POST", "/api/scheduled", Some(json!({ "botId": bot, "threadId": thread, "text": "Later", "at": now + 3_600_000 }))).await;
+    assert_eq!(status, 201, "{later}");
+    until(&mut events, "frame", |f| f["kind"] == "scheduled").await;
+    let later = later["message"]["id"].as_str().unwrap().to_string();
+    let (_, changed) = s.call("PATCH", &format!("/api/scheduled/{later}"), Some(json!({ "text": "Later still", "at": now + 7_200_000 }))).await;
+    assert_eq!((changed["message"]["text"].as_str(), changed["message"]["at"].as_i64()), (Some("Later still"), Some(now + 7_200_000)));
+
+    // One due in a moment: the clock sends it, on time.
+    let (_, soon) = s.call("POST", "/api/scheduled", Some(json!({ "botId": bot, "text": "Water the tomatoes", "at": chrono::Utc::now().timestamp_millis() + 800 }))).await;
+    let soon = soon["message"]["id"].as_str().unwrap().to_string();
+    let (_, waiting) = s.call("GET", &format!("/api/scheduled?botId={bot}"), None).await;
+    let listed: Vec<&str> = waiting["messages"].as_array().unwrap().iter().map(|m| m["text"].as_str().unwrap()).collect();
+    assert_eq!(listed, ["Water the tomatoes", "Later still"], "soonest first");
+    server::scheduled::tick(&s.app);
+    assert_eq!(s.call("GET", "/api/scheduled", None).await.1["messages"].as_array().unwrap().iter().filter(|m| m["state"] == "sent").count(), 0, "not yet due");
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+    server::scheduled::tick(&s.app);
+    let asked = until(&mut events, "sent", |f| f["kind"] == "message" && f["message"]["role"] == "user" && f["message"]["text"] == "Water the tomatoes").await;
+    assert_eq!(asked["threadId"], thread.as_str(), "into the bot's current chat");
+    assert_eq!(asked["message"]["scheduled"]["late"], false);
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(!reply["message"]["text"].as_str().unwrap().contains("went out late"));
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let (_, all) = s.call("GET", "/api/scheduled", None).await;
+    let sent = all["messages"].as_array().unwrap().iter().find(|m| m["id"] == soon.as_str()).unwrap().clone();
+    assert_eq!((sent["state"].as_str(), sent["late"].as_bool()), (Some("sent"), Some(false)));
+    assert_eq!(s.call("DELETE", &format!("/api/scheduled/{soon}"), None).await.0, 404, "gone out: nothing to cancel");
+
+    // Sent now, ahead of its time.
+    let (status, now_sent) = s.call("POST", &format!("/api/scheduled/{later}/send"), None).await;
+    assert_eq!((status, now_sent["message"]["state"].as_str()), (200, Some("sent")), "{now_sent}");
+    until(&mut events, "sent now", |f| f["kind"] == "message" && f["message"]["text"] == "Later still").await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // One whose time came while Catbot was off goes out when it's back, late, and the bot is told.
+    let (_, cancel) = s.call("POST", "/api/scheduled", Some(json!({ "botId": bot, "text": "Never mind", "at": now + 60_000 }))).await;
+    assert_eq!(s.call("DELETE", &format!("/api/scheduled/{}", cancel["message"]["id"].as_str().unwrap()), None).await.0, 200);
+    let mut kept: Value = s.app.with_store(|store| store.setting("scheduled")).flatten().unwrap();
+    kept.as_array_mut().unwrap().push(json!({ "id": "sch-missed", "botId": bot, "threadId": thread, "text": "Feed the cat", "at": s.app.started_ms - 60_000, "createdAt": now, "state": "waiting" }));
+    s.app.with_store(|store| store.set_setting("scheduled", &kept));
+    server::scheduled::tick(&s.app);
+    let asked = until(&mut events, "late", |f| f["kind"] == "message" && f["message"]["text"] == "Feed the cat").await;
+    assert_eq!(asked["message"]["scheduled"]["late"], true);
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(reply["message"]["text"].as_str().unwrap().contains("went out late"), "{reply}");
+    let (_, all) = s.call("GET", "/api/scheduled", None).await;
+    assert!(all["messages"].as_array().unwrap().iter().all(|m| m["state"] != "waiting"), "nothing left waiting");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // In a channel too: into its transcript, answered by its lead.
+    let (_, made) = s.call("POST", "/api/channels", Some(json!({ "name": "Garden", "members": [bot], "lead": bot }))).await;
+    let channel = made["bot"]["id"].as_str().unwrap().to_string();
+    let transcript = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let (status, set) = s.call("POST", "/api/scheduled", Some(json!({ "botId": channel, "text": "Morning, all", "at": chrono::Utc::now().timestamp_millis() + 300 }))).await;
+    assert_eq!((status, set["message"]["threadId"].as_str()), (201, Some(transcript.as_str())), "{set}");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    server::scheduled::tick(&s.app);
+    let asked = until(&mut events, "channel", |f| f["kind"] == "message" && f["message"]["text"] == "Morning, all").await;
+    assert_eq!(asked["threadId"], transcript.as_str());
+    until(&mut events, "lead", |f| f["kind"] == "message" && f["threadId"] == transcript.as_str() && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+}
