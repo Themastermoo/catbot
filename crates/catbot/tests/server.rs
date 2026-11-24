@@ -3898,3 +3898,29 @@ async fn a_bots_chats_go_in_folders() {
     assert_eq!(got["bot"]["folders"].as_array().unwrap().len(), 1);
     assert_eq!(in_folder(&got["bot"], &second), Value::Null);
 }
+
+#[tokio::test]
+async fn a_bots_settings_are_kept_in_its_history_and_undone() {
+    let s = setup().await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout", "soul": "Be brief." }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let history = || async { s.call("GET", &format!("/api/bots/{bot}/history"), None).await.1["changes"].as_array().unwrap().clone() };
+    assert!(history().await.is_empty());
+
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "soul": "Be thorough.", "title": "Researcher" }))).await;
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "name": "Scout Two" }))).await;
+    // Nothing changed: nothing kept.
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "name": "Scout Two" }))).await;
+    let changes = history().await;
+    let whats: Vec<&str> = changes.iter().map(|c| c["what"].as_str().unwrap()).collect();
+    assert_eq!(whats, ["Name", "Instructions, Role"], "newest first");
+
+    // Undo the instructions change: they (and the role) come back; the newer name stays.
+    let first = changes[1]["id"].as_i64().unwrap();
+    let (status, undone) = s.call("POST", &format!("/api/bots/{bot}/history/{first}/undo"), None).await;
+    assert_eq!(status, 200, "{undone}");
+    assert_eq!((undone["bot"]["soul"].as_str(), undone["bot"]["title"].as_str(), undone["bot"]["name"].as_str()), (Some("Be brief."), Some(""), Some("Scout")));
+    let whats: Vec<String> = history().await.iter().map(|c| c["what"].as_str().unwrap().to_string()).collect();
+    assert_eq!(whats[0], "Undo: Name, Instructions, Role", "the undo is a change too");
+    assert_eq!(s.call("POST", &format!("/api/bots/{bot}/history/999999/undo"), None).await.0, 404);
+}

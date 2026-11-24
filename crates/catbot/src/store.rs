@@ -629,6 +629,29 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Keeps a bot's settings as they were before a change (stage 23.4), the newest 100.
+    pub fn add_history(&self, bot_id: &str, what: &str, before: &Value) -> Result<(), BoxError> {
+        self.conn.execute("INSERT INTO bot_history (bot_id, at, what, before) VALUES (?1, ?2, ?3, ?4)", params![bot_id, now(), what, before.to_string()])?;
+        self.conn.execute(
+            "DELETE FROM bot_history WHERE bot_id = ?1 AND id NOT IN (SELECT id FROM bot_history WHERE bot_id = ?1 ORDER BY id DESC LIMIT 100)",
+            [bot_id],
+        )?;
+        Ok(())
+    }
+
+    /// A bot's changes, newest first: (id, when, what changed).
+    pub fn history(&self, bot_id: &str) -> Result<Vec<(i64, String, String)>, BoxError> {
+        let mut stmt = self.conn.prepare("SELECT id, at, what FROM bot_history WHERE bot_id = ?1 ORDER BY id DESC")?;
+        let rows = stmt.query_map([bot_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// One change's settings from before it.
+    pub fn history_before(&self, bot_id: &str, id: i64) -> Result<Option<Value>, BoxError> {
+        let text: Option<String> = self.conn.query_row("SELECT before FROM bot_history WHERE bot_id = ?1 AND id = ?2", params![bot_id, id], |r| r.get(0)).optional()?;
+        Ok(text.and_then(|t| serde_json::from_str(&t).ok()))
+    }
+
     /// A bot's profile (stage 23): the defaults when nothing was set.
     pub fn profile(&self, bot_id: &str) -> Result<Profile, BoxError> {
         Ok(self

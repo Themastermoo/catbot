@@ -180,7 +180,7 @@ pub fn BotSettings(bot: Bot) -> Element {
                                 key: "{bot.id}-name",
                                 class: FIELD,
                                 maxlength: 60,
-                                initial_value: "{bot.name}",
+                                value: "{bot.name}",
                                 onchange: {
                                     let current = bot.name.clone();
                                     move |e: FormEvent| {
@@ -204,7 +204,7 @@ pub fn BotSettings(bot: Bot) -> Element {
                                 rows: 6,
                                 class: "{FIELD} resize-y text-[13px] leading-relaxed",
                                 placeholder: if channel { "What this channel is for; every bot in it reads this" } else { "What this bot is for, and how it should work" },
-                                initial_value: "{bot.soul}",
+                                value: "{bot.soul}",
                                 onchange: {
                                     let current = bot.soul.clone();
                                     move |e: FormEvent| {
@@ -261,6 +261,10 @@ pub fn BotSettings(bot: Bot) -> Element {
                             }
                         }
                         Switch { checked: bot.codex, disabled: saving(), label: "Codex vault access", on_toggle: move |_| change(json!({ "codex": !bot.codex })) }
+                    }
+                    // What changed, and Undo (stage 23.4).
+                    if !channel {
+                        crate::profile::HistoryCard { bot: bot.clone() }
                     }
                     // Deleting.
                     div { class: CARD,

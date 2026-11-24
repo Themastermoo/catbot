@@ -40,6 +40,7 @@ pub mod profiles;
 pub mod pages;
 pub mod events;
 pub mod folders;
+pub mod history;
 pub mod hooks;
 pub mod hub;
 pub mod memory;
@@ -861,6 +862,7 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             let body = if method == Method::DELETE { json!({}) } else { json_body(req).await? };
             folders::route(app, &bot, &method, rest, body)
         }
+        (method @ (Method::GET | Method::POST), ["history", rest @ ..]) => history::route(app, bot, &method, rest),
         (Method::POST, ["picture"]) => {
             let bytes = axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024 + 1).await.map_err(|_| bad("the picture is too big; keep it under 8 MB"))?;
             profiles::upload(app, &bot, bytes)
@@ -885,7 +887,14 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
     }
 }
 
-pub(super) fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
+pub(super) fn patch_bot(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
+    patch_bot_as(app, bot, body, false)
+}
+
+/// A change to a bot's settings, kept in its history (stage 23.4); `undo` marks one that undoes
+/// an earlier change.
+pub(super) fn patch_bot_as(app: &Arc<App>, mut bot: Bot, body: Value, undo: bool) -> Answer {
+    let kept_before = history::snapshot(app, &bot);
     let before = bot.clone();
     apply_changes(&mut bot, &body)?;
     // Its role, description and picture's framing (stage 23).
@@ -905,6 +914,7 @@ pub(super) fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
     {
         eprintln!("catbot: couldn't move {}'s memory note to its new name: {err}", bot.name);
     }
+    history::record(app, &bot, &kept_before, undo);
     let wire = app.try_store(|store| app.wire_bot(store, &bot, None)).map_err(fail)?;
     app.hub.send(json!({ "kind": "bot", "bot": wire }));
     Ok((StatusCode::OK, json!({ "bot": wire })))

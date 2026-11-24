@@ -217,7 +217,8 @@ pub fn RoleFields(bot: Bot, change: Callback<Value>, field: &'static str, label_
                 maxlength: 80,
                 placeholder: "Researcher, Writer, Gardener…",
                 "data-bot-title": true,
-                initial_value: "{bot.title}",
+                // The saved text: an Undo or another window changes it here too.
+                value: "{bot.title}",
                 onchange: move |e: FormEvent| {
                     let title = e.value().trim().to_string();
                     if title != current_title {
@@ -234,12 +235,89 @@ pub fn RoleFields(bot: Bot, change: Callback<Value>, field: &'static str, label_
                 class: "{field} resize-y text-[13px] leading-relaxed",
                 placeholder: "A few lines about it, for you and for the team. It's told this too.",
                 "data-bot-description": true,
-                initial_value: "{bot.description}",
+                value: "{bot.description}",
                 onchange: move |e: FormEvent| {
                     if e.value().trim() != current_description.trim() {
                         change.call(json!({ "description": e.value().trim() }));
                     }
                 },
+            }
+        }
+    }
+}
+
+/// The bot's settings history (stage 23.4): each change, newest first, and going back to the
+/// settings from before one.
+#[component]
+pub fn HistoryCard(bot: Bot) -> Element {
+    let mut changes = use_signal(Vec::<Value>::new);
+    let mut open = use_signal(|| false);
+    let mut asking = use_signal(|| None::<i64>);
+    let mut problem = use_signal(|| None::<String>);
+    // Read again whenever the bot changes (each change is one of these).
+    let id = bot.id.clone();
+    let seen = format!("{bot:?}");
+    use_effect(use_reactive!(|seen, id| {
+        let _ = seen;
+        let id = id.clone();
+        spawn(async move {
+            if let Ok(found) = api::get(&format!("/api/bots/{id}/history")).await {
+                changes.set(found["changes"].as_array().cloned().unwrap_or_default());
+            }
+        });
+    }));
+    let list = changes.read().clone();
+    let shown: Vec<Value> = if open() { list.clone() } else { list.iter().take(5).cloned().collect() };
+    let bot_id = bot.id.clone();
+    rsx! {
+        div { class: "rounded-xl bg-card p-4", "data-bot-history": true,
+            div { class: "text-[15px] font-medium text-ink", "History" }
+            if list.is_empty() {
+                p { class: "mt-1 text-[12px] text-ink-secondary", "Changes to {bot.name}'s settings show here, and can be undone." }
+            }
+            for change in shown {
+                {
+                    let cid = change["id"].as_i64().unwrap_or_default();
+                    let at = crate::chat::parse_time(change["at"].as_str().unwrap_or_default());
+                    let when = crate::chat::ahead_when(at);
+                    let what = change["what"].as_str().unwrap_or_default().to_string();
+                    let bot_id = bot_id.clone();
+                    rsx! {
+                        div { key: "{cid}", class: "mt-2 flex items-center gap-2 text-[13px]", "data-history-change": "{what}",
+                            span { class: "min-w-0 flex-1",
+                                span { class: "block truncate text-ink", "{what}" }
+                                span { class: "block text-[11px] text-ink-tertiary", "{when}" }
+                            }
+                            if asking() == Some(cid) {
+                                span { class: "text-[12px] text-ink-secondary", "Go back?" }
+                                button { r#type: "button", class: QUIET, onclick: move |_| asking.set(None), "Keep" }
+                                button { r#type: "button", class: BUTTON, "data-history-confirm": true,
+                                    onclick: move |_| {
+                                        asking.set(None);
+                                        let bot_id = bot_id.clone();
+                                        spawn(async move {
+                                            if let Err(err) = api::post(&format!("/api/bots/{bot_id}/history/{cid}/undo"), &json!({})).await {
+                                                problem.set(Some(err));
+                                            }
+                                        });
+                                    },
+                                    "Undo"
+                                }
+                            } else {
+                                button { r#type: "button", class: QUIET, "data-history-undo": "{cid}", title: "Put the settings back as they were before this change", onclick: move |_| asking.set(Some(cid)), "Undo" }
+                            }
+                        }
+                    }
+                }
+            }
+            if list.len() > 5 {
+                button { r#type: "button", class: "mt-2 text-[12px] text-ink-secondary hover:text-ink", onclick: move |_| open.toggle(),
+                    if open() { "Show fewer" } else { "Show all {list.len()}" }
+                }
+            }
+            p { class: "mt-2 text-[11px] text-ink-tertiary", "Undo puts every setting back as it was just before that change. A replaced picture isn't kept." }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "mt-1 text-[12px] text-danger", "{err}" }
             }
         }
     }
