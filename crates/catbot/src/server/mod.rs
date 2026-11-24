@@ -36,6 +36,7 @@ pub mod images;
 pub mod inbox;
 pub mod page_hosts;
 pub mod pets;
+pub mod profiles;
 pub mod pages;
 pub mod events;
 pub mod hooks;
@@ -620,6 +621,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             Ok(body) => channels::create(&app, &body),
             Err(err) => Err(err),
         }),
+        ["api", "bots", id, "picture"] if method == Method::GET && owns_bot(&app, id) => profiles::serve(&app, id).await,
         ["api", "bots", id, rest @ ..] if owns_bot(&app, id) => {
             let id = id.to_string();
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
@@ -854,6 +856,12 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             Ok((StatusCode::OK, json!({ "ok": true })))
         }
         (Method::GET, ["runs", rest @ ..]) => runs::route(app, &bot, rest),
+        (Method::POST, ["picture"]) => {
+            let bytes = axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024 + 1).await.map_err(|_| bad("the picture is too big; keep it under 8 MB"))?;
+            profiles::upload(app, &bot, bytes)
+        }
+        (Method::GET, ["picture", "draw"]) => Ok((StatusCode::OK, json!({ "drawers": profiles::drawers(app) }))),
+        (Method::POST, ["picture", "draw"]) => profiles::draw(app, &bot, &json_body(req).await?).await,
         (Method::POST, ["interrupt"]) => {
             let body = json_body(req).await?;
             let thread = match body["threadId"].as_str() {
@@ -875,6 +883,8 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
 pub(super) fn patch_bot(app: &Arc<App>, mut bot: Bot, body: Value) -> Answer {
     let before = bot.clone();
     apply_changes(&mut bot, &body)?;
+    // Its role, description and picture's framing (stage 23).
+    profiles::patch(app, &bot.id, &body)?;
     app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
     if let Some(list) = body.get("backups") {
         app.try_store(|store| backups::set(store, &bot, list)).map_err(bad)?;

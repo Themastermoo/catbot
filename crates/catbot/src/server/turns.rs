@@ -187,6 +187,8 @@ async fn run(
     if let Some(chief) = super::chief::chief(app).filter(|c| c.id == bot.id) {
         dressed.instructions.push_str(&super::chief::note(app, &chief));
     }
+    // Its role and description (stage 23).
+    dressed.instructions.push_str(&super::profiles::note(app, bot));
     // Its department: teammates, who leads it, the person's shared instructions, its memory note.
     dressed.instructions.push_str(&super::departments::note(app, bot));
     // The bot's skills, in its folder for this turn (and told where, for AIs that don't look).

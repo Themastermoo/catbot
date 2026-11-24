@@ -202,6 +202,16 @@ fn spawn_drawing(app: Arc<App>, bot: Bot, thread: String, id: i64, mut detail: V
     });
 }
 
+/// Draws a picture straight away, with OpenAI's, xAI's or Claude's SVG (a bot's own picture,
+/// `profiles.rs`): its PNG.
+pub async fn draw_now(app: &App, bot: &Bot, choice: &str, prompt: &str) -> Result<Vec<u8>, String> {
+    if choice == "claude-blender" {
+        return Err("Blender's script has to be looked at first, so it doesn't draw pictures here".into());
+    }
+    let mut detail = json!({});
+    draw(app, bot, choice, prompt, &mut detail).await?.ok_or_else(|| "nothing was drawn".to_string())
+}
+
 /// Draws the picture: its PNG, or None when a script now waits for the person's go-ahead.
 async fn draw(app: &App, bot: &Bot, choice: &str, prompt: &str, detail: &mut Value) -> Result<Option<Vec<u8>>, String> {
     match choice {

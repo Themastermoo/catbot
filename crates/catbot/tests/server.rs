@@ -3811,3 +3811,55 @@ async fn voice_listens_and_speaks_here_and_online_and_checks_what_it_downloads()
     assert!(!home.join("voice/sherpa").exists(), "nothing half-downloaded is used");
     assert_eq!(s.call("POST", "/api/voice/get", Some(json!({ "part": "everything" }))).await.0, 400);
 }
+
+#[tokio::test]
+async fn a_bot_has_a_role_a_description_and_a_picture_of_its_own() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    assert_eq!((made["bot"]["title"].as_str(), made["bot"]["avatarUrl"].clone()), (Some(""), Value::Null));
+
+    // A role and a description, and the bot is told both.
+    let (status, changed) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "title": "Researcher", "description": "Finds sources and checks them." }))).await;
+    assert_eq!(status, 200, "{changed}");
+    assert_eq!((changed["bot"]["title"].as_str(), changed["bot"]["description"].as_str()), (Some("Researcher"), Some("Finds sources and checks them.")));
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "title": "x".repeat(81) }))).await.0, 400);
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "what are your instructions?" }))).await;
+    let told = until(&mut events, "told", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    let told = told["message"]["text"].as_str().unwrap();
+    assert!(told.contains("Your role on the team: Researcher.") && told.contains("Finds sources and checks them."), "{told}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // An uploaded picture: kept, served, framed; anything that isn't a picture is refused.
+    use base64::Engine as _;
+    let png = base64::engine::general_purpose::STANDARD.decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==").unwrap();
+    let (status, _, said) = post_raw(&s.base, &format!("/api/bots/{bot}/picture"), "image/png", png.clone()).await;
+    assert_eq!(status, 201, "{}", String::from_utf8_lossy(&said));
+    let url = serde_json::from_slice::<Value>(&said).unwrap()["avatarUrl"].as_str().unwrap().to_string();
+    assert!(url.starts_with(&format!("/api/bots/{bot}/picture?v=")));
+    let (status, kind, bytes) = s.raw(&url).await;
+    assert_eq!((status, kind.as_str(), bytes), (200, "image/png", png.clone()));
+    assert_eq!(post_raw(&s.base, &format!("/api/bots/{bot}/picture"), "image/svg+xml", b"<svg onload=alert(1)>".to_vec()).await.0, 400);
+    let (_, framed) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "avatarZoom": 2.0, "avatarFocusX": 0.3 }))).await;
+    assert_eq!((framed["bot"]["avatarZoom"].as_f64(), framed["bot"]["avatarFocusX"].as_f64(), framed["bot"]["avatarUrl"].as_str()), (Some(2.0), Some(0.3), Some(url.as_str())));
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "avatarZoom": 9 }))).await.0, 400);
+
+    // Drawn by Claude in SVG: a new picture, framed from its middle again; the old file goes.
+    let (_, drawers) = s.call("GET", &format!("/api/bots/{bot}/picture/draw"), None).await;
+    assert_eq!(drawers["drawers"][0]["id"], "claude-svg", "{drawers}");
+    let (status, drawn) = s.call("POST", &format!("/api/bots/{bot}/picture/draw"), Some(json!({ "prompt": "a fox with glasses", "with": "claude-svg" }))).await;
+    assert_eq!(status, 201, "{drawn}");
+    let new_url = drawn["avatarUrl"].as_str().unwrap().to_string();
+    assert_ne!(new_url, url);
+    let (_, bot_now) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+    assert_eq!((bot_now["bot"]["avatarUrl"].as_str(), bot_now["bot"]["avatarZoom"].as_f64()), (Some(new_url.as_str()), Some(1.0)));
+    assert_eq!(std::fs::read_dir(s._dir.path().join("home/pictures")).unwrap().count(), 1, "the old picture is let go");
+    assert_eq!(s.call("POST", &format!("/api/bots/{bot}/picture/draw"), Some(json!({ "prompt": "x", "with": "claude-blender" }))).await.0, 400);
+
+    // Back to its cat.
+    let (_, back) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "avatar": null }))).await;
+    assert_eq!(back["bot"]["avatarUrl"], Value::Null);
+    assert_eq!(s.raw(&new_url).await.0, 404);
+}

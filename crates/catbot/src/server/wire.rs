@@ -131,8 +131,7 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         "threadId": conversation.id,
         "mainThreadId": conversation.id,
         "name": bot.name,
-        "title": "",
-        "description": "",
+
         "soul": bot.instructions,
         // Catbot's own: the folder it works in.
         "folder": bot.folder.display().to_string(),
@@ -167,6 +166,8 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         "waitingForTeammates": false,
         "tasks": tasks,
     });
+    // Its role, description and own picture (stage 23).
+    super::profiles::wire_into(store, &bot.id, &mut wire);
     if let Some(limit) = messages {
         let (list, more) = page(store, &conversation.id, None, limit)?;
         let (latest, _) = store.page(&conversation.id, None, 1)?;

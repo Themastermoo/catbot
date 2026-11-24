@@ -112,6 +112,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             respond(super::scheduled::route(&app, &method, &rest, bot, thread, body))
         }
         ["api", "bots"] if method == Method::POST => respond(create_bot(&app, req).await),
+        ["api", "bots", id, "picture"] if method == Method::GET && owns_bot(&app, id) => super::profiles::serve(&app, id).await,
         ["api", "bots", id, rest @ ..] if owns_bot(&app, id) => {
             let id = id.to_string();
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();

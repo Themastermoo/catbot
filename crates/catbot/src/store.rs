@@ -130,6 +130,25 @@ pub struct Bot {
     pub effort: Option<String>,
 }
 
+/// A bot's profile (stage 23): its role and description, its own picture (a file in `pictures/`)
+/// and how it's framed, and when it was put away in the archive.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Profile {
+    pub title: String,
+    pub description: String,
+    pub picture: Option<String>,
+    pub zoom: f64,
+    pub focus_x: f64,
+    pub focus_y: f64,
+    pub archived_at: Option<String>,
+}
+
+impl Default for Profile {
+    fn default() -> Self {
+        Profile { title: String::new(), description: String::new(), picture: None, zoom: 1.0, focus_x: 0.5, focus_y: 0.5, archived_at: None }
+    }
+}
+
 /// The colours a bot can wear: the interface's identity colours.
 pub const COLORS: [&str; 12] = ["green", "blue", "red", "orange", "purple", "cyan", "pink", "yellow", "teal", "coral", "silver", "chrome"];
 
@@ -518,7 +537,63 @@ impl Store {
             // Version 11: a chat a bot answered in since the person last looked (the Inbox's unread).
             conn.execute_batch("BEGIN; ALTER TABLE conversations ADD COLUMN unread INTEGER NOT NULL DEFAULT 0; PRAGMA user_version = 11; COMMIT;")?;
         }
+        if version < 12 {
+            // Version 12 (stage 23): a bot's profile (role, description, its own picture and how it's
+            // framed, put away in the archive), its chat folders, and the history of its settings.
+            conn.execute_batch(
+                "BEGIN;
+                 CREATE TABLE bot_profiles (
+                     bot_id      TEXT PRIMARY KEY REFERENCES bots(id) ON DELETE CASCADE,
+                     title       TEXT NOT NULL DEFAULT '',
+                     description TEXT NOT NULL DEFAULT '',
+                     picture     TEXT,
+                     zoom        REAL NOT NULL DEFAULT 1,
+                     focus_x     REAL NOT NULL DEFAULT 0.5,
+                     focus_y     REAL NOT NULL DEFAULT 0.5,
+                     archived_at TEXT
+                 );
+                 CREATE TABLE chat_folders (
+                     id       TEXT PRIMARY KEY,
+                     bot_id   TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                     name     TEXT NOT NULL,
+                     emoji    TEXT NOT NULL DEFAULT '',
+                     position INTEGER NOT NULL DEFAULT 0
+                 );
+                 ALTER TABLE conversations ADD COLUMN folder_id TEXT;
+                 CREATE TABLE bot_history (
+                     id     INTEGER PRIMARY KEY AUTOINCREMENT,
+                     bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+                     at     TEXT NOT NULL,
+                     what   TEXT NOT NULL,
+                     before TEXT NOT NULL
+                 );
+                 CREATE INDEX bot_history_by_bot ON bot_history(bot_id, id);
+                 PRAGMA user_version = 12;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self { conn, home: home.to_path_buf() })
+    }
+
+    /// A bot's profile (stage 23): the defaults when nothing was set.
+    pub fn profile(&self, bot_id: &str) -> Result<Profile, BoxError> {
+        Ok(self
+            .conn
+            .query_row("SELECT title, description, picture, zoom, focus_x, focus_y, archived_at FROM bot_profiles WHERE bot_id = ?1", [bot_id], |r| {
+                Ok(Profile { title: r.get(0)?, description: r.get(1)?, picture: r.get(2)?, zoom: r.get(3)?, focus_x: r.get(4)?, focus_y: r.get(5)?, archived_at: r.get(6)? })
+            })
+            .optional()?
+            .unwrap_or_default())
+    }
+
+    pub fn set_profile(&self, bot_id: &str, p: &Profile) -> Result<(), BoxError> {
+        self.conn.execute(
+            "INSERT INTO bot_profiles (bot_id, title, description, picture, zoom, focus_x, focus_y, archived_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(bot_id) DO UPDATE SET title = excluded.title, description = excluded.description, picture = excluded.picture,
+               zoom = excluded.zoom, focus_x = excluded.focus_x, focus_y = excluded.focus_y, archived_at = excluded.archived_at",
+            params![bot_id, p.title, p.description, p.picture, p.zoom, p.focus_x, p.focus_y, p.archived_at],
+        )?;
+        Ok(())
     }
 
     /// Records what a turn used.
@@ -1475,7 +1550,7 @@ mod tests {
         assert_eq!((bot.mark, bot.color), (Mark::CatHead, None));
         assert_eq!(bot.engine, "claude", "bots from before run on Claude");
         let version: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
-        assert_eq!(version, 11);
+        assert_eq!(version, 12);
         assert_eq!(bot.effort, None, "and think at their engine's own level");
         // And keys for the chat APIs.
         assert_eq!(store.engine_key("xai").unwrap(), None);
