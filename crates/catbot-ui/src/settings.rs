@@ -126,6 +126,27 @@ pub fn BotSettings(bot: Bot) -> Element {
         });
     };
 
+    let mut confirm_archive = use_signal(|| false);
+    let archive_id = bot.id.clone();
+    let archive = move |_| {
+        let id = archive_id.clone();
+        let mut state = state;
+        saving.set(true);
+        // As deleting: the panel closes when its bot leaves the list, often before the answer.
+        dioxus::core::spawn_forever(async move {
+            match api::post(&format!("/api/bots/{id}/archive"), &json!({})).await {
+                Ok(_) => {
+                    ui.settings_open.set(false);
+                    state.write().apply(&json!({ "kind": "bot.deleted", "botId": id }));
+                }
+                Err(err) => {
+                    let _ = problem.try_write().map(|mut p| *p = Some(err));
+                    let _ = saving.try_write().map(|mut s| *s = false);
+                    let _ = confirm_archive.try_write().map(|mut c| *c = false);
+                }
+            }
+        });
+    };
     let full = bot.approval_mode == "full";
     let channel = bot.channel.is_some();
     rsx! {
@@ -265,6 +286,23 @@ pub fn BotSettings(bot: Bot) -> Element {
                     // What changed, and Undo (stage 23.4).
                     if !channel {
                         crate::profile::HistoryCard { bot: bot.clone() }
+                    }
+                    // Putting it away (stage 23.5).
+                    if !channel {
+                        div { class: CARD, "data-archive-card": true,
+                            if confirm_archive() {
+                                p { class: "text-[13px] leading-relaxed text-ink", "Put {bot.name} away? It leaves the list and stops answering; its routines wait and it isn't a desktop pet. Its chats, folder and settings are kept. Bring it back from Archived bots under the list." }
+                                div { class: "mt-3 flex justify-end gap-2",
+                                    button { r#type: "button", class: "rounded-lg px-3 py-2 text-[13px] text-ink-secondary hover:bg-control", onclick: move |_| confirm_archive.set(false), "Keep it out" }
+                                    button { r#type: "button", disabled: saving(), "data-archive-confirm": true, class: "rounded-lg bg-ink px-3 py-2 text-[13px] font-medium text-app hover:opacity-90 disabled:opacity-50", onclick: archive, "Put {bot.name} away" }
+                                }
+                            } else {
+                                button { r#type: "button", "data-archive-bot": true, class: "flex items-center gap-2 text-[13px] text-ink-secondary hover:text-ink hover:underline", onclick: move |_| confirm_archive.set(true),
+                                    Glyph { d: "M3 3h18v5H3zM5 8v11a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8M10 12h4", size: 14 }
+                                    "Put this bot away in the archive…"
+                                }
+                            }
+                        }
                     }
                     // Deleting.
                     div { class: CARD,

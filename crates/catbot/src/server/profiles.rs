@@ -11,6 +11,9 @@
 //! - `GET  /api/bots/:id/picture`: the picture (also at the remote door).
 //! - `GET  /api/bots/:id/picture/draw`: the AIs that can draw one.
 //! - `POST /api/bots/:id/picture/draw {prompt, with}`: has one drawn.
+//! - `POST /api/bots/:id/archive` and `…/unarchive` (stage 23.5): put a bot away, or bring it
+//!   back. Put away, it's out of the lists, doesn't answer, its routines don't run and it isn't a
+//!   desktop pet; its chats, folder and settings are kept. `GET /api/archived-bots` lists them.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -213,6 +216,62 @@ pub fn upload(app: &Arc<App>, bot: &Bot, bytes: Bytes) -> Answer {
     let profile = keep_picture(app, &bot.id, &bytes)?;
     app.announce_bot(&bot.id);
     Ok((StatusCode::CREATED, json!({ "avatarUrl": picture_url(&bot.id, &profile) })))
+}
+
+/// Whether the bot is put away in the archive.
+pub fn is_archived(app: &App, bot_id: &str) -> bool {
+    of(app, bot_id).archived_at.is_some()
+}
+
+/// Puts a bot away: not while it's working, nor while it's the Chief of Staff or in a channel.
+pub fn archive(app: &Arc<App>, bot: &Bot) -> Answer {
+    let chats = app.try_store(|store| store.conversations(&bot.id)).map_err(fail)?;
+    if chats.iter().any(|c| app.turns.busy(&c.id)) {
+        return Err((StatusCode::CONFLICT, format!("{} is working; stop it first", bot.name)));
+    }
+    if app.with_store(|store| Ok(super::chief::is_chief_in(store, &bot.id))).unwrap_or(false) {
+        return Err((StatusCode::CONFLICT, format!("{} is the Chief of Staff: choose another one first", bot.name)));
+    }
+    if let Some(channel) = app.try_store(|store| store.channels()).map_err(fail)?.into_iter().find(|c| c.members.contains(&bot.id)) {
+        return Err((StatusCode::CONFLICT, format!("{} is in the channel {}: take it out first", bot.name, channel.name)));
+    }
+    let mut profile = of(app, &bot.id);
+    profile.archived_at = Some(chrono::Utc::now().to_rfc3339());
+    app.try_store(|store| store.set_profile(&bot.id, &profile)).map_err(fail)?;
+    app.try_store(|store| super::pets::set(store, &bot.id, false)).map_err(fail)?;
+    app.hub.send(json!({ "kind": "bot.deleted", "botId": bot.id }));
+    app.hub.send(json!({ "kind": "archived-bots" }));
+    Ok((StatusCode::OK, json!({ "ok": true })))
+}
+
+/// Brings a bot back from the archive, where it was.
+pub fn unarchive(app: &Arc<App>, bot: &Bot) -> Answer {
+    let mut profile = of(app, &bot.id);
+    profile.archived_at = None;
+    app.try_store(|store| store.set_profile(&bot.id, &profile)).map_err(fail)?;
+    app.announce_bot(&bot.id);
+    app.hub.send(json!({ "kind": "archived-bots" }));
+    let wire = app.try_store(|store| app.wire_bot(store, bot, Some(50))).map_err(fail)?;
+    Ok((StatusCode::OK, json!({ "bot": wire })))
+}
+
+/// `GET /api/archived-bots`: the bots put away, newest first.
+pub fn archived(app: &App) -> Answer {
+    let list = app
+        .try_store(|store| {
+            let mut found = Vec::new();
+            for bot in store.all_bots()? {
+                let profile = store.profile(&bot.id)?;
+                if let Some(at) = profile.archived_at.clone() {
+                    found.push((at.clone(), json!({ "id": bot.id, "name": bot.name, "title": profile.title, "color": super::wire::color_of(&bot), "mark": bot.mark.as_str(), "avatarUrl": picture_url(&bot.id, &profile), "archivedAt": at })));
+                }
+            }
+            Ok(found)
+        })
+        .map_err(fail)?;
+    let mut list = list;
+    list.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok((StatusCode::OK, json!({ "bots": list.into_iter().map(|(_, v)| v).collect::<Vec<_>>() })))
 }
 
 #[cfg(test)]

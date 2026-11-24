@@ -256,6 +256,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                     }
                 }
             }
+            crate::profile::ArchivedBots {}
             crate::departments::Dialogs { open: department_dialog }
             Footer { bot_count: bots.read().iter().filter(|b| b.channel.is_none()).count(), on_open: move |o| match o {
                 // Settings belongs to the app (the chat opens it too).

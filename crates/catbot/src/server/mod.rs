@@ -436,6 +436,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             };
             respond(limits::route(&app, &method, body, true).await)
         }
+        ["api", "archived-bots"] if method == Method::GET => respond(profiles::archived(&app)),
         ["api", "handoffs"] if method == Method::GET => respond(handoffs::route(&app, None)),
         ["api", "voice", rest @ ..] => {
             // Talking to bots and hearing them (stage 22).
@@ -867,6 +868,8 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             let bytes = axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024 + 1).await.map_err(|_| bad("the picture is too big; keep it under 8 MB"))?;
             profiles::upload(app, &bot, bytes)
         }
+        (Method::POST, ["archive"]) => profiles::archive(app, &bot),
+        (Method::POST, ["unarchive"]) => profiles::unarchive(app, &bot),
         (Method::GET, ["picture", "draw"]) => Ok((StatusCode::OK, json!({ "drawers": profiles::drawers(app) }))),
         (Method::POST, ["picture", "draw"]) => profiles::draw(app, &bot, &json_body(req).await?).await,
         (Method::POST, ["interrupt"]) => {
@@ -974,6 +977,9 @@ fn apply_changes(bot: &mut Bot, body: &Value) -> Result<(), (StatusCode, String)
 
 /// `POST /api/bots/:id/messages`: keep the person's message, show it everywhere, start the turn.
 fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
+    if profiles::is_archived(app, &bot.id) {
+        return Err((StatusCode::GONE, format!("{} is put away in the archive: bring it back to talk to it", bot.name)));
+    }
     let attached = attachments::for_message(app, &bot, &body["attachments"])?;
     let text = body["text"].as_str().map(str::trim).unwrap_or("").to_string();
     if text.is_empty() && attached.is_empty() {

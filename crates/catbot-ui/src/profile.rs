@@ -322,3 +322,90 @@ pub fn HistoryCard(bot: Bot) -> Element {
         }
     }
 }
+
+/// The bots put away in the archive, under the sidebar's list (stage 23.5): each can be brought
+/// back, or deleted for good.
+#[component]
+pub fn ArchivedBots() -> Element {
+    let state = use_context::<Signal<crate::live::State>>();
+    let mut list = use_signal(Vec::<Value>::new);
+    let mut open = use_signal(|| false);
+    let mut confirm = use_signal(|| None::<String>);
+    let mut problem = use_signal(|| None::<String>);
+    use_effect(move || {
+        let _ = state.read().archived_changed;
+        spawn(async move {
+            if let Ok(found) = api::get("/api/archived-bots").await {
+                list.set(found["bots"].as_array().cloned().unwrap_or_default());
+            }
+        });
+    });
+    let bots = list.read().clone();
+    if bots.is_empty() {
+        return rsx! {};
+    }
+    let count = bots.len();
+    rsx! {
+        div { class: "px-3 pt-2", "data-archived-bots": true,
+            button { r#type: "button", "aria-expanded": "{open()}", "data-archived-bots-toggle": true,
+                class: "flex w-full items-center gap-1.5 rounded-md px-2 py-1 text-left text-[12px] text-ink-secondary hover:bg-raised/40 hover:text-ink",
+                onclick: move |_| open.toggle(),
+                crate::chats::Chevron { open: open(), size: 11 }
+                span { class: "flex-1", "Archived bots" }
+                span { class: "text-[10px] opacity-60", "{count}" }
+            }
+            if open() {
+                for b in bots {
+                    {
+                        let id = b["id"].as_str().unwrap_or_default().to_string();
+                        let name = b["name"].as_str().unwrap_or_default().to_string();
+                        let picture = b["avatarUrl"].as_str().map(|url| Picture { url: url.to_string(), zoom: 1.0, x: 0.5, y: 0.5 });
+                        let color = b["color"].as_str().unwrap_or("blue").to_string();
+                        let mark = b["mark"].as_str().unwrap_or("cat-head").to_string();
+                        let initial = name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
+                        let (back_id, delete_id) = (id.clone(), id.clone());
+                        let asking = confirm() == Some(id.clone());
+                        rsx! {
+                            div { key: "{id}", class: "flex items-center gap-2 rounded-md px-2 py-1.5 text-[13px]", "data-archived-bot": "{name}",
+                                BotMark { picture, color, initial, size: 24, mark }
+                                span { class: "min-w-0 flex-1 truncate text-ink-secondary", "{name}" }
+                                if asking {
+                                    button { r#type: "button", class: QUIET, onclick: move |_| confirm.set(None), "Keep" }
+                                    button { r#type: "button", class: "rounded-lg bg-danger px-2 py-1 text-[12px] font-medium text-white", "data-archived-delete-confirm": true,
+                                        onclick: move |_| {
+                                            confirm.set(None);
+                                            let id = delete_id.clone();
+                                            spawn(async move {
+                                                match api::call("DELETE", &format!("/api/bots/{id}"), None).await {
+                                                    Ok(_) => list.write().retain(|b| b["id"] != id.as_str()),
+                                                    Err(err) => problem.set(Some(err)),
+                                                }
+                                            });
+                                        },
+                                        "Delete for good"
+                                    }
+                                } else {
+                                    button { r#type: "button", class: QUIET, "data-archived-back": "{name}",
+                                        onclick: move |_| {
+                                            let id = back_id.clone();
+                                            spawn(async move {
+                                                if let Err(err) = api::post(&format!("/api/bots/{id}/unarchive"), &json!({})).await {
+                                                    problem.set(Some(err));
+                                                }
+                                            });
+                                        },
+                                        "Bring back"
+                                    }
+                                    button { r#type: "button", class: QUIET, title: "Delete", "aria-label": "Delete {name}", onclick: move |_| confirm.set(Some(id.clone())), "×" }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(err) = problem() {
+                    p { role: "alert", class: "px-2 text-[12px] text-danger", "{err}" }
+                }
+            }
+        }
+    }
+}

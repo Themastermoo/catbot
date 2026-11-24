@@ -71,6 +71,8 @@ pub struct State {
     pub scheduled_changed: u64,
     /// Counts `voice` frames: voice settings, keys or downloads changed.
     pub voice_changed: u64,
+    /// Counts `archived-bots` frames: a bot was put away or brought back.
+    pub archived_changed: u64,
 }
 
 /// What a frame asks of the app beyond changing `State`.
@@ -143,6 +145,7 @@ impl State {
             Some("team-map") => self.map_changed += 1,
             Some("scheduled") => self.scheduled_changed += 1,
             Some("voice") => self.voice_changed += 1,
+            Some("archived-bots") => self.archived_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();
                 self.bots.retain(|b| b.id != id);

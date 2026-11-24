@@ -3924,3 +3924,44 @@ async fn a_bots_settings_are_kept_in_its_history_and_undone() {
     assert_eq!(whats[0], "Undo: Name, Instructions, Role", "the undo is a change too");
     assert_eq!(s.call("POST", &format!("/api/bots/{bot}/history/999999/undo"), None).await.0, 404);
 }
+
+#[tokio::test]
+async fn a_bot_is_put_away_and_brought_back() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let mut ids = Vec::new();
+    for name in ["Scout", "Kiwi"] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name }))).await;
+        ids.push(made["bot"]["id"].as_str().unwrap().to_string());
+    }
+    let (scout, kiwi) = (ids[0].clone(), ids[1].clone());
+    let listed = || async { s.call("GET", "/api/bots", None).await.1["bots"].as_array().unwrap().iter().filter_map(|b| b["name"].as_str().map(str::to_string)).collect::<Vec<_>>() };
+
+    // Not while it's in a channel.
+    let (_, channel) = s.call("POST", "/api/channels", Some(json!({ "name": "Garden", "members": [kiwi], "lead": kiwi }))).await;
+    let (status, refused) = s.call("POST", &format!("/api/bots/{kiwi}/archive"), None).await;
+    assert_eq!(status, 409);
+    assert!(refused["error"].as_str().unwrap().contains("channel Garden"), "{refused}");
+    s.call("DELETE", &format!("/api/bots/{}", channel["bot"]["id"].as_str().unwrap()), None).await;
+
+    // Put away: out of the list, gone from the window, not answering, listed with the archived.
+    assert_eq!(s.call("POST", &format!("/api/bots/{scout}/archive"), None).await.0, 200);
+    until(&mut events, "gone", |f| f["kind"] == "bot.deleted" && f["botId"] == scout.as_str()).await;
+    let names = listed().await;
+    assert!(names.contains(&"Kiwi".to_string()) && !names.contains(&"Scout".to_string()), "{names:?}");
+    assert_eq!(s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": "hello?" }))).await.0, 410);
+    let (_, archived) = s.call("GET", "/api/archived-bots", None).await;
+    assert_eq!(archived["bots"][0]["name"], "Scout", "{archived}");
+    // Its teammates aren't told about it.
+    s.call("POST", &format!("/api/bots/{kiwi}/messages"), Some(json!({ "text": "what are your instructions?" }))).await;
+    let told = until(&mut events, "told", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(!told["message"]["text"].as_str().unwrap().contains("Scout"), "{told}");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Brought back, as it was.
+    let (status, back) = s.call("POST", &format!("/api/bots/{scout}/unarchive"), None).await;
+    assert_eq!((status, back["bot"]["name"].as_str(), back["bot"]["archived"].as_bool()), (200, Some("Scout"), Some(false)));
+    assert!(listed().await.contains(&"Scout".to_string()));
+    assert!(s.call("GET", "/api/archived-bots", None).await.1["bots"].as_array().unwrap().is_empty());
+}

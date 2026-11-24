@@ -916,7 +916,18 @@ impl Store {
         folder
     }
 
+    /// The bots, but those put away in the archive (stage 23.5).
     pub fn bots(&self) -> Result<Vec<Bot>, BoxError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine, effort FROM bots
+             WHERE id NOT IN (SELECT bot_id FROM bot_profiles WHERE archived_at IS NOT NULL) ORDER BY name",
+        )?;
+        let bots = stmt.query_map([], bot_from_row)?.collect::<Result<_, _>>()?;
+        Ok(bots)
+    }
+
+    /// Every bot, those in the archive too.
+    pub fn all_bots(&self) -> Result<Vec<Bot>, BoxError> {
         let mut stmt = self.conn.prepare("SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine, effort FROM bots ORDER BY name")?;
         let bots = stmt.query_map([], bot_from_row)?.collect::<Result<_, _>>()?;
         Ok(bots)

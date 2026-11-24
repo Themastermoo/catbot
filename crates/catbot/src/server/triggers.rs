@@ -714,6 +714,9 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<
 /// A run the trigger's chat is too busy for is written down as skipped.
 pub fn start(app: &Arc<App>, trigger: &Trigger, source: &str, scheduled_for: Option<String>, extra: Option<&str>) -> Result<Run, String> {
     let bot = app.with_store(|store| store.bot_by_id(&trigger.bot_id)).flatten().ok_or("its bot is gone")?;
+    if super::profiles::is_archived(app, &bot.id) {
+        return Err(format!("{} is put away in the archive", bot.name));
+    }
     let mut run = Run {
         id: uuid::Uuid::new_v4().simple().to_string()[..12].to_string(),
         trigger_id: trigger.id.clone(),
