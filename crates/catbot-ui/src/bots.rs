@@ -93,6 +93,8 @@ pub struct Bot {
     pub picture: Option<crate::mascots::Picture>,
     /// Put away in the archive (stage 23.5).
     pub archived: bool,
+    /// Its chat folders, in order (stage 23.3).
+    pub folders: Vec<Folder>,
 }
 
 /// One of a bot's chats (their "task"), as the sidebar lists it.
@@ -106,6 +108,16 @@ pub struct Chat {
     pub archived: bool,
     /// The bot answered here since the person last looked.
     pub unread: bool,
+    /// The folder it's in, if any (stage 23.3).
+    pub folder: Option<String>,
+}
+
+/// One of a bot's chat folders (stage 23.3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Folder {
+    pub id: String,
+    pub name: String,
+    pub emoji: String,
 }
 
 impl Chat {
@@ -117,6 +129,7 @@ impl Chat {
             updated: wire["updatedAt"].as_f64().unwrap_or(0.0),
             archived: wire.get("archivedAt").is_some_and(|a| !a.is_null()),
             unread: wire["unread"] == true,
+            folder: wire["folderId"].as_str().map(str::to_string),
         })
     }
 }
@@ -210,6 +223,14 @@ impl Bot {
                 y: wire["avatarFocusY"].as_f64().unwrap_or(0.5),
             }),
             archived: wire["archived"] == true,
+            folders: wire["folders"]
+                .as_array()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|f| Some(Folder { id: f["id"].as_str()?.to_string(), name: f["name"].as_str().unwrap_or_default().to_string(), emoji: f["emoji"].as_str().unwrap_or_default().to_string() }))
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 

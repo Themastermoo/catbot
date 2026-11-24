@@ -8,7 +8,7 @@ use dioxus::prelude::*;
 use serde_json::json;
 
 use crate::api;
-use crate::bots::{Activity, Bot, Chat};
+use crate::bots::{Activity, Bot, Chat, Folder};
 use crate::chat::short_when;
 use crate::live::State;
 use crate::settings::Ui;
@@ -71,18 +71,50 @@ pub fn start(mut state: Signal<State>, mut ui: Ui, bot_id: String) {
 #[component]
 pub fn ChatList(bot: Bot, current: bool, query: String) -> Element {
     let mut archived_open = use_signal(|| false);
+    let mut adding = use_signal(|| false);
     let query = query.trim().to_lowercase();
     let filtering = !query.is_empty() && !bot.name.to_lowercase().contains(&query);
     let found = |c: &&Chat| !filtering || c.title.to_lowercase().contains(&query);
-    let listed: Vec<Chat> = bot.listed_chats().filter(found).cloned().collect();
+    // Chats in a folder that's gone count as in none.
+    let known = |c: &Chat| c.folder.as_ref().filter(|f| bot.folders.iter().any(|x| &x.id == *f)).cloned();
+    let loose: Vec<Chat> = bot.listed_chats().filter(found).filter(|c| known(c).is_none()).cloned().collect();
     let archived: Vec<Chat> = bot.chats.iter().filter(|c| c.archived).filter(found).cloned().collect();
     let open_id = current.then(|| bot.thread_id.clone());
     let count = archived.len();
     let folded = !archived_open() && !filtering;
+    let folders = bot.folders.clone();
+    let last = folders.len().saturating_sub(1);
+    let bot_id = bot.id.clone();
     rsx! {
         div { role: "group", "aria-label": "{bot.name} chats", "data-chat-list": "{bot.id}", class: "flex flex-col gap-px pb-1",
-            for chat in listed {
-                ChatRow { key: "{chat.id}", bot_id: bot.id.clone(), current: open_id.as_deref() == Some(chat.id.as_str()), chat }
+            for (i, folder) in folders.iter().cloned().enumerate() {
+                {
+                    let inside: Vec<Chat> = bot.listed_chats().filter(found).filter(|c| known(c).as_deref() == Some(folder.id.as_str())).cloned().collect();
+                    rsx! {
+                        FolderGroup { key: "{folder.id}", bot_id: bot.id.clone(), folder, chats: inside, folders: folders.clone(), open_id: open_id.clone(), first: i == 0, last: i == last, filtering }
+                    }
+                }
+            }
+            for chat in loose {
+                ChatRow { key: "{chat.id}", bot_id: bot.id.clone(), current: open_id.as_deref() == Some(chat.id.as_str()), chat, folders: folders.clone() }
+            }
+            if adding() {
+                NameBox { label: "New folder name", start: String::new(), on_done: move |name: Option<String>| {
+                    adding.set(false);
+                    let Some(name) = name else { return };
+                    let id = bot_id.clone();
+                    spawn(async move {
+                        let _ = api::post(&format!("/api/bots/{id}/folders"), &json!({ "name": name, "emoji": "📁" })).await;
+                    });
+                } }
+            } else if !filtering {
+                button {
+                    r#type: "button",
+                    "data-new-folder": true,
+                    class: "flex min-h-7 w-full items-center gap-1.5 rounded-md py-1 pl-6 pr-3 text-left text-[12px] text-ink-tertiary hover:bg-raised/30 hover:text-ink",
+                    onclick: move |_| adding.set(true),
+                    "+ New folder"
+                }
             }
             if count > 0 {
                 button {
@@ -97,7 +129,128 @@ pub fn ChatList(bot: Bot, current: bool, query: String) -> Element {
                 }
                 if !folded {
                     for chat in archived {
-                        ChatRow { key: "{chat.id}", bot_id: bot.id.clone(), current: open_id.as_deref() == Some(chat.id.as_str()), chat }
+                        ChatRow { key: "{chat.id}", bot_id: bot.id.clone(), current: open_id.as_deref() == Some(chat.id.as_str()), chat, folders: folders.clone() }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The emoji a folder can wear (their `FOLDER_EMOJI`).
+const FOLDER_EMOJI: [&str; 12] = ["📁", "💼", "🏠", "📬", "💡", "🚀", "🎨", "🧪", "📚", "🌱", "⭐", "🛠️"];
+
+/// A box to type a name in: Enter keeps it, Esc or leaving it empty doesn't.
+#[component]
+fn NameBox(label: &'static str, start: String, on_done: EventHandler<Option<String>>) -> Element {
+    let mut typed = use_signal(|| start.clone());
+    let mut done = use_signal(|| false);
+    let mut finish = move |keep: bool| {
+        if done() {
+            return;
+        }
+        done.set(true);
+        let name = typed.peek().trim().to_string();
+        on_done.call((keep && !name.is_empty()).then_some(name));
+    };
+    rsx! {
+        input {
+            "aria-label": "{label}",
+            "data-name-box": true,
+            maxlength: 60,
+            initial_value: "{start}",
+            class: "m-1 ml-6 min-w-0 rounded border border-accent/50 bg-inset px-2 py-1 text-[13px] text-ink outline-none",
+            onmounted: move |e| {
+                spawn(async move {
+                    let _ = e.set_focus(true).await;
+                });
+            },
+            oninput: move |e| typed.set(e.value()),
+            onkeydown: move |e| {
+                if e.key() == Key::Enter {
+                    e.prevent_default();
+                    finish(true);
+                } else if e.key() == Key::Escape {
+                    finish(false);
+                }
+            },
+            onblur: move |_| finish(true),
+        }
+    }
+}
+
+/// A folder's heading (open or folded, with its menu) and its chats.
+#[component]
+fn FolderGroup(bot_id: String, folder: Folder, chats: Vec<Chat>, folders: Vec<Folder>, open_id: Option<String>, first: bool, last: bool, filtering: bool) -> Element {
+    let mut open = use_signal(|| true);
+    let mut menu = use_signal(|| false);
+    let mut renaming = use_signal(|| false);
+    let path = format!("/api/bots/{bot_id}/folders/{}", folder.id);
+    let call = use_callback(move |(method, body): (&'static str, Option<serde_json::Value>)| {
+        let path = path.clone();
+        menu.set(false);
+        spawn(async move {
+            let _ = api::call(method, &path, body.as_ref()).await;
+        });
+    });
+    let shown = open() || filtering;
+    let count = chats.len();
+    if filtering && chats.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "relative", "data-folder": "{folder.name}",
+            div { class: "group/folder flex min-w-0 items-center rounded-md hover:bg-raised/40",
+                if renaming() {
+                    NameBox { label: "Folder name", start: folder.name.clone(), on_done: move |name: Option<String>| {
+                        renaming.set(false);
+                        if let Some(name) = name {
+                            call(("PATCH", Some(json!({ "name": name }))));
+                        }
+                    } }
+                } else {
+                    button {
+                        r#type: "button",
+                        "aria-expanded": "{shown}",
+                        "data-folder-toggle": "{folder.id}",
+                        class: "flex min-h-8 min-w-0 flex-1 items-center gap-1.5 py-1 pl-6 pr-1 text-left text-[13px] font-medium text-ink-secondary hover:text-ink",
+                        onclick: move |_| open.toggle(),
+                        span { class: "shrink-0 text-[13px] leading-none", if folder.emoji.is_empty() { "📁" } else { "{folder.emoji}" } }
+                        span { class: "min-w-0 flex-1 truncate", "{folder.name}" }
+                        span { class: "shrink-0 text-[10px] opacity-50", "{count}" }
+                        Chevron { open: shown, size: 11 }
+                    }
+                    button {
+                        r#type: "button",
+                        "aria-label": "Folder actions for {folder.name}",
+                        "data-folder-actions": "{folder.id}",
+                        class: "mr-0.5 flex size-6 shrink-0 items-center justify-center rounded text-ink-secondary opacity-0 hover:bg-raised hover:text-ink focus-visible:opacity-100 group-hover/folder:opacity-100 max-md:opacity-70",
+                        onclick: move |_| menu.toggle(),
+                        Dots {}
+                    }
+                }
+            }
+            if menu() {
+                div { class: "fixed inset-0 z-40", onclick: move |_| menu.set(false) }
+                div { role: "menu", class: "absolute right-1 top-8 z-50 w-[220px] {MENU_SHEET}",
+                    div { class: "grid grid-cols-6 gap-0.5 px-1 pb-1", "aria-label": "Emoji",
+                        for e in FOLDER_EMOJI {
+                            button { key: "{e}", r#type: "button", "data-folder-emoji": "{e}", class: if folder.emoji == e { "rounded-md bg-menu-hover py-1 text-[15px]" } else { "rounded-md py-1 text-[15px] hover:bg-menu-hover" },
+                                onclick: move |_| call(("PATCH", Some(json!({ "emoji": e })))),
+                                "{e}"
+                            }
+                        }
+                    }
+                    button { r#type: "button", role: "menuitem", class: MENU_ITEM, onclick: move |_| { menu.set(false); renaming.set(true); }, "Rename" }
+                    button { r#type: "button", role: "menuitem", class: MENU_ITEM, disabled: first, onclick: move |_| call(("PATCH", Some(json!({ "move": -1 })))), "Move up" }
+                    button { r#type: "button", role: "menuitem", class: MENU_ITEM, disabled: last, onclick: move |_| call(("PATCH", Some(json!({ "move": 1 })))), "Move down" }
+                    button { r#type: "button", role: "menuitem", "data-folder-delete": true, class: "{MENU_ITEM} text-danger", onclick: move |_| call(("DELETE", None)), "Delete folder (its chats stay)" }
+                }
+            }
+            if shown {
+                div { class: "flex flex-col gap-px pl-3",
+                    for chat in chats {
+                        ChatRow { key: "{chat.id}", bot_id: bot_id.clone(), current: open_id.as_deref() == Some(chat.id.as_str()), chat, folders: folders.clone() }
                     }
                 }
             }
@@ -114,7 +267,7 @@ enum Menu {
 }
 
 #[component]
-fn ChatRow(bot_id: String, chat: Chat, current: bool) -> Element {
+fn ChatRow(bot_id: String, chat: Chat, current: bool, #[props(default)] folders: Vec<Folder>) -> Element {
     let state = use_context::<Signal<State>>();
     let ui = use_context::<Ui>();
     let mut menu = use_signal(|| Menu::Closed);
@@ -136,7 +289,18 @@ fn ChatRow(bot_id: String, chat: Chat, current: bool) -> Element {
 
     let (open_bot, open_thread) = (bot_id.clone(), chat.id.clone());
     let path = format!("/api/bots/{bot_id}/tasks/{}", chat.id);
-    let (rename_path, archive_path, delete_path) = (path.clone(), path.clone(), path);
+    let (rename_path, archive_path, delete_path, folder_path) = (path.clone(), path.clone(), path.clone(), path);
+    // Into one of the bot's folders, or out of them (stage 23.3).
+    let put = use_callback(move |folder: Option<String>| {
+        menu.set(Menu::Closed);
+        let path = folder_path.clone();
+        spawn(async move {
+            if let Err(err) = api::call("PATCH", &path, Some(&json!({ "folderId": folder }))).await {
+                problem.set(Some(err));
+            }
+        });
+    });
+    let in_folder = chat.folder.clone();
     let input_id = format!("rename-{}", chat.id);
     let select_input = format!(r#"const box = document.getElementById("{input_id}"); if (box) {{ box.focus(); box.select(); }}"#);
 
@@ -261,6 +425,26 @@ fn ChatRow(bot_id: String, chat: Chat, current: bool) -> Element {
                             },
                             Icon { path: "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" }
                             "Rename"
+                        }
+                        if !folders.is_empty() {
+                            div { class: "px-2 pt-1 text-[11px] font-medium text-ink-tertiary", "Move to folder" }
+                            for f in folders.iter().cloned() {
+                                {
+                                    let here = in_folder.as_deref() == Some(f.id.as_str());
+                                    let id = f.id.clone();
+                                    rsx! {
+                                        button { key: "{f.id}", r#type: "button", role: "menuitem", "data-move-to": "{f.name}", class: MENU_ITEM, disabled: here,
+                                            onclick: move |_| put(Some(id.clone())),
+                                            span { class: "w-4 text-center", if f.emoji.is_empty() { "📁" } else { "{f.emoji}" } }
+                                            "{f.name}"
+                                        }
+                                    }
+                                }
+                            }
+                            if in_folder.is_some() {
+                                button { r#type: "button", role: "menuitem", "data-move-out": true, class: MENU_ITEM, onclick: move |_| put(None), span { class: "w-4" } "Out of the folder" }
+                            }
+                            div { class: "my-0.5 border-t border-hairline/50" }
                         }
                         button {
                             r#type: "button",

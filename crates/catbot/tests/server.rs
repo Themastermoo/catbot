@@ -3863,3 +3863,38 @@ async fn a_bot_has_a_role_a_description_and_a_picture_of_its_own() {
     assert_eq!(back["bot"]["avatarUrl"], Value::Null);
     assert_eq!(s.raw(&new_url).await.0, 404);
 }
+
+#[tokio::test]
+async fn a_bots_chats_go_in_folders() {
+    let s = setup().await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let first = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let (_, second) = s.call("POST", &format!("/api/bots/{bot}/tasks"), Some(json!({}))).await;
+    let second = second["task"]["threadId"].as_str().or(second["threadId"].as_str()).unwrap().to_string();
+
+    let (status, garden) = s.call("POST", &format!("/api/bots/{bot}/folders"), Some(json!({ "name": "Garden", "emoji": "🌱" }))).await;
+    assert_eq!(status, 201, "{garden}");
+    let garden = garden["folder"]["id"].as_str().unwrap().to_string();
+    let (_, shed) = s.call("POST", &format!("/api/bots/{bot}/folders"), Some(json!({ "name": "Shed" }))).await;
+    let shed = shed["folder"]["id"].as_str().unwrap().to_string();
+    assert_eq!(s.call("POST", &format!("/api/bots/{bot}/folders"), Some(json!({ "name": "  " }))).await.0, 400);
+    assert_eq!(s.call("POST", &format!("/api/bots/{bot}/folders"), Some(json!({ "name": "x", "emoji": "abc" }))).await.0, 400);
+
+    // A chat goes in a folder; a folder moves and is renamed.
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{bot}/tasks/{second}"), Some(json!({ "folderId": garden }))).await.0, 200);
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{bot}/tasks/{first}"), Some(json!({ "folderId": "fold-nope" }))).await.0, 404);
+    s.call("PATCH", &format!("/api/bots/{bot}/folders/{shed}"), Some(json!({ "move": -1, "name": "Tool shed", "emoji": "🛠️" }))).await;
+    let (_, got) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+    let folders: Vec<(&str, &str)> = got["bot"]["folders"].as_array().unwrap().iter().map(|f| (f["name"].as_str().unwrap(), f["emoji"].as_str().unwrap())).collect();
+    assert_eq!(folders, [("Tool shed", "🛠️"), ("Garden", "🌱")]);
+    let in_folder = |bot: &Value, thread: &str| bot["tasks"].as_array().unwrap().iter().find(|t| t["threadId"] == thread).unwrap()["folderId"].clone();
+    assert_eq!(in_folder(&got["bot"], &second), json!(garden));
+    assert_eq!(in_folder(&got["bot"], &first), Value::Null);
+
+    // Taking a folder away leaves its chats, out of any folder.
+    assert_eq!(s.call("DELETE", &format!("/api/bots/{bot}/folders/{garden}"), None).await.0, 200);
+    let (_, got) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+    assert_eq!(got["bot"]["folders"].as_array().unwrap().len(), 1);
+    assert_eq!(in_folder(&got["bot"], &second), Value::Null);
+}

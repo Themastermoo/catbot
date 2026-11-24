@@ -387,7 +387,7 @@ fn BotRow(
     let waiting = bot.activity == Activity::WaitingOnYou;
     let working = bot.activity == Activity::Working;
     // The arrow shows once there's more than one chat to choose between.
-    let has_list = bot.listed_chats().count() > 1 || bot.chats.iter().any(|c| c.archived);
+    let has_list = bot.listed_chats().count() > 1 || bot.chats.iter().any(|c| c.archived) || !bot.folders.is_empty();
     let expanded = has_list && unfolded;
     let surface = if selected && !expanded {
         "[--row:var(--color-raised)] bg-[var(--row)]"

@@ -119,7 +119,18 @@ pub fn task(bot: &Bot, conversation: &Conversation, activity: &'static str) -> V
 pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<usize>) -> Result<Value, BoxError> {
     let conversation = store.ensure_conversation(&bot.id)?;
     let conversations = store.conversations(&bot.id)?;
-    let tasks: Vec<Value> = conversations.iter().map(|c| task(bot, c, activity(&c.id))).collect();
+    // Its chat folders (stage 23.3), and which chat is in which.
+    let in_folder = store.chat_folder_map(&bot.id)?;
+    let tasks: Vec<Value> = conversations
+        .iter()
+        .map(|c| {
+            let mut t = task(bot, c, activity(&c.id));
+            if let Some(folder) = in_folder.get(&c.id) {
+                t["folderId"] = json!(folder);
+            }
+            t
+        })
+        .collect();
     let activity = busiest(conversations.iter().map(|c| activity(&c.id)));
     let busy = activity != "idle";
     let created = epoch_ms(&bot.created_at);
@@ -168,6 +179,7 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
     });
     // Its role, description and own picture (stage 23).
     super::profiles::wire_into(store, &bot.id, &mut wire);
+    wire["folders"] = json!(store.chat_folders(&bot.id)?);
     if let Some(limit) = messages {
         let (list, more) = page(store, &conversation.id, None, limit)?;
         let (latest, _) = store.page(&conversation.id, None, 1)?;

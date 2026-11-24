@@ -39,6 +39,7 @@ pub mod pets;
 pub mod profiles;
 pub mod pages;
 pub mod events;
+pub mod folders;
 pub mod hooks;
 pub mod hub;
 pub mod memory;
@@ -856,6 +857,10 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
             Ok((StatusCode::OK, json!({ "ok": true })))
         }
         (Method::GET, ["runs", rest @ ..]) => runs::route(app, &bot, rest),
+        (method @ (Method::POST | Method::PATCH | Method::DELETE), ["folders", rest @ ..]) => {
+            let body = if method == Method::DELETE { json!({}) } else { json_body(req).await? };
+            folders::route(app, &bot, &method, rest, body)
+        }
         (Method::POST, ["picture"]) => {
             let bytes = axum::body::to_bytes(req.into_body(), 8 * 1024 * 1024 + 1).await.map_err(|_| bad("the picture is too big; keep it under 8 MB"))?;
             profiles::upload(app, &bot, bytes)
@@ -1122,6 +1127,9 @@ fn change_chat(app: &Arc<App>, bot: Bot, thread: &str, body: Value) -> Answer {
     }
     if let Some(archived) = body.get("archivedAt") {
         app.try_store(|store| store.set_archived(&conversation.id, !archived.is_null())).map_err(fail)?;
+    }
+    if let Some(folder) = body.get("folderId") {
+        folders::put(app, &bot, &conversation.id, folder)?;
     }
     let conversation = chat_of(app, &bot, thread)?;
     let task = wire::task(&bot, &conversation, app.chat_activity(&conversation.id));

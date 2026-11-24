@@ -149,6 +149,14 @@ impl Default for Profile {
     }
 }
 
+/// A folder a bot's chats can be put in (stage 23.3, MausBot's projects).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ChatFolder {
+    pub id: String,
+    pub name: String,
+    pub emoji: String,
+}
+
 /// The colours a bot can wear: the interface's identity colours.
 pub const COLORS: [&str; 12] = ["green", "blue", "red", "orange", "purple", "cyan", "pink", "yellow", "teal", "coral", "silver", "chrome"];
 
@@ -573,6 +581,52 @@ impl Store {
             )?;
         }
         Ok(Self { conn, home: home.to_path_buf() })
+    }
+
+    /// A bot's chat folders (stage 23.3), in their order.
+    pub fn chat_folders(&self, bot_id: &str) -> Result<Vec<ChatFolder>, BoxError> {
+        let mut stmt = self.conn.prepare("SELECT id, name, emoji FROM chat_folders WHERE bot_id = ?1 ORDER BY position, rowid")?;
+        let rows = stmt.query_map([bot_id], |r| Ok(ChatFolder { id: r.get(0)?, name: r.get(1)?, emoji: r.get(2)? }))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    pub fn add_chat_folder(&self, bot_id: &str, name: &str, emoji: &str) -> Result<ChatFolder, BoxError> {
+        let id = format!("fold-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        let next: i64 = self.conn.query_row("SELECT COALESCE(MAX(position), -1) + 1 FROM chat_folders WHERE bot_id = ?1", [bot_id], |r| r.get(0))?;
+        self.conn.execute("INSERT INTO chat_folders (id, bot_id, name, emoji, position) VALUES (?1, ?2, ?3, ?4, ?5)", params![id, bot_id, name, emoji, next])?;
+        Ok(ChatFolder { id, name: name.to_string(), emoji: emoji.to_string() })
+    }
+
+    pub fn change_chat_folder(&self, id: &str, name: &str, emoji: &str) -> Result<(), BoxError> {
+        self.conn.execute("UPDATE chat_folders SET name = ?2, emoji = ?3 WHERE id = ?1", params![id, name, emoji])?;
+        Ok(())
+    }
+
+    /// Takes a folder away; its chats stay, out of any folder.
+    pub fn delete_chat_folder(&self, id: &str) -> Result<(), BoxError> {
+        self.conn.execute("UPDATE conversations SET folder_id = NULL WHERE folder_id = ?1", [id])?;
+        self.conn.execute("DELETE FROM chat_folders WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Puts a bot's folders in this order (ids not listed keep their place after).
+    pub fn order_chat_folders(&self, ids: &[String]) -> Result<(), BoxError> {
+        for (i, id) in ids.iter().enumerate() {
+            self.conn.execute("UPDATE chat_folders SET position = ?2 WHERE id = ?1", params![id, i as i64])?;
+        }
+        Ok(())
+    }
+
+    pub fn set_chat_folder(&self, conversation_id: &str, folder: Option<&str>) -> Result<(), BoxError> {
+        self.conn.execute("UPDATE conversations SET folder_id = ?2 WHERE id = ?1", params![conversation_id, folder])?;
+        Ok(())
+    }
+
+    /// Which folder each of a bot's chats is in.
+    pub fn chat_folder_map(&self, bot_id: &str) -> Result<std::collections::HashMap<String, String>, BoxError> {
+        let mut stmt = self.conn.prepare("SELECT id, folder_id FROM conversations WHERE bot_id = ?1 AND folder_id IS NOT NULL")?;
+        let rows = stmt.query_map([bot_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
     }
 
     /// A bot's profile (stage 23): the defaults when nothing was set.
