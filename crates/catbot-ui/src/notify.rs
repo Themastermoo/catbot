@@ -99,7 +99,33 @@ pub fn on_frame(frame: &Value, prefs: Prefs, state: Signal<State>, ui: Ui) {
     let chat = bot.chats.iter().find(|c| c.id == thread).map(|c| c.title.as_str());
     let name = frame["line"]["from"]["name"].as_str().unwrap_or(&bot.name).to_string();
     let (title, body) = words(kind, frame, &name, chat, &bot.preview());
-    show(&title, &body, bot.id.clone(), thread);
+    // With the bot's own picture, when it has one (stage 23).
+    let (id, picture) = (bot.id.clone(), bot.picture.as_ref().map(|p| p.url.clone()));
+    spawn(async move {
+        let icon = match picture {
+            Some(url) => picture_file(&url).await,
+            None => None,
+        };
+        show(&title, &body, id, thread, icon);
+    });
+}
+
+/// A bot's picture as a file the system's notifications can show, kept in the temporary folder.
+#[cfg(all(feature = "desktop", not(target_os = "android")))]
+async fn picture_file(url: &str) -> Option<String> {
+    let name: String = url.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+    let path = std::env::temp_dir().join("catbot-pictures").join(format!("{name}.img"));
+    if !path.is_file() {
+        let bytes = crate::api::bytes(url).await.ok()?;
+        std::fs::create_dir_all(path.parent()?).ok()?;
+        std::fs::write(&path, bytes).ok()?;
+    }
+    Some(path.display().to_string())
+}
+
+#[cfg(not(all(feature = "desktop", not(target_os = "android"))))]
+async fn picture_file(_url: &str) -> Option<String> {
+    None
 }
 
 #[cfg(all(feature = "desktop", not(target_os = "android")))]
@@ -117,9 +143,12 @@ fn window_in_front() -> bool {
 static CLICKED: std::sync::Mutex<Vec<(String, String)>> = std::sync::Mutex::new(Vec::new());
 
 #[cfg(all(feature = "desktop", not(target_os = "android")))]
-fn show(title: &str, body: &str, bot: String, thread: String) {
+fn show(title: &str, body: &str, bot: String, thread: String, picture: Option<String>) {
     let mut note = notify_rust::Notification::new();
     note.summary(title).body(body).appname("Catbot").icon("catbot").action("default", "Open");
+    if let Some(path) = &picture {
+        note.image_path(path);
+    }
     // Shown, then waited on in a thread of its own (the wait blocks until it's clicked or closed).
     std::thread::spawn(move || {
         let Ok(handle) = note.show() else { return };
@@ -134,7 +163,7 @@ fn show(title: &str, body: &str, bot: String, thread: String) {
 }
 
 #[cfg(not(all(feature = "desktop", not(target_os = "android"))))]
-fn show(_title: &str, _body: &str, _bot: String, _thread: String) {}
+fn show(_title: &str, _body: &str, _bot: String, _thread: String, _picture: Option<String>) {}
 
 /// Opens the chats of clicked notifications, and brings the window forward: for as long as the
 /// app runs.

@@ -201,7 +201,13 @@ pub fn BotMark(
     size: u32,
     #[props(default = "cat-head".to_string())] mark: String,
     #[props(default = "idle".to_string())] state: String,
+    /// The bot's own picture (stage 23): shown instead of its mark.
+    #[props(default)]
+    picture: Option<Picture>,
 ) -> Element {
+    if let Some(picture) = picture {
+        return rsx! { PictureMark { picture, size, color } };
+    }
     match mark.as_str() {
         "letter" => rsx! { LetterMark { color, initial, size, state } },
         "cat-sitting" => rsx! { CatSitting { color, size, state } },
@@ -373,6 +379,64 @@ mod tests {
             let tempo: f64 = one["--cat-k:".len()..one.find(';').unwrap()].parse().unwrap();
             assert!((0.85..=1.2).contains(&tempo), "{one}");
             assert!(!all[..i].contains(one), "picture {i} moves exactly like an earlier one");
+        }
+    }
+}
+
+/// A bot's own picture and how it's framed in its circle (stage 23).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Picture {
+    pub url: String,
+    /// 1 to 3.
+    pub zoom: f64,
+    /// What's in the middle, 0 to 1 across and down.
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Picture {
+    /// How the image sits in its circle.
+    pub fn style(&self) -> String {
+        let (x, y) = (self.x * 100.0, self.y * 100.0);
+        format!("width:100%;height:100%;object-fit:cover;object-position:{x:.1}% {y:.1}%;transform:scale({:.3});transform-origin:{x:.1}% {y:.1}%", self.zoom)
+    }
+}
+
+/// Where the picture can be drawn from: its address in a browser; in the apps (which reach Catbot
+/// on their own), its bytes, fetched once and kept.
+pub async fn picture_source(url: &str) -> Option<String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        Some(url.to_string())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use base64::Engine as _;
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        static KEPT: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
+        if let Some(found) = KEPT.lock().ok()?.as_ref().and_then(|k| k.get(url).cloned()) {
+            return Some(found);
+        }
+        let bytes = crate::api::bytes(url).await.ok()?;
+        let kind = if bytes.starts_with(&[0xff, 0xd8]) { "image/jpeg" } else if bytes.starts_with(b"GIF8") { "image/gif" } else if bytes.starts_with(b"RIFF") { "image/webp" } else { "image/png" };
+        let data = format!("data:{kind};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes));
+        KEPT.lock().ok()?.get_or_insert_with(HashMap::new).insert(url.to_string(), data.clone());
+        Some(data)
+    }
+}
+
+/// The picture in its circle, on the bot's colour while it loads.
+#[component]
+fn PictureMark(picture: Picture, size: u32, color: String) -> Element {
+    let url = picture.url.clone();
+    let source = use_resource(use_reactive!(|url| async move { picture_source(&url).await }));
+    let style = picture.style();
+    rsx! {
+        span { "data-bot-picture": true, class: "inline-flex shrink-0 overflow-hidden rounded-full", style: "width:{size}px;height:{size}px;background:var(--identity-{color})",
+            if let Some(Some(src)) = source() {
+                img { src: "{src}", alt: "", draggable: "false", style: "{style}" }
+            }
         }
     }
 }

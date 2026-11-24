@@ -284,7 +284,7 @@ fn Pick(bot: Bot, ticked: bool, note: String, on_toggle: EventHandler<()>) -> El
     rsx! {
         label { class: "flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-raised/60", "data-pick-bot": "{bot.id}",
             input { r#type: "checkbox", checked: ticked, class: "size-4 accent-[var(--color-accent)]", onchange: move |_| on_toggle.call(()) }
-            BotMark { color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone() }
+            BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone() }
             span { class: "min-w-0 flex-1 truncate text-[14px] text-ink", "{bot.name}" }
             if !note.is_empty() {
                 span { class: "shrink-0 text-[12px] text-ink-tertiary", "{note}" }

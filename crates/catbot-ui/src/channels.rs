@@ -53,7 +53,7 @@ fn Members(chosen: Signal<Vec<String>>, lead: Signal<String>, disabled: bool) ->
                                         }
                                     },
                                 }
-                                BotMark { color: bot.color.clone(), initial: bot.initial(), size: 22, mark: bot.mark.clone() }
+                                BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 22, mark: bot.mark.clone() }
                                 span { class: "truncate text-[14px] text-ink", "{bot.name}" }
                             }
                             if on {

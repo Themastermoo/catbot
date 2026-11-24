@@ -345,7 +345,7 @@ fn ChiefTile(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Eleme
                 }
             },
             span { class: "relative flex",
-                BotMark { color: bot.color.clone(), initial: bot.initial(), size: 60, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
+                BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 60, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
                 span { "data-chief-badge": true, "aria-hidden": "true", class: "absolute -bottom-px -right-px flex size-4 items-center justify-center rounded-full text-white ring-2 ring-[var(--tile)] {CROWN}",
                     Icon { name: "crown", size: 10, filled: true }
                 }
@@ -426,7 +426,7 @@ fn BotRow(
                     }
                 },
                 span { class: "relative -m-[3px] flex shrink-0", title: "{bot.name}",
-                    BotMark { color: bot.color.clone(), initial: bot.initial(), size: 42, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
+                    BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 42, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
                     if working {
                         span { "data-testid": "working-dot", "aria-hidden": "true", title: "Working", class: "absolute bottom-0.5 right-0.5 size-2 rounded-full bg-success ring-2 ring-[var(--row)]" }
                     }

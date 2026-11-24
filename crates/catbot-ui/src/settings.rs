@@ -133,7 +133,7 @@ pub fn BotSettings(bot: Bot) -> Element {
                     // Picture, colour and name.
                     div { class: CARD,
                         div { class: "mb-4 flex items-center gap-3",
-                            BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
+                            BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
                             div { class: "min-w-0",
                                 div { class: "text-[15px] font-semibold text-ink truncate", "{bot.name}" }
                                 div { class: "text-[12px] text-ink-secondary", if channel { "Pick a colour" } else { "Pick a picture and a colour" } }
@@ -172,6 +172,9 @@ pub fn BotSettings(bot: Bot) -> Element {
                                 }
                             }
                         }
+                        if !channel {
+                            crate::profile::PictureEditor { key: "{bot.id}-picture", bot: bot.clone(), change }
+                        }
                         label { class: "mt-4 {LABEL}", "Name"
                             input {
                                 key: "{bot.id}-name",
@@ -188,6 +191,9 @@ pub fn BotSettings(bot: Bot) -> Element {
                                     }
                                 },
                             }
+                        }
+                        if !channel {
+                            crate::profile::RoleFields { bot: bot.clone(), change, field: FIELD, label_class: LABEL }
                         }
                     }
                     // Instructions.

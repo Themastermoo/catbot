@@ -477,7 +477,7 @@ pub fn TeamMap() -> Element {
                     if let Some((bot, x, y)) = dragged() {
                         div { "aria-hidden": "true", class: "pointer-events-none absolute z-30 flex items-center gap-2 rounded-xl border border-accent bg-panel px-3 py-2 shadow-lg",
                             style: "left: {x + 8.0}px; top: {y + 8.0}px;",
-                            BotMark { color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone() }
+                            BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone() }
                             span { class: "text-[13px] font-medium", "{bot.name}" }
                         }
                     }
@@ -619,6 +619,9 @@ fn Card(bot: Bot, moving: bool, tagged: bool, screen: Option<String>, on_grab: E
         "Chief of Staff".to_string()
     } else if bot.department_chief {
         format!("Leads {}", bot.department)
+    } else if !bot.title.is_empty() {
+        // Its role, when it has one (stage 23).
+        bot.title.clone()
     } else {
         let first: String = bot.soul.split_whitespace().take(8).collect::<Vec<_>>().join(" ");
         if first.is_empty() { "Bot".into() } else { first }
@@ -646,7 +649,7 @@ fn Card(bot: Bot, moving: bool, tagged: bool, screen: Option<String>, on_grab: E
                         on_grab.call((grabbed.clone(), p.x, p.y));
                     }
                 },
-                BotMark { color: bot.color.clone(), initial: bot.initial(), size: 38, mark: bot.mark.clone(), state: bot.activity.mood() }
+                BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 38, mark: bot.mark.clone(), state: bot.activity.mood() }
                 span { class: "min-w-0 flex-1",
                     span { class: "flex items-center gap-1.5",
                         span { class: "truncate text-[14px] font-semibold", "{bot.name}" }

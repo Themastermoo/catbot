@@ -6,6 +6,7 @@
 mod api;
 mod scheduled;
 mod voice;
+mod profile;
 mod apps;
 mod computers;
 mod attach;

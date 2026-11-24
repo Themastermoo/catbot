@@ -935,7 +935,7 @@ fn ChatHead(bot: Bot) -> Element {
                     "aria-expanded": "{open}",
                     class: "group flex min-w-0 max-w-full items-center gap-2 rounded-full py-0.5 pl-1.5 pr-3 text-ink {ELEVATED_FLOAT} transition-colors duration-[120ms] hover:bg-[color-mix(in_srgb,var(--color-composer),var(--color-ink)_7%)]",
                     onclick: move |_| ui.settings_open.toggle(),
-                    BotMark { color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone(), state: bot.activity.mood() }
+                    BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone(), state: bot.activity.mood() }
                     span { class: "truncate text-[14px] font-semibold text-ink", "{bot.name}" }
                     if let Some(chat) = conversation {
                         svg { "aria-hidden": "true", class: "shrink-0 text-ink-tertiary", width: "12", height: "12", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
@@ -1119,7 +1119,7 @@ fn ComputerButton(bot_id: String, name: String) -> Element {
 fn EmptyChat(bot: Bot) -> Element {
     rsx! {
         div { class: "flex flex-col items-center gap-3 py-24 text-center",
-            BotMark { color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
+            BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
             p { class: "text-[15px] font-semibold text-ink", "{bot.name}" }
             p { class: "text-[13px] text-ink-secondary", "Send a message to start the conversation." }
         }
@@ -1214,9 +1214,9 @@ fn Row(
             };
             rsx! {
                 div { class: "group flex w-full flex-col items-start",
-                    if let Some((_, name, mark, color)) = speaker {
+                    if let Some((speaker_id, name, mark, color)) = speaker {
                         div { class: "mb-1 flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary", "data-speaker": "{name}",
-                            crate::mascots::BotMark { color, initial: name.chars().next().map(|c| c.to_string()).unwrap_or_default(), size: 18, mark }
+                            crate::mascots::BotMark { picture: consume_context::<Signal<State>>().read().bots.iter().find(|b| b.id == speaker_id).and_then(|b| b.picture.clone()), color, initial: name.chars().next().map(|c| c.to_string()).unwrap_or_default(), size: 18, mark }
                             "{name}"
                         }
                     }
@@ -1472,7 +1472,7 @@ fn ApprovalPanel(bot: Bot, pending: Pending, count: usize, on_cancel_turn: Event
                 div { class: "flex min-w-0 items-center gap-2", "aria-live": "polite",
                     div { class: "min-w-0 flex-1",
                         div { "data-ask-header": true, class: "flex min-w-0 items-center gap-1.5 text-[13px] leading-[18px] text-ink-secondary",
-                            span { "aria-hidden": "true", class: "flex shrink-0", BotMark { color: bot.color.clone(), initial: bot.initial(), size: 16, mark: bot.mark.clone(), state: bot.activity.mood() } }
+                            span { "aria-hidden": "true", class: "flex shrink-0", BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 16, mark: bot.mark.clone(), state: bot.activity.mood() } }
                             span { dir: "auto", class: "min-w-0 truncate", "{line}" }
                         }
                     }

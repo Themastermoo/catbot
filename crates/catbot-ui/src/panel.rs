@@ -135,7 +135,7 @@ fn Hero(bot: Bot) -> Element {
     rsx! {
         div { class: "mt-3.5 flex flex-col items-center text-center", "data-panel-hero": true,
             div { class: "relative",
-                BotMark { color: bot.color.clone(), initial: bot.initial(), size: 88, mark: bot.mark.clone(), state: bot.activity.mood() }
+                BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 88, mark: bot.mark.clone(), state: bot.activity.mood() }
                 if bot.chief {
                     span { title: "Chief of Staff", class: "absolute -bottom-0.5 -right-0.5 flex size-[22px] items-center justify-center rounded-full bg-[#E8993A] text-white ring-[3px] ring-app",
                         Icon { name: "crown", size: 12, filled: true }
@@ -143,6 +143,9 @@ fn Hero(bot: Bot) -> Element {
                 }
             }
             h2 { class: "mt-2 max-w-full truncate text-[17px] font-medium leading-6 text-ink", "{bot.name}" }
+            if !bot.title.is_empty() {
+                p { class: "max-w-full truncate text-[13px] text-ink", "data-panel-role": true, "{bot.title}" }
+            }
             p { class: if bot.activity == Activity::WaitingOnYou { "text-[13px] text-warning" } else { "text-[13px] text-ink-secondary" }, "data-panel-status": true, "{doing}" }
         }
     }

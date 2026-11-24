@@ -179,6 +179,7 @@ pub struct ChatLine {
     pub color: String,
     pub mark: String,
     pub initial: String,
+    pub picture: Option<crate::mascots::Picture>,
     pub thread: String,
     pub title: String,
     pub activity: Activity,
@@ -196,6 +197,7 @@ fn all_chats(bots: &[Bot]) -> Vec<ChatLine> {
             color: bot.color.clone(),
             mark: bot.mark.clone(),
             initial: bot.initial(),
+            picture: bot.picture.clone(),
             thread: thread.to_string(),
             title: title.to_string(),
             activity,
@@ -571,7 +573,7 @@ fn Sender(row: Row, size: u32) -> Element {
     let state = use_context::<Signal<State>>();
     let bot = state.read().bots.iter().find(|b| b.id == row.from_bot).cloned();
     match bot {
-        Some(bot) => rsx! { BotMark { color: bot.color.clone(), initial: bot.initial(), size, mark: bot.mark.clone(), state: bot.activity.mood() } },
+        Some(bot) => rsx! { BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size, mark: bot.mark.clone(), state: bot.activity.mood() } },
         None => rsx! { BotMark { color: row.color.clone(), initial: row.from.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default(), size } },
     }
 }
@@ -666,7 +668,7 @@ fn ChatItem(chat: ChatLine, on_open: EventHandler<(String, String)>) -> Element 
             class: "group flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-[13px] hover:bg-raised/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-accent/60",
             onclick: move |_| on_open.call((bot.clone(), thread.clone())),
             span { class: "relative shrink-0", "aria-hidden": "true",
-                BotMark { color: chat.color.clone(), initial: chat.initial.clone(), size: 18, mark: chat.mark.clone(), state: chat.activity.mood() }
+                BotMark { picture: chat.picture.clone(), color: chat.color.clone(), initial: chat.initial.clone(), size: 18, mark: chat.mark.clone(), state: chat.activity.mood() }
                 if chat.unread {
                     span { class: "absolute -right-0.5 -top-0.5 size-2 rounded-full bg-accent ring-2 ring-[var(--color-app)]" }
                 }

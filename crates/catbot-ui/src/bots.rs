@@ -86,6 +86,13 @@ pub struct Bot {
     pub unread: bool,
     /// Its newest message worth a preview, if it has one.
     pub last: Option<Last>,
+    /// Its role ("Researcher") and description (stage 23).
+    pub title: String,
+    pub description: String,
+    /// Its own picture, framed, if it has one (shown instead of its cat, not as the pet).
+    pub picture: Option<crate::mascots::Picture>,
+    /// Put away in the archive (stage 23.5).
+    pub archived: bool,
 }
 
 /// One of a bot's chats (their "task"), as the sidebar lists it.
@@ -194,6 +201,15 @@ impl Bot {
             activity,
             unread: wire["unread"] == true,
             last: messages.iter().rev().find_map(|m| Some(Last { line: line(m)?, at: m["at"].as_f64().unwrap_or(0.0) })),
+            title: wire["title"].as_str().unwrap_or_default().to_string(),
+            description: wire["description"].as_str().unwrap_or_default().to_string(),
+            picture: wire["avatarUrl"].as_str().map(|url| crate::mascots::Picture {
+                url: url.to_string(),
+                zoom: wire["avatarZoom"].as_f64().unwrap_or(1.0),
+                x: wire["avatarFocusX"].as_f64().unwrap_or(0.5),
+                y: wire["avatarFocusY"].as_f64().unwrap_or(0.5),
+            }),
+            archived: wire["archived"] == true,
         })
     }
 
