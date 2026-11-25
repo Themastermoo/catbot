@@ -376,3 +376,25 @@
 @media (prefers-reduced-motion: reduce) {
   .catbot-pet, .catbot-pet * { animation: none !important; }
 }
+
+/* The robot cat (stage 25): sprite strips from art/pet3d/build_pet.py, three passes stacked
+   (README there). The box shows one 96×80 frame; the strip steps sideways under it. */
+.pet3d { width: 96px; height: 80px; overflow: hidden; pointer-events: none; }
+.pet3d-strip {
+  position: relative; height: 80px; width: calc(var(--frames) * 96px);
+  isolation: isolate;
+  -webkit-mask: var(--base) 0 0 / 100% 100% no-repeat;
+          mask: var(--base) 0 0 / 100% 100% no-repeat;
+}
+.pet3d-loop { animation: pet3d-loop var(--dur) steps(var(--frames)) infinite; }
+.pet3d-once { animation: pet3d-once var(--dur) steps(var(--frames), jump-none) 1 forwards; }
+.pet3d-strip > div { position: absolute; inset: 0; background-size: 100% 100%; }
+.pet3d-base { background-image: var(--base); }
+.pet3d-tint {
+  background: var(--tint); mix-blend-mode: multiply;
+  -webkit-mask: var(--mask) 0 0 / 100% 100% no-repeat;
+          mask: var(--mask) 0 0 / 100% 100% no-repeat;
+}
+.pet3d-gloss { background-image: var(--gloss); mix-blend-mode: screen; }
+@keyframes pet3d-loop { to { transform: translateX(-100%); } }
+@keyframes pet3d-once { to { transform: translateX(calc(-100% + 96px)); } }

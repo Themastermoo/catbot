@@ -1,0 +1,225 @@
+{
+  "version": 1,
+  "frame": {
+    "width": 192,
+    "height": 160,
+    "scale": 2,
+    "css_width": 96,
+    "css_height": 80
+  },
+  "passes": [
+    "base",
+    "mask",
+    "gloss"
+  ],
+  "mask": "white, alpha = how much of the pixel is shell (use as a CSS alpha mask)",
+  "ground_css_y": 77.44,
+  "drag_anchor_css": [
+    58.08,
+    32.12
+  ],
+  "walk": {
+    "stride_css_px": 17.23,
+    "cycle_seconds": 1.0
+  },
+  "poses": {
+    "idle": {
+      "intro": null,
+      "animation": "idle"
+    },
+    "walk": {
+      "intro": null,
+      "animation": "walk"
+    },
+    "sit": {
+      "intro": "sit_down",
+      "animation": "sit"
+    },
+    "sleep": {
+      "intro": "lie_down",
+      "animation": "sleep"
+    },
+    "working": {
+      "intro": null,
+      "animation": "working"
+    },
+    "waiting": {
+      "intro": null,
+      "animation": "waiting"
+    },
+    "happy": {
+      "intro": null,
+      "animation": "happy"
+    },
+    "jump": {
+      "intro": "jump",
+      "animation": "air"
+    },
+    "land": {
+      "intro": null,
+      "animation": "land"
+    },
+    "drag": {
+      "intro": null,
+      "animation": "drag"
+    }
+  },
+  "animations": {
+    "idle": {
+      "frames": 36,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_idle.png",
+        "mask": "mask_idle.png",
+        "gloss": "gloss_idle.png"
+      }
+    },
+    "walk": {
+      "frames": 16,
+      "fps": 16,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_walk.png",
+        "mask": "mask_walk.png",
+        "gloss": "gloss_walk.png"
+      }
+    },
+    "sit_down": {
+      "frames": 9,
+      "fps": 12,
+      "loop": false,
+      "next": "sit",
+      "sheets": {
+        "base": "base_sit_down.png",
+        "mask": "mask_sit_down.png",
+        "gloss": "gloss_sit_down.png"
+      }
+    },
+    "sit": {
+      "frames": 36,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_sit.png",
+        "mask": "mask_sit.png",
+        "gloss": "gloss_sit.png"
+      }
+    },
+    "lie_down": {
+      "frames": 11,
+      "fps": 12,
+      "loop": false,
+      "next": "sleep",
+      "sheets": {
+        "base": "base_lie_down.png",
+        "mask": "mask_lie_down.png",
+        "gloss": "gloss_lie_down.png"
+      }
+    },
+    "sleep": {
+      "frames": 32,
+      "fps": 8,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_sleep.png",
+        "mask": "mask_sleep.png",
+        "gloss": "gloss_sleep.png"
+      }
+    },
+    "working": {
+      "frames": 24,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_working.png",
+        "mask": "mask_working.png",
+        "gloss": "gloss_working.png"
+      }
+    },
+    "waiting": {
+      "frames": 24,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_waiting.png",
+        "mask": "mask_waiting.png",
+        "gloss": "gloss_waiting.png"
+      }
+    },
+    "happy": {
+      "frames": 16,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_happy.png",
+        "mask": "mask_happy.png",
+        "gloss": "gloss_happy.png"
+      }
+    },
+    "jump": {
+      "frames": 8,
+      "fps": 14,
+      "loop": false,
+      "next": "air",
+      "sheets": {
+        "base": "base_jump.png",
+        "mask": "mask_jump.png",
+        "gloss": "gloss_jump.png"
+      }
+    },
+    "air": {
+      "frames": 8,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_air.png",
+        "mask": "mask_air.png",
+        "gloss": "gloss_air.png"
+      }
+    },
+    "land": {
+      "frames": 10,
+      "fps": 14,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_land.png",
+        "mask": "mask_land.png",
+        "gloss": "gloss_land.png"
+      }
+    },
+    "drag": {
+      "frames": 24,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_drag.png",
+        "mask": "mask_drag.png",
+        "gloss": "gloss_drag.png"
+      }
+    },
+    "stretch": {
+      "frames": 30,
+      "fps": 12,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_stretch.png",
+        "mask": "mask_stretch.png",
+        "gloss": "gloss_stretch.png"
+      }
+    }
+  },
+  "blender": "5.3.0",
+  "engine": "BLENDER_EEVEE"
+}

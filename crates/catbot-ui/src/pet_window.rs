@@ -33,7 +33,7 @@ const CHAT: (f64, f64) = (340.0, 430.0);
 const TASKBAR: f64 = 48.0;
 /// Walking speed, in logical pixels a second: the art's stride (33 of its 96 units a 0.8 s step)
 /// at its drawn size, so the paws don't slide.
-const WALK: f64 = 41.0;
+const WALK: f64 = 26.0;
 /// How often the pet moves, and how often it asks after its bot.
 const TICK: Duration = Duration::from_millis(33);
 const ASK_EVERY: Duration = Duration::from_secs(4);
@@ -217,7 +217,7 @@ enum Act {
 
 /// How long a leap takes, and a landing.
 const LEAP: f64 = 0.7;
-const LANDING: f64 = 0.35;
+const LANDING: f64 = 0.71;
 
 /// Where a leap is `t` of the way: straight across, up and over in an arc at least `lift` high.
 fn arc(from: (i32, i32), to: (i32, i32), t: f64, lift: f64) -> (i32, i32) {
@@ -266,7 +266,8 @@ fn pose(act: Act, mood: &str) -> &'static str {
         Act::Walk => "walk",
         Act::Sit => "sit",
         Act::Sleep => "sleep",
-        Act::Fall(_) | Act::Leap(..) => "jump",
+        Act::Leap(..) => "jump",
+        Act::Fall(_) => "air",
         Act::Land(_) => "land",
         Act::Carried(..) => "drag",
         Act::Chat | Act::Idle => match mood {
@@ -683,35 +684,87 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                             open_chat();
                         }
                     },
-                    PetSprite { color: pet.color.clone(), mark: pet.mark.clone(), pose: shown_pose.to_string(), name: pet.name.clone() }
+                    PetSprite { color: pet.color.clone(), pose: shown_pose.to_string(), name: pet.name.clone() }
                 }
             }
         }
     }
 }
 
-/// The pet cat (Fable's art, `pet.svg` and `assets/pet.css`): a side-on cat facing right, its
-/// pose set by `data-pet`, its face by `data-face` (the visor for visor cats, dots for the
-/// others), tinted with the bot's colour.
-const PET_SVG: &str = include_str!("pet.svg");
+/// The pet cat (stage 25): Fable's robot cat, built and rendered in Blender by
+/// `art/pet3d/build_pet.py` into sprite sheets (`assets/pet3d/`). Each animation is a strip of
+/// frames in three passes: the cat with a grey shell, the shell's mask (coloured with the bot's
+/// colour by multiply) and the shell's gloss (screened back on top). `assets/pet.css` steps
+/// through the strip.
+const PET3D: Asset = asset!("/assets/pet3d");
+const MANIFEST: &str = include_str!("../assets/pet3d/manifest.json");
 
-/// The cat's markup for a pose, face and colour (the tint set on the picture itself, where the
-/// gradient's stops read it).
-fn pet_markup(pose: &str, face: &str, color: &str) -> String {
-    let tint = format!("--pet: var(--identity-{color}); --pet-light: color-mix(in srgb, var(--identity-{color}) 62%, #ffffff); --pet-dark: color-mix(in srgb, var(--identity-{color}) 66%, #000000)");
-    PET_SVG.replacen(r#"data-pet="idle" data-face="dots""#, &format!(r#"data-pet="{pose}" data-face="{face}" style="{tint}""#), 1)
+fn manifest() -> &'static Value {
+    static PARSED: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    PARSED.get_or_init(|| serde_json::from_str(MANIFEST).unwrap_or(Value::Null))
+}
+
+/// One animation: how many frames, at what speed, whether it loops, and what follows it.
+#[derive(Clone, Debug, PartialEq)]
+struct Anim {
+    frames: u32,
+    seconds: f64,
+    looped: bool,
+    next: Option<String>,
+}
+
+fn anim(name: &str) -> Option<Anim> {
+    let a = &manifest()["animations"][name];
+    let frames = a["frames"].as_u64()? as u32;
+    let fps = a["fps"].as_f64().filter(|f| *f > 0.0)?;
+    // Walking: the strip plays at the speed the window moves, so the paws don't slide.
+    let seconds = match (name, manifest()["walk"]["stride_css_px"].as_f64()) {
+        ("walk", Some(stride)) if stride > 0.0 => stride / WALK,
+        _ => frames as f64 / fps,
+    };
+    Some(Anim { frames, seconds, looped: a["loop"] != false, next: a["next"].as_str().map(str::to_string) })
+}
+
+/// What a pose plays first: its one-shot way in, if it has one, else its loop.
+fn first_of(pose: &str) -> String {
+    let p = &manifest()["poses"][pose];
+    p["intro"].as_str().or(p["animation"].as_str()).filter(|n| anim(n).is_some()).unwrap_or(if anim(pose).is_some() { pose } else { "idle" }).to_string()
 }
 
 #[component]
-fn PetSprite(color: String, mark: String, pose: String, name: String) -> Element {
-    let face = if mark == "cat-visor" { "visor" } else { "dots" };
-    let markup = pet_markup(&pose, face, &color);
+fn PetSprite(color: String, pose: String, name: String) -> Element {
+    let mut playing = use_signal(|| first_of(&pose));
+    use_effect(use_reactive!(|pose| playing.set(first_of(&pose))));
+    let now = playing();
+    let Some(a) = anim(&now) else { return rsx! {} };
+    let style = format!(
+        "--frames: {}; --dur: {:.3}s; --tint: var(--identity-{color}); --base: url({PET3D}/base_{now}.png); --mask: url({PET3D}/mask_{now}.png); --gloss: url({PET3D}/gloss_{now}.png)",
+        a.frames, a.seconds
+    );
+    let strip = if a.looped { "pet3d-strip pet3d-loop" } else { "pet3d-strip pet3d-once" };
+    let next = a.next.clone();
+    let ground = manifest()["ground_css_y"].as_f64().map(|y| 80.0 - y).unwrap_or(0.0);
     rsx! {
         div {
-            class: "absolute bottom-0 left-1/2 h-[80px] w-[96px] -translate-x-1/2",
+            class: "pet3d absolute bottom-0 left-1/2",
+            style: "{style}; transform: translate(-50%, {ground:.1}px)",
             "data-pet": "{pose}",
+            "data-playing": "{now}",
             "aria-label": "{name}",
-            dangerous_inner_html: "{markup}",
+            // Keyed, so a new animation starts from its first frame.
+            for shown in [now.clone()] {
+                div {
+                    key: "{shown}",
+                    class: strip,
+                    onanimationend: {
+                        let next = next.clone();
+                        move |_| if let Some(next) = next.clone() { playing.set(next) }
+                    },
+                    div { class: "pet3d-base" }
+                    div { class: "pet3d-tint" }
+                    div { class: "pet3d-gloss" }
+                }
+            }
         }
     }
 }
@@ -745,8 +798,14 @@ mod tests {
         let (land, onto) = leap_to(&tops, 150, 700, 420, 50, 0.0).unwrap();
         assert_eq!((onto.id.as_str(), land), ("a", 150));
         assert_eq!(leap_to(&tops, 2000, 700, 420, 50, 0.0), None, "too far");
-        let cat = pet_markup("walk", "visor", "teal");
-        assert!(cat.contains(r#"data-pet="walk" data-face="visor""#) && cat.contains("--identity-teal") && cat.contains("pet-leg-fr"));
+        assert_eq!(pose(Act::Fall(0.0), "idle"), "air");
+        // The robot cat's sheets: every pose has something to play, and one-shots lead on.
+        for p in ["idle", "walk", "sit", "sleep", "working", "waiting", "jump", "air", "land", "drag"] {
+            assert!(anim(&first_of(p)).is_some(), "{p}");
+        }
+        assert_eq!(first_of("sit"), "sit_down");
+        assert_eq!(anim("sit_down").unwrap().next.as_deref(), Some("sit"));
+        assert!(anim("walk").unwrap().looped && !anim("land").unwrap().looped);
         assert_eq!(PetInfo::from_wire(&json!({ "botId": "b1", "name": "Kiwi", "color": "purple", "mark": "cat-visor" })).unwrap().mark, "cat-visor");
     }
 }
