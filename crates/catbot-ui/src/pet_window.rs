@@ -696,7 +696,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
 /// frames in three passes: the cat with a grey shell, the shell's mask (coloured with the bot's
 /// colour by multiply) and the shell's gloss (screened back on top). `assets/pet.css` steps
 /// through the strip.
-const PET3D: Asset = asset!("/assets/pet3d");
+const PET3D: Asset = asset!("/assets/pet3d", AssetOptions::folder());
 const MANIFEST: &str = include_str!("../assets/pet3d/manifest.json");
 
 fn manifest() -> &'static Value {

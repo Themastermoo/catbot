@@ -1592,15 +1592,21 @@ class Renderer:
         path = stem + ".png"
         if not os.path.exists(path):
             raise RuntimeError("the render did not write %s" % path)
+        out = self.read(path)
+        self.count += 1
+        want = (self.scene.render.resolution_x, self.scene.render.resolution_y)
+        if (out.shape[1], out.shape[0]) != want:
+            raise RuntimeError("the render is %dx%d, expected %dx%d" % (out.shape[1], out.shape[0], want[0], want[1]))
+        return out
+
+    @staticmethod
+    def read(path):
+        """A PNG as float RGBA (h, w, 4), top row first, display values, straight alpha."""
         img = bpy.data.images.load(path, check_existing=False)
         w, h = img.size
         buf = np.empty(w * h * 4, dtype=np.float32)
         img.pixels.foreach_get(buf)
         bpy.data.images.remove(img)
-        self.count += 1
-        want = (self.scene.render.resolution_x, self.scene.render.resolution_y)
-        if (w, h) != want:
-            raise RuntimeError("the render is %dx%d, expected %dx%d" % (w, h, want[0], want[1]))
         return buf.reshape(h, w, 4)[::-1].astype(np.float64)
 
 
@@ -1872,6 +1878,111 @@ def render_icon(pet, rnd, cfg, out_dir):
     log("wrote icon_%s.png and icon_preview.png" % "/".join(str(s) for s in ICON_SIZES))
 
 
+MARK_FINE = ICON_FINE + ("neck_seam", "haunch_seam_hn", "haunch_seam_hf") + tuple(
+    "body_seam%d" % k for k in range(4))
+MARK_VIEWS = {"head": (66.0, 5.0), "full": (38.0, 8.0)}   # camera yaw, pitch
+MARK_SIZES = (256, 64)          # 64 is the simplified version, for marks shown at 32 px and less
+
+
+def mark_pose(kind, small):
+    """The pose of a bot's mark: the icon's head, or the whole cat sitting, turned a little
+    towards the viewer with its tail round its paws."""
+    if kind == "head":
+        return icon_pose(small)
+    return P(SIT, ky=-34, kr=4, en_r=8, ef_r=8)
+
+
+def render_marks(pet, rnd, cfg, out_dir):
+    """The in-app marks (bot avatars) made from the robot cat: `head` and `full`, each a square
+    in the three passes (base, mask, gloss) so the app can tint the shell with the bot's colour.
+    256 px is the full model; 64 px is simplified like the small icons (bigger solid eyes,
+    larger ear lights, no fine seams) and rendered large then averaged down."""
+    listing = {"passes": ["base", "mask", "gloss"],
+               "mask": "white, alpha = how much of the pixel is shell (use as a CSS alpha mask)",
+               "marks": {}}
+    for kind, (yaw, pitch) in MARK_VIEWS.items():
+        entry = {"files": {}, "eyes": {}}
+        for size in MARK_SIZES:
+            small = size < 128
+
+            def wanted(part, small=small, kind=kind):
+                if kind == "head" and (not set(part.weights) <= ICON_HEAD_BONES or part.name == "neck_joint"):
+                    return False
+                return not (small and part.name in MARK_FINE)
+
+            pet.show(wanted, extras=small)
+            pose = mark_pose(kind, small)
+            seen = [part for _, part in pet.parts if wanted(part) and (small or part.name not in pet.extras)]
+            target, units = fit_square(seen, pose, yaw, pitch, margin=0.03)
+            over_sample = 8 if small else 1
+            aim_camera(pet.scene, (size * over_sample, size * over_sample), yaw, pitch, units_w=units,
+                       target=tuple(target))
+            got = render_passes(pet, rnd, pose, face("open", big=small), lights(1.0, 1.0),
+                                ["base", "mask", "gloss"])
+            mask = np.dstack([np.ones(got["mask"].shape + (3,)), got["mask"]])
+            images = {"base": got["base"], "mask": mask, "gloss": got["gloss"]}
+            for _ in range(3 if small else 0):
+                images = {p: halve(img) for p, img in images.items()}
+                # halve() weights colour by alpha; the mask's colour is white throughout
+            if touches_edge(images["base"][..., 3]):
+                log("WARNING: the %s mark at %d px touches the edge of its square" % (kind, size))
+            entry["files"][str(size)] = {}
+            for p, img in images.items():
+                name = "mark_%s_%s_%d.png" % (kind, p, size)
+                write_png(os.path.join(out_dir, name), to_bytes(img))
+                entry["files"][str(size)][p] = name
+            # where the eyes are in the picture, as fractions from the top left
+            right, up, _ = camera_axes(yaw, pitch)
+            xf = solve(pose)
+            eyes = {}
+            for label, sign in (("near", -1), ("far", 1)):
+                v = point_on(xf, "head", on_head(sign * EYE_LAT, EYE_PHI, 1.056)) - target
+                eyes[label] = [round(0.5 + float(v @ right) / units, 4), round(0.5 - float(v @ up) / units, 4)]
+            entry["eyes"][str(size)] = eyes
+            log("mark: %s %3d px%s" % (kind, size, " (simplified)" if small else ""))
+        listing["marks"][kind] = entry
+    pet.show(lambda part: True)
+    listing["eyes"] = ("eye centres as [x, y] fractions of the square from its top left; near is the "
+                       "eye on the viewer's side (the left one in the picture), far the other, "
+                       "which the head partly hides in the full mark")
+    listing["blender"] = bpy.app.version_string
+    with open(os.path.join(out_dir, "marks.json"), "w") as fh:
+        json.dump(listing, fh, indent=2)
+        fh.write("\n")
+
+    # a look at both marks tinted, at the sizes the app shows them
+    files = listing["marks"]
+    tints = list(PREVIEW_TINTS.values()) + [ICON_TEAL]
+    sheet = np.zeros((2 * 272, 16 + len(tints) * (256 + 64 + 32 + 16 + 48), 3))
+    for row, bg in enumerate((PREVIEW_BG, PREVIEW_BG_LIGHT)):
+        sheet[row * 272:(row + 1) * 272] = bg
+
+    def load(kind, size):
+        out = {}
+        for p in ("base", "mask", "gloss"):
+            out[p] = rnd.read(os.path.join(out_dir, files[kind]["files"][str(size)][p]))
+        return out
+
+    x = 16
+    for k, rgb in enumerate(tints):
+        kind = "head" if k % 2 == 0 else "full"
+        for row in range(2):
+            y = row * 272 + 8
+            big, small = load(kind, 256), load(kind, 64)
+            tint = np.array(rgb, float) / 255.0
+            over(sheet, tinted(big["base"], big["mask"][..., 3], big["gloss"], tint), x, y)
+            s64 = tinted(small["base"], small["mask"][..., 3], small["gloss"], tint)
+            over(sheet, s64, x + 264, y)
+            s32 = halve(s64)
+            over(sheet, s32, x + 264, y + 72)
+            over(sheet, halve(s32), x + 264, y + 112)
+            b128 = halve(tinted(big["base"], big["mask"][..., 3], big["gloss"], tint))
+            over(sheet, halve(halve(b128)), x + 304, y + 72)   # the 256 one at 32, to compare
+        x += 256 + 64 + 32 + 16 + 48
+    write_png(os.path.join(out_dir, "marks_preview.png"), to_bytes(np.dstack([sheet, np.ones(sheet.shape[:2])])))
+    log("wrote marks.json, marks_preview.png and %d mark images" % (len(MARK_VIEWS) * len(MARK_SIZES) * 3))
+
+
 def bake_actions(pet, out_dir):
     """Key every animation into its own Action and save the scene, so the rig can be opened and
     played in Blender. The sprite renders do not depend on this."""
@@ -1914,8 +2025,8 @@ def main():
         with open(args["--config"]) as fh:
             cfg = json.load(fh)
     mode = cfg.get("mode", "preview")
-    if mode not in ("preview", "full", "icon"):
-        raise ValueError("\"mode\" must be \"preview\", \"full\" or \"icon\", not %r" % mode)
+    if mode not in ("preview", "full", "icon", "marks"):
+        raise ValueError("\"mode\" must be \"preview\", \"full\", \"icon\" or \"marks\", not %r" % mode)
     out_dir = os.path.abspath(args["--out"])
     os.makedirs(out_dir, exist_ok=True)
     log("Blender %s, mode %s, output %s" % (bpy.app.version_string, mode, out_dir))
@@ -1943,13 +2054,15 @@ def main():
         render_preview(pet, rnd, cfg, out_dir)
     elif mode == "icon":
         render_icon(pet, rnd, cfg, out_dir)
+    elif mode == "marks":
+        render_marks(pet, rnd, cfg, out_dir)
     else:
         anims, frame, scale, passes = render_full(pet, rnd, cfg, out_dir)
         if cfg.get("only"):
             log("\"only\" is set: manifest.json is left as it was (it must list every animation)")
         else:
             write_manifest(out_dir, anims, frame, scale, passes, engine)
-    if cfg.get("save_blend", True) and mode != "icon":
+    if cfg.get("save_blend", True) and mode in ("preview", "full"):
         try:
             bake_actions(pet, out_dir)
         except Exception as exc:  # the .blend is a convenience; the renders above are done

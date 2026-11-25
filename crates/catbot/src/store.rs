@@ -168,10 +168,14 @@ pub enum Mark {
     CatSitting,
     CatVisor,
     Letter,
+    /// The robot cat's head (stage 25.3), rendered in Blender like the desktop pet.
+    RobotHead,
+    /// The robot cat sitting, whole.
+    RobotFull,
 }
 
 impl Mark {
-    pub const ALL: [Mark; 4] = [Mark::CatHead, Mark::CatSitting, Mark::CatVisor, Mark::Letter];
+    pub const ALL: [Mark; 6] = [Mark::CatHead, Mark::CatSitting, Mark::CatVisor, Mark::Letter, Mark::RobotHead, Mark::RobotFull];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -179,6 +183,8 @@ impl Mark {
             Mark::CatSitting => "cat-sitting",
             Mark::CatVisor => "cat-visor",
             Mark::Letter => "letter",
+            Mark::RobotHead => "robot-head",
+            Mark::RobotFull => "robot-full",
         }
     }
 
@@ -1616,6 +1622,7 @@ mod tests {
         let again = store.bot("Kiwi").unwrap().unwrap();
         assert_eq!((again.mark, again.color.as_deref()), (Mark::CatVisor, Some("teal")));
         assert_eq!(Mark::parse("cat-sitting"), Some(Mark::CatSitting));
+        assert_eq!(Mark::parse("robot-full"), Some(Mark::RobotFull));
         assert_eq!(Mark::parse("mouse"), None);
     }
 

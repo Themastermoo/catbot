@@ -28,7 +28,7 @@ blender -b --factory-startup --python-exit-code 1 -P art/pet3d/build_pet.py -- \
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `mode` | `"preview"` | `"preview"`: stills and a contact sheet. `"full"`: sprite sheets and `manifest.json`. `"icon"`: the app icon. |
+| `mode` | `"preview"` | `"preview"`: stills and a contact sheet. `"full"`: sprite sheets and `manifest.json`. `"icon"`: the app icon. `"marks"`: the in-app bot marks. |
 | `icon_tint` | `[1, 164, 146]` | Icon mode: the shell colour, RGB 0..255. The default is Catbot's teal `#01A492`. |
 | `only` | all | Full mode: a list of animation names to render. The manifest is not rewritten when this is set. |
 | `passes` | `["base","mask","gloss"]` | Full mode: which passes to render. |
@@ -62,6 +62,24 @@ the top third of each ear, no fine seams, ears tipped further out so the head is
 square, a squarer-on view, and rendered at 8x then averaged down so edges stay crisp.
 
 `catbot.ico`, the hicolor PNGs and the Android inset are made from these by hand.
+
+## The in-app marks
+
+`{"mode": "marks"}` renders two bot marks (avatars) from the cat, each a transparent square in
+the pet's three passes so the app can tint the shell with the bot's colour the same way:
+
+- `head`: the head alone in the icon's view, eyes open and cyan, ear lights on.
+- `full`: the whole cat sitting, turned towards the viewer, tail round its paws.
+
+Files: `mark_<head|full>_<base|mask|gloss>_<256|64>.png`. The 256 px ones are the full model. The
+64 px ones are for marks shown at 32 px and below: bigger solid eyes, larger ear lights, no fine
+seams, rendered at 8x and averaged down. Each is framed automatically to fill its square with a
+3% margin; the full cat is tall and narrow, so it fills the height, not the width.
+
+`marks.json` lists the files and, per size, the two eye centres as `[x, y]` fractions of the
+square from its top left (`near` is the eye on the viewer's side, `far` the other).
+`marks_preview.png` shows both marks tinted at 256, 64, 32 and 16 px on a dark and a light
+ground, with the 256 one shrunk to 32 beside the simplified 32 for comparison.
 
 ## The design
 

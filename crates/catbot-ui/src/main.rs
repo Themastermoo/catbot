@@ -68,9 +68,9 @@ const STYLES: Asset = asset!("/assets/tailwind.css");
 const MASCOT_STYLES: Asset = asset!("/assets/mascots.css");
 /// The bundled fonts, copied through as a folder so `fonts.css` finds its files beside it.
 const FONTS: Asset = asset!("/assets/fonts", AssetOptions::folder());
-/// Catbot's icon, the visor cat in teal (`assets/icon/`, drawn from `mascots.rs`): the browser
-/// tab's, with a small picture for browsers that don't take SVG icons.
-const ICON: Asset = asset!("/assets/icon/catbot.svg");
+/// Catbot's icon, the robot cat's head in teal (`assets/icon/`, rendered in Blender by
+/// `art/pet3d/build_pet.py`'s icon mode): the browser tab's, large and small.
+const ICON: Asset = asset!("/assets/icon/catbot-256.png");
 const ICON_SMALL: Asset = asset!("/assets/icon/catbot-32.png");
 
 fn main() {
@@ -131,7 +131,7 @@ fn Root() -> Element {
     let mut notice = use_signal(|| None::<String>);
     use_context_provider(|| settings::Places { place, notice });
     rsx! {
-        document::Link { rel: "icon", r#type: "image/svg+xml", href: ICON }
+        document::Link { rel: "icon", r#type: "image/png", sizes: "256x256", href: ICON }
         document::Link { rel: "icon", r#type: "image/png", sizes: "32x32", href: ICON_SMALL }
         document::Meta { name: "viewport", content: "width=device-width, initial-scale=1, viewport-fit=cover" }
         document::Stylesheet { href: "{FONTS}/fonts.css" }

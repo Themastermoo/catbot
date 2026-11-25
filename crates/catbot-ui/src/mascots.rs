@@ -16,7 +16,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use dioxus::prelude::*;
 
 /// The four pictures, as stored on a bot.
-pub const MARKS: [(&str, &str); 4] = [("cat-head", "Cat head"), ("cat-sitting", "Sitting cat"), ("cat-visor", "Visor cat"), ("letter", "Letter")];
+pub const MARKS: [(&str, &str); 6] =
+    [("cat-head", "Cat head"), ("cat-sitting", "Sitting cat"), ("cat-visor", "Visor cat"), ("robot-head", "Robot cat head"), ("robot-full", "Robot cat"), ("letter", "Letter")];
 
 /// The colours a bot can wear, as the stylesheet names them.
 pub const COLORS: [&str; 12] = ["green", "blue", "red", "orange", "purple", "cyan", "pink", "yellow", "teal", "coral", "silver", "chrome"];
@@ -213,7 +214,45 @@ pub fn BotMark(
         "cat-sitting" => rsx! { CatSitting { color, size, state } },
         "cat-visor" => rsx! { CatVisor { color, size, state } },
         "channel" => rsx! { ChannelMark { color, size, state } },
+        "robot-head" | "robot-full" => rsx! { RobotMark { mark, color, size, state } },
         _ => rsx! { CatHead { color, size, state } },
+    }
+}
+
+/// The robot cat's pictures (stage 25.3): Fable's Blender model, its head or the whole cat sitting,
+/// rendered by `art/pet3d/build_pet.py` (marks mode) in three passes like the desktop pet: the
+/// cat with a grey shell, the shell's mask (the bot's colour, multiplied in) and its gloss
+/// (screened back on top). Small pictures use the 64-pixel renders, drawn simpler to read small.
+const ROBOT_MARKS: Asset = asset!("/assets/marks", AssetOptions::folder());
+
+/// The robot-cat picture for `mark` at `size`: which renders, by name.
+fn robot_files(mark: &str, size: u32) -> (String, String, String) {
+    let kind = if mark == "robot-full" { "full" } else { "head" };
+    let px = if size <= 40 { 64 } else { 256 };
+    let at = |pass: &str| format!("{ROBOT_MARKS}/mark_{kind}_{pass}_{px}.png");
+    (at("base"), at("mask"), at("gloss"))
+}
+
+#[component]
+fn RobotMark(mark: String, color: String, size: u32, state: String) -> Element {
+    let vary = use_hook(|| new_id("robot").1);
+    let (base, mask, gloss) = robot_files(&mark, size);
+    let layer = "position:absolute;inset:0;background-size:100% 100%";
+    // Keyed by the renders, so another picture is a new element: a changed mask on a blended
+    // layer isn't always repainted.
+    let shown = base.clone();
+    rsx! {
+        for _ in [()] { div {
+            key: "{shown}",
+            "aria-hidden": "true",
+            class: "catbot-mark catbot-robot relative shrink-0 select-none",
+            "data-mark": "{mark}",
+            "data-state": "{state}",
+            style: "{vary};width:{size}px;height:{size}px;isolation:isolate;-webkit-mask:url({base}) 0 0/100% 100% no-repeat;mask:url({base}) 0 0/100% 100% no-repeat",
+            div { style: "{layer};background-image:url({base})" }
+            div { style: "{layer};background:var(--identity-{color});mix-blend-mode:multiply;-webkit-mask:url({mask}) 0 0/100% 100% no-repeat;mask:url({mask}) 0 0/100% 100% no-repeat" }
+            div { style: "{layer};background-image:url({gloss});mix-blend-mode:screen" }
+        } }
     }
 }
 
@@ -369,7 +408,17 @@ fn CatVisor(color: String, size: u32, state: String) -> Element {
 
 #[cfg(test)]
 mod tests {
-    use super::vary;
+    use super::{robot_files, vary};
+
+    #[test]
+    fn robot_cats_use_the_small_renders_when_small() {
+        let (base, mask, gloss) = robot_files("robot-full", 28);
+        assert!(base.ends_with("/mark_full_base_64.png") && mask.ends_with("/mark_full_mask_64.png") && gloss.ends_with("/mark_full_gloss_64.png"));
+        assert!(robot_files("robot-head", 64).0.ends_with("/mark_head_base_256.png"));
+        for (mark, _) in super::MARKS {
+            assert!(!mark.is_empty());
+        }
+    }
 
     #[test]
     fn pictures_move_out_of_step() {
