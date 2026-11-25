@@ -6,6 +6,11 @@
 # Needs: Rust's Windows target (rustup target add x86_64-pc-windows-gnu), MinGW
 # (sudo apt install gcc-mingw-w64-x86-64), and `dx`. Inside the zip:
 #   Install.cmd, install.ps1       double-click Install.cmd on the PC
+#   Catbot.exe                     the launcher: starts the current version, asks before going
+#                                  back if a new one won't start (stage 28.3)
+#   app/                           one version, installed as versions\<version>\ on the PC;
+#                                  an update unpacks just this folder
+#   app/version.json               its version and storage format
 #   app/Catbot.exe                 the app (starts this PC's Catbot, switches to home's)
 #   app/catbot-server.exe          this PC's Catbot
 #   app/WebView2Loader.dll         Microsoft's loader for the window's web view
@@ -31,6 +36,8 @@ say "Building this PC's Catbot (catbot-server.exe)…"
 cargo build -p catbot --release --target "$TARGET"
 say "Building the interface it serves…"
 dx build -p catbot-ui --platform web --release
+say "Building the launcher…"
+cargo build -p catbot-launch --release --target "$TARGET"
 say "Building the app (Catbot.exe)…"
 dx build -p catbot-ui --platform windows --release --target "$TARGET"
 
@@ -46,9 +53,13 @@ LOADER="$(find "target/$TARGET" -path '*webview2-com-sys*/out/x64/WebView2Loader
 [[ -n "$LOADER" ]] || stop "WebView2Loader.dll wasn't found in the build."
 cp "$LOADER" "$OUT/app/"
 cp crates/catbot-ui/assets/icon/catbot.ico "$OUT/app/catbot.ico"
+cp "target/$TARGET/release/catbot-launch.exe" "$OUT/Catbot.exe"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+STORE="$(sed -n 's/^pub const STORE_VERSION: i64 = \([0-9]*\);/\1/p' crates/catbot/src/store.rs)"
+printf '{ "version": "%s", "store": %s }\n' "$VERSION" "$STORE" > "$OUT/app/version.json"
 cp scripts/windows/install.ps1 scripts/windows/Install.cmd "$OUT/"
 # Windows line endings, so cmd reads Install.cmd properly.
 sed -i 's/\r*$/\r/' "$OUT/Install.cmd" "$OUT/install.ps1"
 cp NOTICE "$OUT/app/NOTICE.txt"
 (cd dist && rm -f catbot-windows.zip && zip -qr catbot-windows.zip catbot-windows)
-say "Done: dist/catbot-windows.zip ($(du -h dist/catbot-windows.zip | cut -f1))"
+say "Done: dist/catbot-windows.zip ($(du -h dist/catbot-windows.zip | cut -f1)), Catbot $VERSION"

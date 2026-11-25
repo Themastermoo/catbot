@@ -546,6 +546,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "catbot-launch"
+version = "0.2.0"
+dependencies = [
+ "chrono",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
 name = "catbot-ui"
 version = "0.2.0"
 dependencies = [

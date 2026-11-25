@@ -1,0 +1,18 @@
+[package]
+name = "catbot-launch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Catbot.exe on Windows: starts the current version of Catbot and asks before going back when a new one won't start."
+publish = false
+
+[[bin]]
+name = "catbot-launch"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+
+[dev-dependencies]
+tempfile = "3"

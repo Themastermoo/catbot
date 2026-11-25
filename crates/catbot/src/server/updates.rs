@@ -138,7 +138,9 @@ fn folder(app: &App) -> PathBuf {
 }
 
 fn read_json(path: &Path) -> Option<Value> {
-    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
+    let bytes = std::fs::read(path).ok()?;
+    // PowerShell can write a byte-order mark first.
+    serde_json::from_slice(bytes.strip_prefix(b"\xEF\xBB\xBF").unwrap_or(&bytes)).ok()
 }
 
 fn write_json(path: &Path, value: &Value) -> Result<(), String> {
