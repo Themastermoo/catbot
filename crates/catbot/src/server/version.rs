@@ -77,7 +77,7 @@ pub fn repo(app: &App) -> Option<String> {
     saved(app)["repo"].as_str().filter(|r| !r.is_empty()).map(str::to_string).or(REPO.map(str::to_string))
 }
 
-async fn check(app: &App) -> Answer {
+pub async fn check(app: &App) -> Answer {
     let repo = repo(app).unwrap_or_default();
     if repo.is_empty() {
         return Err(bad("name Catbot's GitHub repository first"));

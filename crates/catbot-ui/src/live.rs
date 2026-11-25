@@ -72,6 +72,8 @@ pub struct State {
     pub scheduled_changed: u64,
     /// Counts `voice` frames: voice settings, keys or downloads changed.
     pub voice_changed: u64,
+    /// Counts `update` frames: a download, install or going back moved on (stage 28.4).
+    pub update_changed: u64,
     /// Counts `archived-bots` frames: a bot was put away or brought back.
     pub archived_changed: u64,
 }
@@ -147,6 +149,7 @@ impl State {
             Some("team-map") => self.map_changed += 1,
             Some("scheduled") => self.scheduled_changed += 1,
             Some("voice") => self.voice_changed += 1,
+            Some("update") => self.update_changed += 1,
             Some("archived-bots") => self.archived_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();

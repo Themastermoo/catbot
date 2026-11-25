@@ -76,12 +76,14 @@ pub struct Place {
 impl Place {
     /// This device: worked out from how Catbot was built and started.
     pub fn here() -> Place {
-        let platform = if cfg!(target_os = "android") {
-            Platform::Android
-        } else if cfg!(windows) {
-            Platform::Windows
-        } else {
-            Platform::Home
+        // CATBOT_UPDATE_PLATFORM and CATBOT_GITHUB_API are for trying it with stand-ins.
+        let platform = match std::env::var("CATBOT_UPDATE_PLATFORM").as_deref() {
+            Ok("windows") => Platform::Windows,
+            Ok("android") => Platform::Android,
+            Ok("home") => Platform::Home,
+            _ if cfg!(target_os = "android") => Platform::Android,
+            _ if cfg!(windows) => Platform::Windows,
+            _ => Platform::Home,
         };
         // The launcher says where it installed Catbot; otherwise the program's own folder tells,
         // when it's `<dir>/versions/<v>/`.
@@ -94,7 +96,7 @@ impl Place {
         Place {
             platform,
             dir: if platform == Platform::Windows { dir } else { None },
-            api: "https://api.github.com".into(),
+            api: std::env::var("CATBOT_GITHUB_API").ok().filter(|a| !a.trim().is_empty()).unwrap_or_else(|| "https://api.github.com".into()),
             code: option_env!("CATBOT_ANDROID_CODE").and_then(|c| c.parse().ok()),
         }
     }
@@ -290,7 +292,8 @@ async fn fetch(url: &str, into: &Path, bytes: u64, sha: &str, progress: impl Fn(
 
 // ---- Downloading ----
 
-async fn download(app: &std::sync::Arc<App>) -> Answer {
+/// `then_install`: the person pressed Update, so it installs as soon as it's here.
+async fn download(app: &std::sync::Arc<App>, then_install: bool) -> Answer {
     let place = app.updates.place().clone();
     if place.platform == Platform::Home {
         return Err(bad("this computer builds Catbot from its repo; the Claude helper updates it"));
@@ -334,6 +337,9 @@ async fn download(app: &std::sync::Arc<App>) -> Answer {
             eprintln!("catbot: the update to {version} didn't download: {err}");
         }
         tell(&app, json!({}));
+        if done.is_ok() && then_install {
+            let _ = install(&app).await;
+        }
     });
     Ok((StatusCode::ACCEPTED, answer))
 }
@@ -561,9 +567,30 @@ pub fn restore_if_asked(home: &Path) -> Option<PathBuf> {
 /// Once the server is up: a new version that keeps running counts as started, and old versions
 /// beyond the last few are cleared away.
 pub fn started(app: std::sync::Arc<App>) {
+    // Started as another version than the one being installed: it didn't take (the launcher went
+    // back, or the phone's installer was turned down), so it's no longer "installed".
+    let installing = saved(&app)["installing"].clone();
+    if installing["to"].as_str().is_some_and(|to| to != VERSION) {
+        let _ = save(&app, |kept| kept["installing"] = Value::Null);
+    }
+    let settling = app.clone();
     tokio::spawn(async move {
         tokio::time::sleep(SETTLED).await;
-        settle(&app);
+        settle(&settling);
+    });
+    // Asking first means knowing there's something to ask about: look a minute after starting,
+    // then every few hours, when there's a repository to look at.
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        loop {
+            if super::version::repo(&app).is_some() {
+                if let Err((_, err)) = super::version::check(&app).await {
+                    eprintln!("catbot: couldn't check for updates: {err}");
+                }
+                tell(&app, json!({}));
+            }
+            tokio::time::sleep(Duration::from_secs(6 * 60 * 60)).await;
+        }
     });
 }
 
@@ -625,16 +652,37 @@ pub fn wire(app: &App) -> Value {
         "ready": settings["ready"],
         "kept": list,
         "failed": kept.as_ref().map(|k| k["failed"].clone()).unwrap_or(Value::Null),
+        "installing": settings["installing"],
         "updated": settings["updated"],
         "back": settings["back"],
+        "dismissed": settings["dismissed"].as_array().cloned().unwrap_or_default(),
     })
 }
 
 pub async fn route(app: &std::sync::Arc<App>, rest: &[&str], body: Value) -> Option<Answer> {
     Some(match rest {
-        ["download"] => download(app).await,
+        ["download"] => download(app, body["install"] == true).await,
         ["install"] => install(app).await,
         ["back"] => back(app, &body).await,
+        // A note the person closed: an offer ("offer:9.0.0"), a failed start, an "updated".
+        ["dismiss"] => {
+            let what = body["what"].as_str().unwrap_or_default().trim().to_string();
+            if what.is_empty() || what.len() > 80 {
+                return Some(Err(bad("say what to dismiss")));
+            }
+            let saved = save(app, |kept| {
+                let mut list: Vec<Value> = kept["dismissed"].as_array().cloned().unwrap_or_default();
+                list.retain(|w| *w != json!(what));
+                list.push(json!(what));
+                let extra = list.len().saturating_sub(20);
+                list.drain(..extra);
+                kept["dismissed"] = json!(list);
+            });
+            saved.map_err(fail).map(|()| {
+                tell(app, json!({}));
+                (StatusCode::OK, wire(app))
+            })
+        }
         ["cancel"] => {
             app.updates.now().waiting = false;
             tell(app, json!({}));

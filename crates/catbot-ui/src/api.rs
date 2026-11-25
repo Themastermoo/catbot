@@ -18,6 +18,14 @@ pub async fn post(path: &str, body: &Value) -> Result<Value, String> {
     call("POST", path, Some(body)).await
 }
 
+/// POST JSON, and read the status beside the answer: for routes whose refusals carry a question
+/// back (going back to an older version answers 409 with what it needs).
+pub async fn post_raw(path: &str, body: &Value) -> Result<(u16, Value), String> {
+    let (status, text) = send("POST", path, Some(body)).await?;
+    let answer = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "error": text }));
+    Ok((status, answer))
+}
+
 /// Any method, with an optional JSON body. A refusal comes back as the server's own words.
 pub async fn call(method: &str, path: &str, body: Option<&Value>) -> Result<Value, String> {
     let (status, text) = send(method, path, body).await?;

@@ -450,9 +450,9 @@ fn AppPage() -> Element {
     }
 }
 
-/// The version, and the update check (stage 19.7.4): against Catbot's GitHub repository once
-/// it's named (Moo's choice: Catbot moves to GitHub), its latest release, or its newest commit
-/// when it has no releases.
+/// The version, and the update check (stage 19.7.4): against Catbot's GitHub repository (its
+/// latest release, or its newest commit when it has no releases). Installing and going back are
+/// stage 28: the banner (`update.rs`) and the versions kept on this PC.
 #[component]
 fn Updates(version: String) -> Element {
     let mut info = use_signal(|| None::<Value>);
@@ -497,6 +497,11 @@ fn Updates(version: String) -> Element {
             outcome.set(Some(api::post("/api/version/check", &serde_json::json!({})).await));
             checking.set(false);
         });
+    };
+    // Why this device can't install the newer release itself (the home PC: the helper builds it).
+    let offer_why_not = match outcome() {
+        Some(Ok(found)) => found["offer"]["whyNot"].as_str().map(str::to_string),
+        _ => None,
     };
     let said = match outcome() {
         None => None,
@@ -546,8 +551,14 @@ fn Updates(version: String) -> Element {
                             " "
                             a { href: "{url}", target: "_blank", rel: "noreferrer", class: "text-accent underline", "See it on GitHub" }
                         }
+                        if newer && let Some(why) = offer_why_not.clone() {
+                            p { class: "mt-1 text-[12px] text-ink-secondary", "{why}" }
+                        } else if newer {
+                            p { class: "mt-1 text-[12px] text-ink-secondary", "The banner at the top of the window has Update." }
+                        }
                     }
                 }
+                crate::update::Versions {}
             }
         }
     }

@@ -47,6 +47,7 @@ mod sidebar;
 mod looks;
 mod prefs;
 mod departments;
+mod update;
 mod inbox;
 mod mapcomposer;
 mod model_menu;
@@ -271,6 +272,7 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
             events::follow(|frame| {
                 let after = state.write().apply(&frame);
                 notify::on_frame(&frame, *notify_prefs.peek(), state, ui);
+                update::on_frame(&frame, place == link::Place::ThisPc && crate::link::active().is_none());
                 if after == live::After::Resync {
                     if connected_before {
                         catch_up();
@@ -290,6 +292,7 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     use_hook(catch_up);
 
     let bots = use_memo(move || state.read().bots.clone());
+    let update_changed = use_memo(move || state.read().update_changed);
     // The open bot is gone (deleted here or elsewhere): open the first one left. The settings
     // panel can't do this itself, as it closes with its bot.
     use_effect(move || {
@@ -301,6 +304,7 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     });
     rsx! {
         div { class: "flex h-screen flex-col bg-app text-ink",
+            update::UpdateBanner { changed: update_changed }
             div { class: "relative flex min-h-0 flex-1",
                 Sidebar { bots, selected }
                 Main { bots, selected, problem }
