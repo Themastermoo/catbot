@@ -349,7 +349,8 @@ fn AiPage() -> Element {
     let rest: Vec<Value> = list.iter().filter(|e| !(e["ready"] == true || lead_rank(e).is_some())).cloned().collect();
     let rest_count = rest.len();
     rsx! {
-        div { class: "flex items-center px-4 pb-2 pt-2",
+        crate::local_ai::OnThisComputer {}
+        div { class: "flex items-center px-4 pb-2 pt-6",
             h3 { class: "flex-1 text-[13px] font-semibold text-ink", "Providers" }
             button { r#type: "button", "data-check-again": true, class: "rounded-md px-2 py-1 text-[13px] text-ink-secondary hover:bg-raised hover:text-ink", onclick: move |_| *checked.write() += 1, "Check again" }
         }
@@ -376,6 +377,7 @@ fn Provider(engine: Value, open: bool, on_toggle: EventHandler<String>) -> Eleme
     let ready = engine["ready"] == true;
     let state = match (ready, engine["kind"].as_str()) {
         (true, _) => engine["keyHint"].as_str().map(|h| format!("Ready · key …{h}")).unwrap_or_else(|| "Ready".to_string()),
+        (false, Some("api")) if engine["needsKey"] == false => "Not added · See On this computer".to_string(),
         (false, Some("api")) => "Not set up · Needs a key".to_string(),
         (false, _) if engine["installed"] == false => "Not set up · Not installed".to_string(),
         (false, _) => "Not set up · Needs a sign-in".to_string(),

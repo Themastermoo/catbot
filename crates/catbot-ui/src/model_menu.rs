@@ -310,6 +310,7 @@ fn ModelMenu(bot: Bot, engines: Vec<Value>, plan: Option<Value>, on_done: EventH
 fn effort_hint(level: &str, label: &str) -> String {
     match level {
         "none" | "off" => "No extra thinking. The fastest replies.".into(),
+        "on" => "Thinks before answering; the thinking shows folded above the reply.".into(),
         "minimal" => "Barely any thinking. Very quick replies.".into(),
         "low" => "A little thinking. Quick replies for simple asks.".into(),
         "medium" => "Some thinking. A good balance for most work.".into(),

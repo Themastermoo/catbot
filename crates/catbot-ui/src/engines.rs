@@ -106,6 +106,7 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
                             (false, Some("codex")) if e["installed"] != true => format!("{name} (not installed)"),
                             (false, Some("codex")) => format!("{name} (not signed in)"),
                             (false, Some("pi")) => format!("{name} (not installed)"),
+                            (false, _) if e["needsKey"] == false => format!("{name} (not added)"),
                             (false, _) => format!("{name} (needs a key)"),
                         };
                         rsx! { option { key: "{id}", value: "{id}", selected: id == picked, "{shown}" } }

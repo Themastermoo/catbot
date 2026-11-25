@@ -31,6 +31,7 @@ mod engines;
 mod link;
 #[cfg(not(target_arch = "wasm32"))]
 mod local;
+mod local_ai;
 mod pages;
 mod pair;
 mod events;

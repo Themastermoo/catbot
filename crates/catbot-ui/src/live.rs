@@ -52,6 +52,7 @@ pub struct State {
     pub engines_changed: u64,
     /// Bumped when the limits change (a `limits` frame).
     pub limits_changed: u64,
+    pub local_ai_changed: u64,
     pub handoffs_changed: u64,
     pub chief_changed: u64,
     pub skills_changed: u64,
@@ -132,6 +133,7 @@ impl State {
             Some("devices") => self.devices_changed += 1,
             Some("engines") => self.engines_changed += 1,
             Some("limits") => self.limits_changed += 1,
+            Some("local-ai") => self.local_ai_changed += 1,
             Some("handoffs") => self.handoffs_changed += 1,
             Some("chief") => self.chief_changed += 1,
             Some("skills") => self.skills_changed += 1,

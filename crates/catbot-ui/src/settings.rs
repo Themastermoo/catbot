@@ -357,6 +357,7 @@ pub fn NewBotDialog(on_close: EventHandler<()>) -> Element {
     let mut color = use_signal(|| "green".to_string());
     let mut making = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
+    let local = use_signal(|| None::<(String, String)>);
 
     let create = move |_| {
         if making() {
@@ -366,13 +367,16 @@ pub fn NewBotDialog(on_close: EventHandler<()>) -> Element {
         problem.set(None);
         spawn(async move {
             let wanted = name.peek().trim().to_string();
-            let body = json!({
+            let mut body = json!({
                 "name": if wanted.is_empty() { "New bot".to_string() } else { wanted },
                 "soul": soul.peek().trim(),
                 "mark": *mark.peek(),
                 "color": *color.peek(),
                 "approvalMode": "ask",
             });
+            if let Some((engine, model)) = local.peek().clone() {
+                body["modelSelection"] = json!({ "instanceId": engine, "model": model });
+            }
             match api::post("/api/bots", &body).await {
                 Ok(answer) => {
                     state.write().apply(&json!({ "kind": "bot", "bot": answer["bot"] }));
@@ -439,6 +443,7 @@ pub fn NewBotDialog(on_close: EventHandler<()>) -> Element {
                 label { class: "mt-3 {LABEL}", "Instructions"
                     textarea { class: "{FIELD} resize-y text-[13px] leading-relaxed", rows: 4, placeholder: "What this bot is for, and how it should work", oninput: move |e| soul.set(e.value()) }
                 }
+                crate::local_ai::NewBotLocal { chosen: local }
                 p { class: "mt-3 text-[12px] leading-relaxed text-ink-secondary",
                     "{shown_name} will ask before acting, and can use your Codex notes. Both can be changed in its settings."
                 }
