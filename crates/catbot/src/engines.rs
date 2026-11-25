@@ -598,7 +598,7 @@ pub fn find(id: &str) -> Option<&'static Engine> {
 
 /// Every thinking level Catbot passes on by name. An agent program's own levels (ACP's
 /// `thought_level`) are its own words and come from it.
-pub const EFFORT_WORDS: [&str; 8] = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max"];
+pub const EFFORT_WORDS: [&str; 9] = ["none", "off", "on", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// The thinking levels a fixed engine takes for a model, from least to most: None when it takes
 /// none, or when they're only known by asking the program (Codex, Pi, agent programs).
@@ -608,6 +608,7 @@ pub const EFFORT_WORDS: [&str; 8] = ["none", "off", "minimal", "low", "medium", 
 ///   5.2 and later add xhigh; o-series: low…high). Pro and chat models take none.
 /// - xAI: `reasoning_effort` on Grok 4.5 and later (xhigh from 4.6); older Groks refuse it.
 /// - gpt-oss anywhere (Groq, Cerebras, Ollama, LM Studio): low…high.
+/// - Ollama's other thinking models (Qwen3, DeepSeek-R1…, stage 24): off or on.
 pub fn effort_levels(engine: &Engine, model: &str) -> Option<Vec<&'static str>> {
     let model = model.trim().to_lowercase();
     let model = model.as_str();
@@ -619,6 +620,9 @@ pub fn effort_levels(engine: &Engine, model: &str) -> Option<Vec<&'static str>> 
     }
     if model.contains("gpt-oss") {
         return Some(vec!["low", "medium", "high"]);
+    }
+    if engine.id == "ollama" && thinks(model) {
+        return Some(vec!["off", "on"]);
     }
     match engine.id {
         "openai" => {
@@ -643,6 +647,39 @@ pub fn effort_levels(engine: &Engine, model: &str) -> Option<Vec<&'static str>> 
             }
         }
         _ => None,
+    }
+}
+
+/// Ollama's models that can think (from what Ollama says of each, `server/local_ai.rs`).
+static THINKERS: std::sync::Mutex<Option<std::collections::HashSet<String>>> = std::sync::Mutex::new(None);
+
+/// Notes which of Ollama's models can think.
+pub fn note_thinkers(models: impl IntoIterator<Item = (String, bool)>) {
+    let mut all = THINKERS.lock().expect("thinkers lock");
+    let set = all.get_or_insert_with(std::collections::HashSet::new);
+    for (model, thinks) in models {
+        let model = model.to_lowercase();
+        if thinks {
+            set.insert(model);
+        } else {
+            set.remove(&model);
+        }
+    }
+}
+
+/// Whether one of Ollama's models can think: as Ollama said, or by its family's name until then.
+fn thinks(model: &str) -> bool {
+    let known = THINKERS.lock().expect("thinkers lock").as_ref().is_some_and(|set| set.contains(model) || set.contains(&format!("{model}:latest")));
+    known || ["qwen3", "deepseek-r1", "magistral", "phi4-reasoning", "cogito"].iter().any(|family| model.starts_with(family))
+}
+
+/// The `reasoning_effort` sent for a bot's thinking level: Off is "none" (Ollama then doesn't
+/// think), On sends nothing (the model's own way, which is to think).
+pub fn effort_sent(effort: &str) -> Option<&str> {
+    match effort {
+        "on" => None,
+        "off" => Some("none"),
+        other => Some(other),
     }
 }
 
@@ -723,6 +760,11 @@ mod tests {
         assert_eq!(at("xai", "grok-4-fast"), None);
         assert_eq!(at("groq", "openai/gpt-oss-120b").unwrap(), ["low", "medium", "high"]);
         assert_eq!(at("ollama", "gpt-oss:20b").unwrap().len(), 3);
+        assert_eq!(at("ollama", "qwen3.5:9b"), Some(vec!["off", "on"]));
+        assert_eq!(at("ollama", "llama3.1:8b"), None);
+        note_thinkers([("my-thinker:7b".to_string(), true)]);
+        assert_eq!(at("ollama", "my-thinker:7b"), Some(vec!["off", "on"]));
+        assert_eq!((effort_sent("off"), effort_sent("on"), effort_sent("high")), (Some("none"), None, Some("high")));
         assert_eq!(at("deepseek", "deepseek-reasoner"), None);
         assert_eq!(at("codex", ""), None, "Codex says for itself");
         assert_eq!(at("gemini", ""), None);

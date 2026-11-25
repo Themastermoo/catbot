@@ -3965,3 +3965,117 @@ async fn a_bot_is_put_away_and_brought_back() {
     assert!(listed().await.contains(&"Scout".to_string()));
     assert!(s.call("GET", "/api/archived-bots", None).await.1["bots"].as_array().unwrap().is_empty());
 }
+
+/// A stand-in for Ollama: two models (one that thinks), a download that streams its progress
+/// (or fails for an unknown name), and removal.
+fn fake_ollama(models: std::sync::Arc<std::sync::Mutex<Vec<String>>>) -> Router {
+    use axum::{Json, extract::State, routing::delete};
+    let tags = |State(m): State<std::sync::Arc<std::sync::Mutex<Vec<String>>>>| async move {
+        let list: Vec<Value> = m.lock().unwrap().iter().map(|n| json!({ "name": n, "size": 5_000_000_000u64, "details": { "parameter_size": "8B", "quantization_level": "Q4_K_M", "family": "llama" } })).collect();
+        Json(json!({ "models": list }))
+    };
+    let show = |Json(b): Json<Value>| async move {
+        let thinks = b["model"].as_str().unwrap_or_default().starts_with("thinker");
+        Json(json!({ "capabilities": if thinks { json!(["completion", "thinking"]) } else { json!(["completion"]) } }))
+    };
+    let pull = |State(m): State<std::sync::Arc<std::sync::Mutex<Vec<String>>>>, Json(b): Json<Value>| async move {
+        let name = b["model"].as_str().unwrap_or_default().to_string();
+        if name == "nosuch:1b" {
+            return Response::new(Body::from("{\"error\":\"pull model manifest: file does not exist\"}\n"));
+        }
+        m.lock().unwrap().push(name);
+        let lines = ["{\"status\":\"pulling manifest\"}", "{\"status\":\"pulling abc\",\"digest\":\"abc\",\"total\":100,\"completed\":40}", "{\"status\":\"pulling abc\",\"digest\":\"abc\",\"total\":100,\"completed\":100}", "{\"status\":\"success\"}"];
+        let chunks: Vec<Result<Bytes, Infallible>> = lines.iter().map(|l| Ok(Bytes::from(format!("{l}\n")))).collect();
+        Response::new(Body::from_stream(stream::iter(chunks)))
+    };
+    let remove = |State(m): State<std::sync::Arc<std::sync::Mutex<Vec<String>>>>, Json(b): Json<Value>| async move {
+        m.lock().unwrap().retain(|n| b["model"] != n.as_str());
+        Json(json!({}))
+    };
+    Router::new()
+        .route("/api/version", get(|| async { Json(json!({ "version": "0.12.0" })) }))
+        .route("/api/tags", get(tags))
+        .route("/api/show", post(show))
+        .route("/api/pull", post(pull))
+        .route("/api/delete", delete(remove))
+        .route("/v1/models", get(|| async { Json(json!({ "data": [] })) }))
+        .with_state(models)
+}
+
+#[tokio::test]
+async fn ollama_is_offered_started_and_its_models_got_and_removed() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+
+    // Not installed and not running: the way to get it, and not offered to bots.
+    s.app.with_store(|store| store.set_engine_key("ollama", "", Some("http://127.0.0.1:9/v1")));
+    s.app.with_store(|store| store.set_engine_key("lmstudio", "", Some("http://127.0.0.1:9/v1")));
+    unsafe { std::env::set_var("CATBOT_OLLAMA_PROGRAM", s._dir.path().join("no-ollama")) };
+    let (status, seen) = s.call("GET", "/api/local-ai", None).await;
+    assert_eq!(status, 200, "{seen}");
+    assert_eq!((seen["ollama"]["running"].as_bool(), seen["lmstudio"]["running"].as_bool()), (Some(false), Some(false)));
+    assert!(seen["install"]["ollamaPage"].as_str().unwrap().starts_with("https://ollama.com"));
+    assert_eq!(seen["suggested"].as_array().unwrap().len(), 6);
+    let ready = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "ollama").unwrap()["ready"].as_bool();
+    assert_eq!(ready(&s.call("GET", "/api/engines", None).await.1), Some(false), "not offered until added");
+
+    // Installed: Start runs the program (a stand-in that notes how it was called).
+    let program = s._dir.path().join("fake-ollama.sh");
+    let called = s._dir.path().join("ollama-called");
+    std::fs::write(&program, format!("#!/bin/sh\necho \"$@\" > {}\n", called.display())).unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    unsafe { std::env::set_var("CATBOT_OLLAMA_PROGRAM", &program) };
+    let (status, started) = s.call("POST", "/api/local-ai/ollama/start", None).await;
+    assert_eq!((status, started["ollama"]["installed"].as_bool()), (200, Some(true)), "{started}");
+    assert_eq!(std::fs::read_to_string(&called).unwrap().trim(), "serve");
+
+    // Running, with its models; one thinks, so its bots get Off/On.
+    let models = std::sync::Arc::new(std::sync::Mutex::new(vec!["llama3.1:8b".to_string(), "thinker:8b".to_string()]));
+    let ollama = listen(fake_ollama(models.clone())).await;
+    s.app.with_store(|store| store.set_engine_key("ollama", "", Some(&format!("http://{ollama}/v1"))));
+    let (_, seen) = s.call("GET", "/api/local-ai", None).await;
+    assert_eq!((seen["ollama"]["running"].as_bool(), seen["ollama"]["version"].as_str(), seen["ollama"]["added"].as_bool()), (Some(true), Some("0.12.0"), Some(false)));
+    let listed = seen["ollama"]["models"].as_array().unwrap();
+    assert_eq!(listed.iter().map(|m| (m["name"].as_str().unwrap(), m["thinks"].as_bool().unwrap())).collect::<Vec<_>>(), vec![("llama3.1:8b", false), ("thinker:8b", true)]);
+    assert_eq!(listed[0]["size"], 5_000_000_000u64);
+    assert!(seen["suggested"].as_array().unwrap().iter().any(|m| m["name"] == "llama3.1:8b" && m["have"] == true));
+
+    // Use it: offered to bots from now on.
+    let (status, used) = s.call("POST", "/api/local-ai/ollama/use", None).await;
+    assert_eq!((status, used["ollama"]["added"].as_bool()), (200, Some(true)));
+    assert_eq!(ready(&s.call("GET", "/api/engines", None).await.1), Some(true));
+    until(&mut events, "engines", |f| f["kind"] == "engines").await;
+
+    // Getting a model shows its progress and ends with it listed; an unknown name says so.
+    let (status, _) = s.call("POST", "/api/local-ai/ollama/pull", Some(json!({ "model": "qwen3.5:4b" }))).await;
+    assert_eq!(status, 202);
+    for _ in 0..50 {
+        if s.call("GET", "/api/local-ai", None).await.1["pulling"].as_array().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(models.lock().unwrap().contains(&"qwen3.5:4b".to_string()));
+    assert_eq!(s.call("POST", "/api/local-ai/ollama/pull", Some(json!({ "model": "bad name; rm" }))).await.0, 400);
+    s.call("POST", "/api/local-ai/ollama/pull", Some(json!({ "model": "nosuch:1b" }))).await;
+    let mut problem = Value::Null;
+    for _ in 0..50 {
+        let (_, seen) = s.call("GET", "/api/local-ai", None).await;
+        problem = seen["pulling"].as_array().unwrap().iter().find(|p| p["model"] == "nosuch:1b").map(|p| p["problem"].clone()).unwrap_or(Value::Null);
+        if !problem.is_null() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(problem.as_str(), Some("Ollama has no model called nosuch:1b"));
+    assert_eq!(s.call("DELETE", "/api/local-ai/ollama/pull?model=nosuch:1b", None).await.0, 200);
+
+    // Removing one.
+    let (status, after) = s.call("POST", "/api/local-ai/ollama/remove", Some(json!({ "model": "llama3.1:8b" }))).await;
+    assert_eq!(status, 200, "{after}");
+    assert!(!after["ollama"]["models"].as_array().unwrap().iter().any(|m| m["name"] == "llama3.1:8b"));
+}

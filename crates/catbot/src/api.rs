@@ -238,7 +238,7 @@ impl std::fmt::Display for Failure {
 /// Sends the conversation and streams the answer, passing its text on as it comes.
 async fn ask(client: &reqwest::Client, turn: &ApiTurn, messages: &[Value], with_tools: bool, used: &Used, tx: &mpsc::Sender<Event>) -> Result<Round, Failure> {
     let mut body = json!({ "model": turn.model, "messages": messages, "stream": true });
-    if let Some(effort) = &turn.effort {
+    if let Some(effort) = turn.effort.as_deref().and_then(crate::engines::effort_sent) {
         body["reasoning_effort"] = json!(effort);
     }
     if !used.no_usage_option {

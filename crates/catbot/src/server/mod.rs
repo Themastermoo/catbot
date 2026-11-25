@@ -34,6 +34,7 @@ pub mod email;
 pub mod engines;
 pub mod images;
 pub mod inbox;
+pub mod local_ai;
 pub mod page_hosts;
 pub mod pets;
 pub mod profiles;
@@ -443,6 +444,21 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
             voice::route(&app, method, &rest, req, true).await
+        }
+        ["api", "local-ai", rest @ ..] => {
+            // AI on this computer: Ollama and LM Studio (stage 24).
+            let rest: Vec<String> = rest.iter().map(|s| urlencoding_decode(s)).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let query = query_param(&req, "model").map(urlencoding_decode);
+            let body = if method == Method::POST {
+                match json_body(req).await {
+                    Ok(body) => body,
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                json!({})
+            };
+            respond(local_ai::route(&app, &method, &rest, query, body, true).await)
         }
         ["api", "scheduled", rest @ ..] => {
             // Messages set to go out later (stage 21).

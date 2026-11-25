@@ -274,6 +274,7 @@ pub fn effort_label(id: &str) -> String {
     match id {
         "none" => "None".into(),
         "off" => "Off".into(),
+        "on" => "On".into(),
         "minimal" => "Minimal".into(),
         "low" => "Low".into(),
         "medium" => "Medium".into(),
@@ -316,6 +317,8 @@ fn describe(app: &App, engine: &Engine) -> Value {
     };
     let ready = match engine.kind {
         Kind::Claude => true,
+        // One on this computer once the person added it (stage 24), or a bot uses it.
+        Kind::Api if !engine.needs_key => super::local_ai::is_added(app, engine.id),
         Kind::Api => access.is_some(),
         Kind::Agent => installed == Some(true) && signed_in != Some(false),
         Kind::Codex => installed == Some(true) && signed_in == Some(true),
