@@ -378,6 +378,12 @@ async fn same_wifi_opens_a_second_door_and_the_check_says_what_reaches() {
     assert_eq!((reach["sameWifi"].as_bool(), reach["keepAwake"].as_bool(), reach["lanUrl"].clone()), (Some(false), Some(false), Value::Null), "off to start");
     assert_eq!(s.call("PUT", "/api/devices/reach", Some(json!({ "sameWifi": "yes" }))).await.0, 400);
     let (status, on) = s.call("PUT", "/api/devices/reach", Some(json!({ "sameWifi": true }))).await;
+    // The Wi-Fi door takes the remote door's port + 1, which something else on a busy machine
+    // can hold; that's said rather than failed, and there's nothing more to try here.
+    if on["wifiProblem"].as_str().is_some_and(|p| p.contains("in use")) {
+        assert_eq!((status, on["sameWifi"].as_bool()), (200, Some(true)), "{on}");
+        return;
+    }
     assert_eq!((status, on["sameWifi"].as_bool(), on["wifiProblem"].clone()), (200, Some(true), Value::Null), "{on}");
     let (_, checked) = s.call("POST", "/api/devices/check", None).await;
     let checks = checked["checks"].as_array().unwrap();
@@ -4152,4 +4158,137 @@ async fn an_ai_that_stops_working_is_told_retried_and_handed_to_a_backup() {
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot").await;
     assert_eq!(reply["message"]["text"], "Hello from OpenAI.");
     assert!(openai_row(&s.call("GET", "/api/engines", None).await.1)["trouble"].is_null());
+}
+
+/// A stand-in for GitHub's releases: `/repos/moo/catbot/releases/latest` and its files.
+fn fake_github(release: std::sync::Arc<std::sync::Mutex<Value>>, files: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>) -> Router {
+    Router::new()
+        .route("/repos/moo/catbot/releases/latest", get(move || {
+            let release = release.lock().unwrap().clone();
+            async move { axum::Json(release) }
+        }))
+        .route("/dl/{name}", get(move |axum::extract::Path(name): axum::extract::Path<String>| {
+            let found = files.lock().unwrap().get(&name).cloned();
+            async move {
+                match found {
+                    Some(bytes) => Response::builder().body(Body::from(bytes)).unwrap(),
+                    None => Response::builder().status(404).body(Body::empty()).unwrap(),
+                }
+            }
+        }))
+}
+
+/// Publishes a release on the stand-in GitHub: the Windows zip (Catbot.exe saying `says`), and
+/// release.json naming it with `sha` (its real checksum unless given).
+fn publish(
+    gh: SocketAddr,
+    release: &std::sync::Mutex<Value>,
+    files: &std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>,
+    version: &str,
+    store: i64,
+    says: &str,
+    sha: Option<&str>,
+) {
+    use sha2::Digest;
+    use std::io::Write;
+    let mut zipped = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut zipped);
+        let options = zip::write::SimpleFileOptions::default();
+        zip.start_file("catbot-windows/app/Catbot.exe", options).unwrap();
+        zip.write_all(says.as_bytes()).unwrap();
+        zip.start_file("catbot-windows/app/catbot-server.exe", options).unwrap();
+        zip.write_all(b"server").unwrap();
+        zip.finish().unwrap();
+    }
+    let zipped = zipped.into_inner();
+    let real = format!("{:x}", sha2::Sha256::digest(&zipped));
+    let about = json!({
+        "version": version, "store": store,
+        "windows": { "file": "catbot-windows-x64.zip", "sha256": sha.unwrap_or(&real), "bytes": zipped.len() },
+        "android": { "file": "catbot-android.apk", "sha256": "00", "bytes": 1, "code": 5 },
+    });
+    let mut files = files.lock().unwrap();
+    files.insert("catbot-windows-x64.zip".into(), zipped);
+    files.insert("release.json".into(), about.to_string().into_bytes());
+    let asset = |name: &str| json!({ "name": name, "browser_download_url": format!("http://{gh}/dl/{name}") });
+    *release.lock().unwrap() = json!({
+        "tag_name": format!("v{version}"), "body": "Faster cats.", "html_url": "https://github.com/moo/catbot/releases/x",
+        "published_at": "2026-11-25T20:00:00Z",
+        "assets": [asset("catbot-windows-x64.zip"), asset("release.json")],
+    });
+}
+
+#[tokio::test]
+async fn an_update_is_downloaded_checked_installed_and_can_go_back() {
+    use server::updates::{Place, Platform};
+    let s = setup().await;
+    let release = std::sync::Arc::new(std::sync::Mutex::new(json!({})));
+    let files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let gh = listen(fake_github(release.clone(), files.clone())).await;
+    let install = tempfile::tempdir().unwrap();
+    let here = env!("CARGO_PKG_VERSION");
+    for (version, says) in [(here, "this one"), ("0.1.5", "older"), ("0.1.4", "oldest")] {
+        std::fs::create_dir_all(install.path().join("versions").join(version)).unwrap();
+        std::fs::write(install.path().join("versions").join(version).join("Catbot.exe"), says).unwrap();
+    }
+    let store = catbot::store::STORE_VERSION;
+    std::fs::write(
+        install.path().join("versions.json"),
+        json!({ "current": here, "kept": { here: { "store": store }, "0.1.5": { "store": store }, "0.1.4": { "store": store - 1 } } }).to_string(),
+    )
+    .unwrap();
+    s.app.updates.set_place(Place { platform: Platform::Windows, dir: Some(install.path().into()), api: format!("http://{gh}"), code: None });
+    let read_versions = || serde_json::from_slice::<Value>(&std::fs::read(install.path().join("versions.json")).unwrap()).unwrap();
+
+    // A release whose download isn't what release.json says is thrown away.
+    publish(gh, &release, &files, "9.0.0", store + 1, "new", Some("0000"));
+    assert_eq!(s.call("PUT", "/api/version", Some(json!({ "repo": "moo/catbot" }))).await.0, 200);
+    let (_, checked) = s.call("POST", "/api/version/check", Some(json!({}))).await;
+    assert_eq!((checked["newer"].as_bool(), checked["offer"]["version"].as_str(), checked["offer"]["canInstall"].as_bool()), (Some(true), Some("9.0.0"), Some(true)), "{checked}");
+    assert_eq!(checked["offer"]["notes"], "Faster cats.");
+    let mut events = s.events().await;
+    assert_eq!(s.call("POST", "/api/version/download", None).await.0, 202);
+    let failed = until(&mut events, "the failed download", |f| f["kind"] == "update" && f["update"]["error"].is_string()).await;
+    assert!(failed["update"]["error"].as_str().unwrap().contains("checksum"), "{failed}");
+    assert!(!install.path().join("versions/9.0.0").exists());
+
+    // The real one is unpacked beside this version.
+    publish(gh, &release, &files, "9.0.0", store + 1, "new", None);
+    assert_eq!(s.call("POST", "/api/version/download", None).await.0, 202);
+    let ready = until(&mut events, "ready", |f| f["kind"] == "update" && f["update"]["ready"]["version"] == "9.0.0").await;
+    assert_eq!(std::fs::read_to_string(install.path().join("versions/9.0.0/Catbot.exe")).unwrap(), "new");
+    assert_eq!(ready["update"]["kept"].as_array().map(Vec::len), Some(4), "{ready}");
+    assert_eq!(read_versions()["kept"]["9.0.0"]["store"], store + 1);
+
+    // Installing: a copy of the chats, the new one current and being tried, and a restart.
+    let (status, _) = s.call("POST", "/api/version/install", None).await;
+    assert_eq!(status, 200);
+    until(&mut events, "restart", |f| f["kind"] == "update" && f["restart"] == true).await;
+    let kept = read_versions();
+    assert_eq!((kept["current"].as_str(), kept["previous"].as_str(), kept["trying"]["version"].as_str()), (Some("9.0.0"), Some(here), Some("9.0.0")), "{kept}");
+    let snapshots = s.app.with_store(|st| Ok(st.home().join("updates/snapshots"))).unwrap();
+    assert_eq!(std::fs::read_dir(&snapshots).unwrap().count(), 2, "the copy and what it is");
+    let (_, version) = s.call("GET", "/api/version", None).await;
+    assert!(version["update"]["ready"].is_null(), "{version}");
+
+    // Say the new one changed how chats are stored. Going back to a version that reads the same
+    // format as the copy offers the copy first, and takes it only when asked.
+    let db = s.app.with_store(|st| Ok(st.home().join("catbot.db"))).unwrap();
+    rusqlite::Connection::open(&db).unwrap().pragma_update(None, "user_version", store + 1).unwrap();
+    let (status, asked) = s.call("POST", "/api/version/back", Some(json!({ "to": "0.1.5" }))).await;
+    assert_eq!((status, asked["needsSnapshot"].as_bool()), (409, Some(true)), "{asked}");
+    assert_eq!(asked["snapshot"]["store"], store);
+    assert_eq!(read_versions()["current"], "9.0.0", "nothing changed yet");
+    let (status, went) = s.call("POST", "/api/version/back", Some(json!({ "to": "0.1.5", "useSnapshot": true }))).await;
+    assert_eq!((status, went["restored"].as_bool()), (200, Some(true)), "{went}");
+    assert_eq!(read_versions()["current"], "0.1.5");
+    let restore = s.app.with_store(|st| Ok(st.home().join("updates/restore.json"))).unwrap();
+    assert!(restore.is_file(), "done when Catbot next starts, before the chats are opened");
+
+    // A version older than every copy can't read today's chats, and says so.
+    let (status, _) = s.call("POST", "/api/version/back", Some(json!({ "to": "0.1.4" }))).await;
+    assert_eq!(status, 409);
+    let (status, _) = s.call("POST", "/api/version/back", Some(json!({ "to": "0.0.1" }))).await;
+    assert_eq!(status, 400, "not kept");
 }

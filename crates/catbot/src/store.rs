@@ -886,6 +886,23 @@ impl Store {
         &self.home
     }
 
+    /// The storage format the chats are in now: STORE_VERSION, or a newer one after going back
+    /// to an older Catbot without the copy of the data (stage 28).
+    pub fn format(&self) -> Result<i64, BoxError> {
+        Ok(self.conn.pragma_query_value(None, "user_version", |r| r.get(0))?)
+    }
+
+    /// A whole copy of the chats in one file, taken before an update (stage 28.2), so going back
+    /// to an older Catbot can have them as they were.
+    pub fn copy_to(&self, path: &Path) -> Result<(), BoxError> {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        let _ = std::fs::remove_file(path);
+        self.conn.execute("VACUUM INTO ?1", [path.to_string_lossy()])?;
+        Ok(())
+    }
+
     pub fn create_bot(&self, new: NewBot) -> Result<Bot, BoxError> {
         let name = new.name.trim().to_string();
         check_name(&name)?;

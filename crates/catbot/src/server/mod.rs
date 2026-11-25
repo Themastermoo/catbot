@@ -27,6 +27,7 @@ pub mod reactions;
 pub mod secrets;
 pub mod usage;
 pub mod voice;
+pub mod updates;
 pub mod version;
 pub mod departments;
 pub mod devices;
@@ -126,6 +127,8 @@ pub struct App {
     pub limited_until: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
     /// AIs that stopped working, by engine id: what went wrong and its fix (`health.rs`).
     pub troubles: std::sync::Mutex<std::collections::BTreeMap<String, Value>>,
+    /// Updates with rollback (stage 28): where this Catbot runs, and a download or install under way.
+    pub updates: updates::Updates,
     /// Where the home door listens, once it does: how a turn's tools reach Catbot (`bot_tools.rs`).
     pub local: std::sync::OnceLock<SocketAddr>,
     /// The keys of turns using Catbot's tools, and whose they are.
@@ -166,6 +169,7 @@ impl App {
             limited_until: std::sync::Mutex::new(std::collections::HashMap::new()),
             channels_busy: std::sync::Mutex::new(std::collections::HashSet::new()),
             troubles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            updates: updates::Updates::default(),
             local: std::sync::OnceLock::new(),
             tool_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
             computers: computers::Computers::default(),
@@ -254,6 +258,8 @@ impl App {
 }
 
 pub async fn serve(options: Options) -> Result<(), BoxError> {
+    // Going back to an older Catbot can ask for the chats as they were before an update.
+    updates::restore_if_asked(&options.home);
     let store = Store::open(&options.home)?;
     let recorder = match &options.record {
         Some(dir) => {
@@ -318,6 +324,8 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
         }
     }
 
+    // A new version that keeps running counts as started (stage 28.2).
+    updates::started(app.clone());
     // The AI programs the person pointed Catbot to (stage 19.7.2).
     terminal::load(&app);
     // The same-Wi-Fi door and keeping awake, as last set (stage 19.7.1).
@@ -396,7 +404,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "version", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
-            let body = if method == Method::PUT {
+            let body = if method == Method::PUT || rest == ["back"] {
                 match json_body(req).await {
                     Ok(body) => body,
                     Err(err) => return respond(Err(err)),

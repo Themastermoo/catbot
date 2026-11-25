@@ -64,9 +64,10 @@ pub fn newer(theirs: &str, ours: &str) -> bool {
     a > b
 }
 
-async fn github(path: &str) -> Result<(u16, Value), String> {
+async fn github(app: &App, path: &str) -> Result<(u16, Value), String> {
+    let api = app.updates.place().api.clone();
     let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).user_agent(format!("Catbot/{VERSION}")).build().map_err(|e| e.to_string())?;
-    let reply = client.get(format!("https://api.github.com/repos/{path}")).header("Accept", "application/vnd.github+json").send().await.map_err(|e| format!("couldn't reach GitHub: {e}"))?;
+    let reply = client.get(format!("{api}/repos/{path}")).header("Accept", "application/vnd.github+json").send().await.map_err(|e| format!("couldn't reach GitHub: {e}"))?;
     let status = reply.status().as_u16();
     Ok((status, reply.json().await.unwrap_or(Value::Null)))
 }
@@ -81,14 +82,22 @@ async fn check(app: &App) -> Answer {
     if repo.is_empty() {
         return Err(bad("name Catbot's GitHub repository first"));
     }
-    let (status, release) = github(&format!("{repo}/releases/latest")).await.map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    let (status, release) = github(app, &format!("{repo}/releases/latest")).await.map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    let mut offer = Value::Null;
     let (latest, is_newer) = match status {
         200 => {
             let tag = release["tag_name"].as_str().unwrap_or_default().to_string();
-            (json!({ "kind": "release", "name": tag, "url": release["html_url"], "at": release["published_at"] }), newer(&tag, VERSION))
+            let is_newer = newer(&tag, VERSION);
+            // What this device could install (stage 28.2); a release without release.json is
+            // still worth telling about.
+            if is_newer {
+                let found = super::updates::release_json(&release).await.ok().flatten();
+                offer = super::updates::offer(app, &release, found.as_ref());
+            }
+            (json!({ "kind": "release", "name": tag, "url": release["html_url"], "at": release["published_at"] }), is_newer)
         }
         404 => {
-            let (status, commits) = github(&format!("{repo}/commits?per_page=1")).await.map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+            let (status, commits) = github(app, &format!("{repo}/commits?per_page=1")).await.map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
             if status == 404 {
                 return Err((StatusCode::NOT_FOUND, format!("GitHub has no public repository {repo} (a private one can't be checked yet)")));
             }
@@ -105,11 +114,21 @@ async fn check(app: &App) -> Answer {
         403 | 429 => return Err((StatusCode::BAD_GATEWAY, "GitHub says to wait: too many checks for now".into())),
         other => return Err((StatusCode::BAD_GATEWAY, format!("GitHub answered {other}"))),
     };
-    let checked = json!({ "at": chrono::Utc::now().to_rfc3339(), "latest": latest, "newer": is_newer });
+    let checked = json!({ "at": chrono::Utc::now().to_rfc3339(), "latest": latest, "newer": is_newer, "offer": offer });
     let mut kept = saved(app);
     kept["checked"] = checked.clone();
     app.try_store(|store| store.set_setting(KEY, &kept)).map_err(fail)?;
     Ok((StatusCode::OK, checked))
+}
+
+/// The repository's latest release, as GitHub gives it.
+pub async fn latest_release(app: &App, repo: &str) -> Result<Value, String> {
+    match github(app, &format!("{repo}/releases/latest")).await? {
+        (200, release) => Ok(release),
+        (404, _) => Err(format!("{repo} has no releases on GitHub yet")),
+        (403 | 429, _) => Err("GitHub says to wait: too many checks for now".into()),
+        (other, _) => Err(format!("GitHub answered {other}")),
+    }
 }
 
 fn wire(app: &App) -> Value {
@@ -120,10 +139,16 @@ fn wire(app: &App) -> Value {
         "repo": repo(app),
         "own_repo": REPO,
         "checked": kept["checked"],
+        "update": super::updates::wire(app),
     })
 }
 
-pub async fn route(app: &App, method: &Method, rest: &[&str], body: Value) -> Answer {
+pub async fn route(app: &std::sync::Arc<App>, method: &Method, rest: &[&str], body: Value) -> Answer {
+    if method == Method::POST
+        && let Some(answer) = super::updates::route(app, rest, body.clone()).await
+    {
+        return answer;
+    }
     match (method, rest) {
         (&Method::GET, []) => Ok((StatusCode::OK, wire(app))),
         (&Method::PUT, []) => {

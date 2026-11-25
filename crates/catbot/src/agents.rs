@@ -84,7 +84,7 @@ async fn fetch(url: &str, into: &Path, sha: &str, progress: &impl Fn(u64, Option
 }
 
 /// Unpacks a zip, refusing any entry that would land outside `into`.
-fn unzip(file: &Path, into: &Path) -> Result<(), String> {
+pub(crate) fn unzip(file: &Path, into: &Path) -> Result<(), String> {
     let reader = std::fs::File::open(file).map_err(|e| e.to_string())?;
     let mut archive = zip::ZipArchive::new(reader).map_err(|e| format!("the download isn't a zip: {e}"))?;
     std::fs::create_dir_all(into).map_err(|e| e.to_string())?;

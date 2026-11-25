@@ -38,6 +38,11 @@ pub struct Turns {
 }
 
 impl Turns {
+    /// Whether any bot is in the middle of a turn (an update waits for none).
+    pub fn any_busy(&self) -> bool {
+        !self.running.lock().expect("turns lock").is_empty()
+    }
+
     pub fn busy(&self, thread_id: &str) -> bool {
         self.running.lock().expect("turns lock").contains_key(thread_id)
     }
