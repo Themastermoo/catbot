@@ -177,6 +177,17 @@ const BLANK: Engine = Engine {
     download: None,
 };
 
+/// Whether this Catbot runs inside the phone app (stage 26): only the chat APIs work there, since
+/// agent programs and this computer's AIs can't run on a phone.
+pub fn on_phone() -> bool {
+    std::env::var_os("CATBOT_PHONE").is_some_and(|v| v == "1")
+}
+
+/// Whether an engine can run here (on the phone, only the chat APIs with keys).
+pub fn works_here(engine: &Engine) -> bool {
+    !on_phone() || (engine.kind == Kind::Api && engine.needs_key)
+}
+
 const fn api(
     id: &'static str,
     name: &'static str,
@@ -327,6 +338,22 @@ pub const ALL: &[Engine] = &[
         "OPENAI_API_KEY",
         "https://platform.openai.com/api-keys",
         &[("gpt-5", "GPT-5"), ("gpt-5-mini", "GPT-5 mini")],
+    ),
+    api(
+        "anthropic",
+        "Claude (Anthropic API)",
+        "https://api.anthropic.com/v1",
+        "ANTHROPIC_API_KEY",
+        "https://platform.claude.com/settings/keys",
+        &[("claude-sonnet-5-5", "Claude Sonnet 5.5"), ("claude-opus-5-5", "Claude Opus 5.5"), ("claude-haiku-5-5", "Claude Haiku 5.5")],
+    ),
+    api(
+        "google",
+        "Gemini (Google API)",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "GEMINI_API_KEY",
+        "https://aistudio.google.com/apikey",
+        &[("gemini-3.6-flash", "Gemini 3.6 Flash"), ("gemini-4-argon", "Gemini 4 Argon")],
     ),
     api(
         "xai",

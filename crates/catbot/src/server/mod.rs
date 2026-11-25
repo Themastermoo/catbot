@@ -813,14 +813,30 @@ pub(super) fn make_bot(app: &Arc<App>, body: &Value) -> Result<Bot, (StatusCode,
     if let Some(changes) = changes.as_object_mut() {
         changes.remove("name");
         changes.remove("soul");
+        // On the phone a new bot starts on an AI that runs there: the first with a key.
+        if crate::engines::on_phone() && !changes.get("modelSelection").is_some_and(Value::is_object) {
+            changes.insert("modelSelection".into(), json!({ "instanceId": phone_engine(app) }));
+        }
     }
     let mut bot = bot;
     apply_changes(&mut bot, &changes)?;
     app.try_store(|store| store.update_bot(&bot)).map_err(bad)?;
+    // Its role, description and picture framing, when it comes with them (a bot copied over).
+    profiles::patch(app, &bot.id, &changes)?;
     app.seed_memory(&bot);
     app.announce_bot(&bot.id);
     eprintln!("catbot: made {} ({})", bot.name, bot.folder.display());
     Ok(bot)
+}
+
+/// The AI a new bot gets on the phone: the first chat API with a key, else Claude's.
+fn phone_engine(app: &App) -> &'static str {
+    crate::engines::ALL
+        .iter()
+        .filter(|e| crate::engines::works_here(e))
+        .find(|e| crate::engines::access(e, app.with_store(|store| store.engine_key(e.id)).flatten().as_ref()).is_some())
+        .map(|e| e.id)
+        .unwrap_or("anthropic")
 }
 
 /// Deletes a bot: its chats go for good, its folder stays.

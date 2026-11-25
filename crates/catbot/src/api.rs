@@ -241,6 +241,10 @@ async fn ask(client: &reqwest::Client, turn: &ApiTurn, messages: &[Value], with_
     if let Some(effort) = turn.effort.as_deref().and_then(crate::engines::effort_sent) {
         body["reasoning_effort"] = json!(effort);
     }
+    if turn.engine.id == "anthropic" {
+        // Claude's own API wants a limit on the answer's length; the compatible endpoint may too.
+        body["max_tokens"] = json!(16_000);
+    }
     if !used.no_usage_option {
         // The usage comes in a last chunk of the stream.
         body["stream_options"] = json!({ "include_usage": true });

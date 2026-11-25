@@ -302,7 +302,7 @@ fn find(id: &str) -> Result<&'static Engine, (StatusCode, String)> {
 }
 
 fn list(app: &App) -> Vec<Value> {
-    engines::ALL.iter().map(|engine| describe(app, engine)).collect()
+    engines::ALL.iter().filter(|engine| engines::works_here(engine)).map(|engine| describe(app, engine)).collect()
 }
 
 /// An engine for the interface: everything but the key.
