@@ -1,6 +1,6 @@
 [package]
 name = "catbot"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Catbot server. For now: a pass-through recorder in front of the reference server."

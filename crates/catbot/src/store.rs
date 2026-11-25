@@ -325,6 +325,11 @@ CREATE TABLE messages (
 CREATE INDEX messages_by_conversation ON messages(conversation_id, id);
 ";
 
+/// The storage format this Catbot writes: the last of `open`'s steps below. A release records
+/// it, so going back to an older Catbot knows whether that one can still read the chats
+/// (stage 28, updates with rollback). Raise it with each new step.
+pub const STORE_VERSION: i64 = 12;
+
 /// How many runs a bot keeps.
 pub const RUNS_KEPT: i64 = 200;
 
@@ -1504,6 +1509,13 @@ mod tests {
 
     fn new(name: &str) -> NewBot {
         NewBot { name: name.into(), instructions: "Be brief.".into(), model: None, mode: PermissionMode::Default, codex: true }
+    }
+
+    #[test]
+    fn store_version_is_the_last_step() {
+        let (_dir, store) = store();
+        let written: i64 = store.conn.pragma_query_value(None, "user_version", |r| r.get(0)).unwrap();
+        assert_eq!(written, STORE_VERSION, "raise STORE_VERSION with each new step in open");
     }
 
     #[test]

@@ -11,6 +11,12 @@
 # ${CATBOT_ANDROID_KEY_DIR:-~/.local/share/catbot/android-key} (made on the first build). Keep
 # that folder: an update must be signed with the same key, or the phone refuses it until the
 # old app is uninstalled (and the phone paired again).
+#
+# For releases (scripts/release/README.md), these can be set:
+#   CATBOT_ANDROID_KEY_REQUIRED=1   stop if the key isn't there, rather than making a new one
+#   CATBOT_ANDROID_CODE=<n>         Android's version code; by default the minutes since
+#                                   2026-01-01, so every build is newer to the phone than the last
+#   CATBOT_ANDROID_OUT=<path>       where the APK goes (default dist/catbot.apk)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 REPO="$(pwd)"
@@ -19,6 +25,13 @@ KEYSTORE="$KEY_DIR/catbot-release.keystore"
 PASSFILE="$KEY_DIR/password"
 APP="$REPO/target/dx/catbot-ui/release/android/app"
 RES="$APP/app/src/main/res"
+OUT="${CATBOT_ANDROID_OUT:-dist/catbot.apk}"
+VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+# Android refuses an APK whose code isn't higher than the installed one's, so the code counts
+# time, not the version: a rebuilt older version (going back) is still "newer" to the phone.
+CODE="${CATBOT_ANDROID_CODE:-$(( ($(date -u +%s) - $(date -u -d 2026-01-01 +%s)) / 60 ))}"
+# The app knows its own code too, so it offers only an update the phone will accept.
+export CATBOT_ANDROID_CODE="$CODE"
 
 say() { printf '\033[1;36m%s\033[0m\n' "$*"; }
 stop() { printf '\033[1;31m%s\033[0m\n' "$*" >&2; exit 1; }
@@ -55,6 +68,9 @@ cat >"$RES/mipmap-anydpi-v26/ic_launcher.xml" <<'EOF'
 </adaptive-icon>
 EOF
 
+say "Version $VERSION, code $CODE…"
+sed -i -E "s/versionCode = [0-9]+/versionCode = $CODE/; s/versionName = \"[^\"]*\"/versionName = \"$VERSION\"/" "$APP/app/build.gradle.kts"
+
 # No shrinking: the Rust side reaches Android classes by name, which a shrinker can't see.
 sed -i 's/isMinifyEnabled = true/isMinifyEnabled = false/' "$APP/app/build.gradle.kts"
 
@@ -63,6 +79,9 @@ say "Packing the release build…"
 UNSIGNED="$(ls "$APP"/app/build/outputs/apk/release/*-unsigned.apk 2>/dev/null | head -1)"
 [[ -n "$UNSIGNED" ]] || stop "Gradle didn't make a release APK."
 
+if [[ ! -f "$KEYSTORE" && "${CATBOT_ANDROID_KEY_REQUIRED:-}" == 1 ]]; then
+  stop "Catbot's signing key isn't in $KEY_DIR. A new key would make phones refuse the update."
+fi
 if [[ ! -f "$KEYSTORE" ]]; then
   say "Making Catbot's signing key in $KEY_DIR (keep this folder)…"
   mkdir -p "$KEY_DIR"
@@ -75,10 +94,10 @@ if [[ ! -f "$KEYSTORE" ]]; then
 fi
 
 say "Signing it…"
-mkdir -p dist
-"$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED" dist/catbot-aligned.apk
+mkdir -p "$(dirname "$OUT")"
+"$BUILD_TOOLS/zipalign" -f -p 4 "$UNSIGNED" "$OUT.aligned"
 "$BUILD_TOOLS/apksigner" sign --ks "$KEYSTORE" --ks-pass "file:$PASSFILE" --ks-key-alias catbot \
-  --out dist/catbot.apk dist/catbot-aligned.apk
-rm -f dist/catbot-aligned.apk dist/catbot.apk.idsig
-"$BUILD_TOOLS/apksigner" verify dist/catbot.apk
-say "Done: dist/catbot.apk ($(du -h dist/catbot.apk | cut -f1))"
+  --out "$OUT" "$OUT.aligned"
+rm -f "$OUT.aligned" "$OUT.idsig"
+"$BUILD_TOOLS/apksigner" verify "$OUT"
+say "Done: $OUT ($(du -h "$OUT" | cut -f1)), version $VERSION, code $CODE"

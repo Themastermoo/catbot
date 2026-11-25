@@ -1,0 +1,151 @@
+# Catbot's releases (stage 28.1). This file belongs in .github/workflows/release.yml; it's kept
+# here until Moo copies it there (Claude's tools can't write into .github), see README.md.
+#
+# Pushing a tag like v0.2.0 builds:
+#   - the Windows app,
+#   - the phone app, signed with Catbot's key,
+#   - the release before this one rebuilt for phones, so a phone can go back to it,
+#   - release.json and SHA256SUMS, which Catbot checks every download against.
+# It then publishes them as a GitHub release. Catbot's update check reads the latest release.
+#
+# "Run workflow" by hand rebuilds an older release's phone app with a new version code. Do this
+# when a phone needs to go back further than one release. See scripts/release/README.md.
+#
+# Needs two repository secrets (Settings › Secrets and variables › Actions):
+#   CATBOT_ANDROID_KEYSTORE_B64   the signing keystore, base64
+#   CATBOT_ANDROID_KEY_PASSWORD   its password
+# Without them the build stops rather than signing with a new key, which phones would refuse.
+name: Release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+    inputs:
+      rebuild:
+        description: "Rebuild this older release's phone app so phones can go back to it (a tag, like v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  DX_VERSION: "0.7.10"
+  NDK_VERSION: "28.2.13676358"
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.inputs.rebuild || github.ref }}
+
+      - name: Check the tag matches Catbot's version
+        if: github.event_name == 'push'
+        run: |
+          want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [[ "$GITHUB_REF_NAME" == "$want" ]] || { echo "::error::The tag is $GITHUB_REF_NAME but Cargo.toml says $want."; exit 1; }
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Install Rust targets, MinGW, dx and the Android NDK
+        run: |
+          rustup update stable
+          rustup target add wasm32-unknown-unknown x86_64-pc-windows-gnu aarch64-linux-android
+          sudo apt-get update -q
+          sudo apt-get install -y -q gcc-mingw-w64-x86-64 zip
+          curl -sSL "https://github.com/DioxusLabs/dioxus/releases/download/v$DX_VERSION/dx-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C "$HOME/.cargo/bin" dx
+          dx --version
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" "build-tools;34.0.0" "platforms;android-34" > /dev/null
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+
+      # Two phone builds and a Windows build don't fit in a runner's free disk otherwise.
+      - name: Make room
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/share/boost /usr/local/lib/node_modules "$AGENT_TOOLSDIRECTORY/CodeQL"
+          df -h /
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Put the signing key in place
+        env:
+          KEYSTORE_B64: ${{ secrets.CATBOT_ANDROID_KEYSTORE_B64 }}
+          KEY_PASSWORD: ${{ secrets.CATBOT_ANDROID_KEY_PASSWORD }}
+        run: |
+          [[ -n "$KEYSTORE_B64" && -n "$KEY_PASSWORD" ]] || { echo "::error::The signing key secrets aren't set; see scripts/release/README.md."; exit 1; }
+          dir="$RUNNER_TEMP/android-key"
+          mkdir -p "$dir" && chmod 700 "$dir"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$dir/catbot-release.keystore"
+          printf '%s' "$KEY_PASSWORD" > "$dir/password"
+          chmod 600 "$dir"/*
+          echo "CATBOT_ANDROID_KEY_DIR=$dir" >> "$GITHUB_ENV"
+          echo "CATBOT_ANDROID_KEY_REQUIRED=1" >> "$GITHUB_ENV"
+
+      # One version code for the whole run; the rollback build gets the next one, so it's newer to
+      # a phone than this release.
+      - name: Pick the phone's version code
+        run: echo "CODE=$(( ($(date -u +%s) - $(date -u -d 2026-01-01 +%s)) / 60 ))" >> "$GITHUB_ENV"
+
+      # ---- A hand-run rebuild of an older release's phone app ----
+      - name: Rebuild the phone app
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.inputs.rebuild }}
+        run: |
+          grep -q CATBOT_ANDROID_CODE scripts/build-android.sh || { echo "::error::$TAG is older than rebuildable releases (stage 28)."; exit 1; }
+          CATBOT_ANDROID_CODE="$CODE" CATBOT_ANDROID_OUT="$PWD/dist/up/catbot-android.apk" bash scripts/build-android.sh
+          gh release download "$TAG" --pattern release.json --dir dist/up
+          python3 scripts/release/rebuilt.py dist/up "$CODE"
+          gh release upload "$TAG" dist/up/catbot-android.apk dist/up/release.json dist/up/SHA256SUMS --clobber
+
+      # ---- A new release ----
+      - name: Build the Windows app
+        if: github.event_name == 'push'
+        run: bash scripts/build-windows.sh
+
+      - name: Build the phone app
+        if: github.event_name == 'push'
+        run: CATBOT_ANDROID_CODE="$CODE" bash scripts/build-android.sh
+
+      - name: Rebuild the release before this one, for phones going back
+        if: github.event_name == 'push'
+        run: |
+          prev="$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -vx "$GITHUB_REF_NAME" | head -1 || true)"
+          if [[ -z "$prev" ]]; then echo "No earlier release."; exit 0; fi
+          git worktree add -q "$RUNNER_TEMP/prev" "$prev"
+          if ! grep -q CATBOT_ANDROID_CODE "$RUNNER_TEMP/prev/scripts/build-android.sh"; then
+            echo "$prev can't be rebuilt for going back (older than stage 28)."; exit 0
+          fi
+          # This release's Windows build isn't needed any more; its room goes to the older build.
+          rm -rf target/x86_64-pc-windows-gnu
+          (cd "$RUNNER_TEMP/prev" && CATBOT_ANDROID_CODE="$((CODE + 1))" CATBOT_ANDROID_OUT="$GITHUB_WORKSPACE/dist/rollback.apk" \
+            bash scripts/build-android.sh)
+          {
+            echo "ROLLBACK_ARGS=--rollback dist/rollback.apk --rollback-version ${prev#v} --rollback-code $((CODE + 1)) --rollback-store $(python3 -c "import sys; sys.path.insert(0, 'scripts/release'); import package; print(package.store_version('$RUNNER_TEMP/prev'))")"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish the release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$(git tag --list --format='%(contents)' "$GITHUB_REF_NAME")"
+          # shellcheck disable=SC2086
+          python3 scripts/release/package.py dist/release --android-code "$CODE" --notes "$notes" ${ROLLBACK_ARGS:-}
+          gh release create "$GITHUB_REF_NAME" dist/release/* --title "Catbot ${GITHUB_REF_NAME#v}" --notes "${notes:-Catbot ${GITHUB_REF_NAME#v}}" --verify-tag
+
+      - name: Forget the signing key
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/android-key"

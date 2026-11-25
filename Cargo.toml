@@ -5,5 +5,8 @@ members = ["crates/catbot", "crates/catbot-ui"]
 default-members = ["crates/catbot"]
 
 [workspace.package]
+# Catbot's version: one number for the server, the apps and the phone. A release is the tag
+# `v` + this (scripts/release/README.md); the release workflow refuses a tag that doesn't match.
+version = "0.2.0"
 edition = "2024"
 license = "Apache-2.0"

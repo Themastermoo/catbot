@@ -1,6 +1,6 @@
 [package]
 name = "catbot-ui"
-version = "0.1.0"
+version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "Catbot's interface, in Dioxus: in a browser (served by `catbot serve`) or as the desktop app."

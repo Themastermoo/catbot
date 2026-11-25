@@ -19,6 +19,13 @@ use super::{Answer, App, bad, fail};
 
 const KEY: &str = "updates";
 
+/// Catbot's GitHub repository, `owner/name`, where every Catbot looks for updates unless
+/// Settings › This app names another.
+///
+/// PLACEHOLDER: Moo makes the repository later (2026-11-25). When he gives its name, put it
+/// here, e.g. `Some("moo/catbot")`, and see scripts/release/README.md for the rest.
+pub const REPO: Option<&str> = None;
+
 /// The version this server was built as.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -64,8 +71,13 @@ async fn github(path: &str) -> Result<(u16, Value), String> {
     Ok((status, reply.json().await.unwrap_or(Value::Null)))
 }
 
+/// The repository updates come from: the one named in Settings, or Catbot's own.
+pub fn repo(app: &App) -> Option<String> {
+    saved(app)["repo"].as_str().filter(|r| !r.is_empty()).map(str::to_string).or(REPO.map(str::to_string))
+}
+
 async fn check(app: &App) -> Answer {
-    let repo = saved(app)["repo"].as_str().unwrap_or_default().to_string();
+    let repo = repo(app).unwrap_or_default();
     if repo.is_empty() {
         return Err(bad("name Catbot's GitHub repository first"));
     }
@@ -105,7 +117,8 @@ fn wire(app: &App) -> Value {
     json!({
         "version": VERSION,
         "built": built().map(|t| t.to_rfc3339()),
-        "repo": kept["repo"].as_str().filter(|r| !r.is_empty()),
+        "repo": repo(app),
+        "own_repo": REPO,
         "checked": kept["checked"],
     })
 }
