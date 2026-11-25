@@ -536,7 +536,7 @@ fn Footer(bot_count: usize, on_open: EventHandler<Open>) -> Element {
         menu.set(false);
         on_open.call(o);
     };
-    let where_ = if crate::link::pairs() || places.is_some_and(|p| (p.place)() == crate::link::Place::Home) { "at home" } else { "on this computer" };
+    let where_ = if crate::link::pairs() || places.is_some_and(|p| (p.place)() == crate::link::Place::Home) { "at home" } else if crate::link::is_phone() { "on this phone" } else { "on this computer" };
     let bots_line = format!("{bot_count} bot{} {where_}", if bot_count == 1 { "" } else { "s" });
     let (count, on) = triggers();
     let label = if apps() > 0 { "Apps" } else { "Connect apps" };
@@ -634,7 +634,7 @@ fn Footer(bot_count: usize, on_open: EventHandler<Open>) -> Element {
                     if let Some(places) = places {
                         div { role: "separator", class: MENU_SEPARATOR }
                         div { class: "px-2 pb-1 pt-2 text-[12px] font-medium leading-4 text-ink-secondary", "Switch place" }
-                        for (place, name, glyph, data) in [(crate::link::Place::ThisPc, "This PC", "laptop", "this-pc"), (crate::link::Place::Home, "Home", "home", "home")] {
+                        for (place, name, glyph, data) in [(crate::link::Place::ThisPc, crate::link::own_name(), if crate::link::is_phone() { "smartphone" } else { "laptop" }, "this-pc"), (crate::link::Place::Home, "Home PC", "home", "home")] {
                             button {
                                 key: "{name}",
                                 r#type: "button",
@@ -702,6 +702,7 @@ pub fn Icon(name: &'static str, size: u32, #[props(default)] filled: bool) -> El
         "hash" => &["M4 9h16", "M4 15h16", "M10 3 8 21", "M16 3l-2 18"],
         "crown" => &["M11.562 3.266a.5.5 0 0 1 .876 0L15.39 8.87a1 1 0 0 0 1.516.294L21.183 5.5a.5.5 0 0 1 .798.519l-2.834 10.246a1 1 0 0 1-.956.734H5.81a1 1 0 0 1-.957-.734L2.02 6.02a.5.5 0 0 1 .798-.519l4.276 3.664a1 1 0 0 0 1.516-.294z", "M5 21h14"],
         "user" => &["M17 8a5 5 0 1 1-10 0 5 5 0 0 1 10 0z", "M20 21a8 8 0 0 0-16 0"],
+        "smartphone" => &["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z", "M12 18h.01"],
         "laptop" => &["M18 5a2 2 0 0 1 2 2v8.526a2 2 0 0 0 .212.897l1.068 2.127a1 1 0 0 1-.9 1.45H3.62a1 1 0 0 1-.9-1.45l1.068-2.127A2 2 0 0 0 4 15.526V7a2 2 0 0 1 2-2z", "M20.054 15.987H3.946"],
         "phone" => &["M7 2h10a2 2 0 0 1 2 2v16a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2z", "M12 18h.01"],
         "settings" => &[

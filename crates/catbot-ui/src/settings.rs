@@ -443,7 +443,11 @@ pub fn NewBotDialog(on_close: EventHandler<()>) -> Element {
                 label { class: "mt-3 {LABEL}", "Instructions"
                     textarea { class: "{FIELD} resize-y text-[13px] leading-relaxed", rows: 4, placeholder: "What this bot is for, and how it should work", oninput: move |e| soul.set(e.value()) }
                 }
-                crate::local_ai::NewBotLocal { chosen: local }
+                if crate::link::on_own_phone() {
+                    CopyFromHome { on_close }
+                } else {
+                    crate::local_ai::NewBotLocal { chosen: local }
+                }
                 p { class: "mt-3 text-[12px] leading-relaxed text-ink-secondary",
                     "{shown_name} will ask before acting, and can use your Codex notes. Both can be changed in its settings."
                 }
@@ -453,6 +457,116 @@ pub fn NewBotDialog(on_close: EventHandler<()>) -> Element {
                 div { class: "mt-4 flex justify-end gap-2",
                     button { r#type: "button", class: "rounded-lg px-3 py-2 text-[13px] text-ink-secondary hover:bg-control", onclick: move |_| on_close.call(()), "Cancel" }
                     button { r#type: "button", disabled: making(), class: "ui-button-primary rounded-lg bg-accent px-3 py-2 text-[13px] font-medium text-accent-ink hover:brightness-110 disabled:opacity-50", onclick: create, "Create bot" }
+                }
+            }
+        }
+    }
+}
+
+/// The phone's own Catbot (stage 26): copy one of the PC's bots over, with its instructions,
+/// role, picture and colour. The copy is the phone's own from then on; its AI is the phone's.
+#[component]
+fn CopyFromHome(on_close: EventHandler<()>) -> Element {
+    let mut state = use_context::<Signal<State>>();
+    let mut ui = use_context::<Ui>();
+    let mut open = use_signal(|| false);
+    let mut found = use_signal(|| None::<Result<Vec<Value>, String>>);
+    let mut copying = use_signal(|| None::<String>);
+    let paired = crate::link::current().is_some();
+    let show = move |_| {
+        open.set(true);
+        spawn(async move {
+            let list = api::from_home("/api/bots")
+                .await
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string()))
+                .map(|v| v["bots"].as_array().cloned().unwrap_or_default());
+            found.set(Some(list));
+        });
+    };
+    let mut copy = move |bot: Value| {
+        let name = bot["name"].as_str().unwrap_or("Bot").to_string();
+        copying.set(Some(name.clone()));
+        dioxus::core::spawn_forever(async move {
+            let body = json!({
+                "name": name,
+                "soul": bot["soul"],
+                "mark": bot["mark"],
+                "color": bot["color"],
+                "title": bot["title"],
+                "description": bot["description"],
+                "avatarZoom": bot["avatarZoom"],
+                "avatarFocusX": bot["avatarFocusX"],
+                "avatarFocusY": bot["avatarFocusY"],
+                "approvalMode": "ask",
+            });
+            match api::post("/api/bots", &body).await {
+                Ok(answer) => {
+                    let id = answer["bot"]["id"].as_str().unwrap_or_default().to_string();
+                    if bot["avatarUrl"].is_string() {
+                        let from = bot["id"].as_str().unwrap_or_default();
+                        if let Ok(bytes) = api::from_home(&format!("/api/bots/{from}/picture")).await {
+                            let _ = api::upload(&format!("/api/bots/{id}/picture"), "picture.png", "image/png", bytes).await;
+                        }
+                    }
+                    if let Ok(again) = api::get(&format!("/api/bots/{id}")).await {
+                        state.write().apply(&json!({ "kind": "bot", "bot": again["bot"] }));
+                    } else {
+                        state.write().apply(&json!({ "kind": "bot", "bot": answer["bot"] }));
+                    }
+                    ui.selected.set(Some(id));
+                    on_close.call(());
+                }
+                Err(err) => found.set(Some(Err(format!("Couldn't copy {name}: {err}")))),
+            }
+            copying.set(None);
+        });
+    };
+    if !paired {
+        return rsx! {
+            p { class: "mt-3 rounded-xl bg-inset px-3 py-2.5 text-[12px] leading-snug text-ink-secondary",
+                "Pair with your PC (Home PC in the menu) to copy its bots here."
+            }
+        };
+    }
+    rsx! {
+        div { class: "mt-3 rounded-xl bg-inset px-3 py-2.5", "data-copy-from-home": true,
+            if !open() {
+                div { class: "flex items-center gap-2",
+                    span { class: "flex-1 text-[12px] leading-snug text-ink-secondary", "Or copy one of your PC's bots, with its instructions and picture." }
+                    button { r#type: "button", "data-copy-open": true, class: "shrink-0 rounded-full bg-control px-3 py-1 text-[13px] font-medium text-ink hover:bg-raised", onclick: show, "Copy from PC" }
+                }
+            } else {
+                match found() {
+                    None => rsx! { p { class: "text-[12px] text-ink-tertiary", "Asking your PC…" } },
+                    Some(Err(err)) => rsx! { p { role: "alert", class: "text-[12px] text-danger", "{err}" } },
+                    Some(Ok(bots)) => rsx! {
+                        p { class: "mb-1 text-[12px] text-ink-secondary", "Your PC's bots. The copy runs on this phone's AIs." }
+                        div { class: "max-h-[220px] overflow-y-auto",
+                            for bot in bots {
+                                {
+                                    let name = bot["name"].as_str().unwrap_or("Bot").to_string();
+                                    let color = bot["color"].as_str().unwrap_or("green").to_string();
+                                    let mark = bot["mark"].as_str().unwrap_or("cat-head").to_string();
+                                    let title = bot["title"].as_str().unwrap_or_default().to_string();
+                                    let busy = copying().as_deref() == Some(name.as_str());
+                                    let which = bot.clone();
+                                    let initial: String = name.chars().next().map(|c| c.to_uppercase().collect()).unwrap_or_default();
+                                    rsx! {
+                                        button { key: "{name}", r#type: "button", "data-copy-bot": "{name}", disabled: copying().is_some(),
+                                            class: "flex w-full items-center gap-2 rounded-lg px-1.5 py-1.5 text-left hover:bg-raised disabled:opacity-60",
+                                            onclick: move |_| copy(which.clone()),
+                                            BotMark { color, initial, size: 28, mark }
+                                            span { class: "flex min-w-0 flex-1 flex-col",
+                                                span { class: "truncate text-[13px] text-ink", "{name}" }
+                                                if !title.is_empty() { span { class: "truncate text-[11px] text-ink-tertiary", "{title}" } }
+                                            }
+                                            if busy { span { class: "text-[12px] text-ink-tertiary", "Copying…" } }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
                 }
             }
         }

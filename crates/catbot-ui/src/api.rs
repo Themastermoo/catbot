@@ -152,6 +152,24 @@ pub async fn post_for_bytes(path: &str, body: &Value) -> Result<(Vec<u8>, String
     Ok((bytes, kind))
 }
 
+/// A GET to Catbot at home, whichever place the app is showing (the phone copying a bot from the
+/// PC, stage 26).
+#[cfg(not(target_arch = "wasm32"))]
+pub async fn from_home(path: &str) -> Result<Vec<u8>, String> {
+    let link = crate::link::current().ok_or("this phone isn't paired with your PC")?;
+    let response = client().get(format!("{}{path}", link.url)).bearer_auth(link.key).send().await.map_err(|e| format!("your PC didn't answer ({e})"))?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(format!("your PC answered {status}"));
+    }
+    response.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+}
+
+#[cfg(target_arch = "wasm32")]
+pub async fn from_home(_path: &str) -> Result<Vec<u8>, String> {
+    Err("only the phone app copies from home".into())
+}
+
 /// A file's bytes (an attachment, say), with this device's key when it's paired.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn bytes(path: &str) -> Result<Vec<u8>, String> {

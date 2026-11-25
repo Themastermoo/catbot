@@ -96,6 +96,9 @@ fn main() {
         local::start();
         dioxus::LaunchBuilder::desktop().with_cfg(config).launch(Root);
     }
+    // The phone app runs its own Catbot inside it (stage 26).
+    #[cfg(target_os = "android")]
+    local::start_on_phone();
     #[cfg(not(feature = "desktop"))]
     dioxus::launch(Root);
 }

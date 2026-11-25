@@ -44,7 +44,23 @@ fn file() -> Option<std::path::PathBuf> {
 
 /// Whether this app runs its own Catbot beside the link to home (the Windows app).
 pub fn has_own() -> bool {
-    cfg!(all(windows, not(target_arch = "wasm32"))) || std::env::var_os("CATBOT_PLACES").is_some_and(|v| v == "1")
+    cfg!(all(windows, not(target_arch = "wasm32"))) || cfg!(target_os = "android") || std::env::var_os("CATBOT_PLACES").is_some_and(|v| v == "1")
+}
+
+/// The phone app (stage 26): its own Catbot runs inside it, with only the chat APIs, and "Home"
+/// mirrors the PC.
+pub fn is_phone() -> bool {
+    cfg!(target_os = "android") || std::env::var_os("CATBOT_PHONE_LOOK").is_some_and(|v| v == "1")
+}
+
+/// What this device's own place is called: "This phone" or "This PC".
+pub fn own_name() -> &'static str {
+    if is_phone() { "This phone" } else { "This PC" }
+}
+
+/// Whether requests go to the phone's own Catbot now.
+pub fn on_own_phone() -> bool {
+    is_phone() && place() == Place::ThisPc
 }
 
 /// Whether this app must pair before it can do anything (the phone app).

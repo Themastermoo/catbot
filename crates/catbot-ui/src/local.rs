@@ -18,6 +18,48 @@ use std::{
 /// Where this app's own Catbot listens.
 const ADDRESS: &str = "127.0.0.1:8788";
 
+/// The phone app's own Catbot (stage 26): the same server, run inside the app on its own thread,
+/// keeping its data in the app's private storage. Only the chat APIs work there
+/// (`CATBOT_PHONE`); the AIs that are programs, and the remote door, stay on the PC.
+#[cfg(target_os = "android")]
+pub fn start_on_phone() {
+    if answering() {
+        return;
+    }
+    let files = std::path::PathBuf::from("/data/data/com.moo.catbot/files");
+    // SAFETY: set once, before the server thread starts and before anything reads them.
+    unsafe {
+        std::env::set_var("CATBOT_PHONE", "1");
+        std::env::set_var("HOME", &files);
+    }
+    let options = catbot::server::Options {
+        listen: ADDRESS.parse().expect("a fixed address"),
+        upstream: "http://127.0.0.1:9".into(),
+        home: files.join("catbot"),
+        codex: files.join("VaultCodex"),
+        memory: Some(files.join("CatbotMemory")),
+        cli: vec!["claude".into()],
+        record: None,
+        ui: None,
+        remote: None,
+    };
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build();
+        match runtime {
+            Ok(runtime) => {
+                if let Err(err) = runtime.block_on(catbot::server::serve(options)) {
+                    eprintln!("catbot: the phone's own Catbot stopped: {err}");
+                }
+            }
+            Err(err) => eprintln!("catbot: couldn't start the phone's own Catbot: {err}"),
+        }
+    });
+    let since = Instant::now();
+    while !answering() && since.elapsed() < Duration::from_secs(8) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// Kept for the life of the app: holding it keeps the server's input open.
 static SERVER: Mutex<Option<Child>> = Mutex::new(None);
 

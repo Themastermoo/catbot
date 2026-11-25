@@ -349,7 +349,9 @@ fn AiPage() -> Element {
     let rest: Vec<Value> = list.iter().filter(|e| !(e["ready"] == true || lead_rank(e).is_some())).cloned().collect();
     let rest_count = rest.len();
     rsx! {
-        crate::local_ai::OnThisComputer {}
+        if !crate::link::is_phone() {
+            crate::local_ai::OnThisComputer {}
+        }
         div { class: "flex items-center px-4 pb-2 pt-6",
             h3 { class: "flex-1 text-[13px] font-semibold text-ink", "Providers" }
             button { r#type: "button", "data-check-again": true, class: "rounded-md px-2 py-1 text-[13px] text-ink-secondary hover:bg-raised hover:text-ink", onclick: move |_| *checked.write() += 1, "Check again" }
