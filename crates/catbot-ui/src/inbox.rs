@@ -31,6 +31,9 @@ pub enum Card {
     Change { title: String, lines: Vec<String>, warning: Option<String> },
     /// A picture whose AI is still to be chosen, in its chat.
     Picture,
+    /// An AI that stopped working (stage 27): its fix ("sign-in", "key", "install" or
+    /// "status"), the button's words, and the status page for an outage.
+    Fix { engine: String, how: String, label: String, url: Option<String> },
 }
 
 /// One line of the Inbox.
@@ -67,6 +70,12 @@ impl Row {
                 warning: card["warning"].as_str().filter(|w| !w.is_empty()).map(str::to_string),
             }),
             Some("picture") => Some(Card::Picture),
+            Some("fix") => Some(Card::Fix {
+                engine: card["engine"].as_str().unwrap_or_default().to_string(),
+                how: card["fix"]["how"].as_str().unwrap_or("key").to_string(),
+                label: card["fix"]["label"].as_str().unwrap_or("Fix").to_string(),
+                url: card["fix"]["url"].as_str().map(str::to_string),
+            }),
             _ => None,
         };
         Some(Row {
@@ -102,6 +111,7 @@ impl Row {
             (Some(Card::Approval { .. }), _) => "Approval".into(),
             (Some(Card::Change { .. }), _) => "Asks to make a change".into(),
             (Some(Card::Picture), _) => "A picture to draw".into(),
+            (Some(Card::Fix { .. }), _) => "Needs fixing".into(),
             (_, "result") => "Trigger report".into(),
             (_, "notice") => "Needs a look".into(),
             _ => "Message".into(),
@@ -151,10 +161,15 @@ pub enum Action {
     Reply,
     Done,
     Open,
+    /// An AI's fix: sign in, a new key, install, or its status page.
+    Fix,
+    /// Check the AI again (a free check), and clear the row if it works.
+    Check,
 }
 
 pub fn actions(row: &Row) -> Vec<Action> {
     match (&row.card, row.asks()) {
+        (Some(Card::Fix { .. }), _) => vec![Action::Fix, Action::Check],
         (Some(Card::Approval { .. }) | Some(Card::Change { .. }), true) => vec![Action::Allow, Action::Deny, Action::Open],
         (Some(Card::Picture), true) => vec![Action::Open],
         _ if row.tab == "info" && row.kind == "message" => vec![Action::Reply, Action::Done, Action::Open],
@@ -425,6 +440,9 @@ pub fn InboxPanel() -> Element {
     let wide_label: &'static str = if wide { "Narrower" } else { "Wider" };
     let width = if wide { "md:w-[min(640px,60vw)]" } else { "md:w-[320px]" };
     let open_row = move |row: Row| {
+        if matches!(row.card, Some(Card::Fix { .. })) {
+            return fix(ui, &row);
+        }
         inbox.read(&row);
         if row.asks() || row.kind == "message" {
             let mut reading = inbox.reading;
@@ -445,6 +463,16 @@ pub fn InboxPanel() -> Element {
         Action::Open => {
             inbox.read(&row);
             open_chat(state, ui, inbox, &row.place, &row.thread);
+        }
+        Action::Fix => fix(ui, &row),
+        Action::Check => {
+            if let Some(Card::Fix { engine, .. }) = &row.card {
+                let engine = engine.clone();
+                spawn(async move {
+                    let _ = api::post(&format!("/api/ai-trouble/{engine}/check"), &json!({})).await;
+                    inbox.refresh();
+                });
+            }
         }
     };
     let close = move |_| {
@@ -635,6 +663,8 @@ fn ActionButton(row: Row, action: Action, on_action: EventHandler<(Row, Action)>
         Action::Reply => ("reply", "Reply"),
         Action::Done => ("check", "Done"),
         Action::Open => ("external", "Open in chat"),
+        Action::Fix => ("settings", "Fix"),
+        Action::Check => ("check-circle", "Check again"),
     };
     let which = match action {
         Action::Allow => "allow",
@@ -642,6 +672,8 @@ fn ActionButton(row: Row, action: Action, on_action: EventHandler<(Row, Action)>
         Action::Reply => "reply",
         Action::Done => "done",
         Action::Open => "open",
+        Action::Fix => "fix",
+        Action::Check => "check",
     };
     rsx! {
         button { r#type: "button", "data-inbox-action": which, "aria-label": label, title: label, class: ROW_ACTION,
@@ -649,6 +681,20 @@ fn ActionButton(row: Row, action: Action, on_action: EventHandler<(Row, Action)>
             Icon { name: icon, size: 14 }
         }
     }
+}
+
+/// An AI's fix (stage 27): its status page for an outage; otherwise Settings › AI, opened on
+/// that AI, where its sign-in, key box or install command is.
+fn fix(ui: Ui, row: &Row) {
+    let Some(Card::Fix { engine, url, .. }) = &row.card else { return };
+    if let Some(url) = url {
+        let quoted = serde_json::to_string(url).unwrap_or_default();
+        document::eval(&format!("window.open({quoted}, '_blank')"));
+        return;
+    }
+    *crate::prefs::OPEN_PROVIDER.write() = Some(engine.clone());
+    let mut prefs = ui.prefs;
+    prefs.set(Some("ai".to_string()));
 }
 
 /// A chat in the Active or Finished list: its bot, its name, and what it's doing.
@@ -903,5 +949,13 @@ mod tests {
         assert_eq!(count(&rows, std::slice::from_ref(&bot)), 3, "the ask, the unread message, and t5");
         let active: Vec<String> = active_chats(&[bot], &rows).into_iter().map(|c| c.thread).collect();
         assert_eq!(active, ["t2", "t5"]);
+    }
+
+    #[test]
+    fn an_ai_in_trouble_offers_its_fix() {
+        let fix = row(json!({ "id": "fix-openai", "kind": "fix", "tab": "needs-you", "from": { "name": "OpenAI" }, "origin": { "threadId": "t1" }, "text": "OpenAI turned its key away.", "unread": true, "card": { "type": "fix", "engine": "openai", "fix": { "how": "key", "label": "New key" } } }));
+        assert_eq!(fix.subject(), "Needs fixing");
+        assert_eq!(actions(&fix), [Action::Fix, Action::Check]);
+        assert!(matches!(&fix.card, Some(Card::Fix { engine, how, url: None, .. }) if engine == "openai" && how == "key"));
     }
 }

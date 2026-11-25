@@ -321,13 +321,16 @@ fn ComputerPage(on_go: EventHandler<&'static str>) -> Element {
     }
 }
 
+/// The AI Settings › AI opens on, once (an Inbox fix, stage 27).
+pub static OPEN_PROVIDER: GlobalSignal<Option<String>> = Signal::global(|| None);
+
 /// The AIs Catbot can run bots on: the main ones and any that are ready, then the rest. Each
 /// opens how to set it up or manage it.
 #[component]
 fn AiPage() -> Element {
     let mut engines = use_signal(|| None::<Result<Vec<Value>, String>>);
     let mut checked = use_signal(|| 0u32);
-    let mut open = use_signal(|| None::<String>);
+    let mut open = use_signal(|| OPEN_PROVIDER.write().take());
     let mut more = use_signal(|| false);
     let state = use_context::<Signal<State>>();
     use_effect(move || {
@@ -344,9 +347,11 @@ fn AiPage() -> Element {
         Some(Ok(list)) => list.into_iter().filter(|e| e["id"] != "").collect::<Vec<_>>(),
     };
     let lead_rank = |e: &Value| LEAD.iter().position(|id| e["id"] == *id);
-    let mut first: Vec<Value> = list.iter().filter(|e| e["ready"] == true || lead_rank(e).is_some()).cloned().collect();
+    let wanted = open.peek().clone();
+    let shown_first = |e: &Value| e["ready"] == true || lead_rank(e).is_some() || e["trouble"].is_object() || wanted.as_deref() == e["id"].as_str();
+    let mut first: Vec<Value> = list.iter().filter(|e| shown_first(e)).cloned().collect();
     first.sort_by_key(|e| (e["ready"] != true, lead_rank(e).unwrap_or(99)));
-    let rest: Vec<Value> = list.iter().filter(|e| !(e["ready"] == true || lead_rank(e).is_some())).cloned().collect();
+    let rest: Vec<Value> = list.iter().filter(|e| !shown_first(e)).cloned().collect();
     let rest_count = rest.len();
     rsx! {
         if !crate::link::is_phone() {
@@ -377,7 +382,9 @@ fn Provider(engine: Value, open: bool, on_toggle: EventHandler<String>) -> Eleme
     let id = engine["id"].as_str().unwrap_or_default().to_string();
     let name = engine["name"].as_str().unwrap_or_default().to_string();
     let ready = engine["ready"] == true;
+    let trouble = engine["trouble"]["text"].as_str().map(str::to_string);
     let state = match (ready, engine["kind"].as_str()) {
+        _ if trouble.is_some() => format!("Needs fixing · {}", trouble.clone().unwrap_or_default()),
         (true, _) => engine["keyHint"].as_str().map(|h| format!("Ready · key …{h}")).unwrap_or_else(|| "Ready".to_string()),
         (false, Some("api")) if engine["needsKey"] == false => "Not added · See On this computer".to_string(),
         (false, Some("api")) => "Not set up · Needs a key".to_string(),
@@ -393,8 +400,11 @@ fn Provider(engine: Value, open: bool, on_toggle: EventHandler<String>) -> Eleme
                 span { "aria-hidden": "true", class: "flex size-9 shrink-0 items-center justify-center rounded-full text-[14px] font-semibold", style: "background: hsl({hue} 60% 50% / 0.14); color: hsl({hue} 55% 40%)", "{initial}" }
                 span { class: "flex min-w-0 flex-1 flex-col",
                     span { class: "truncate text-[14px] leading-5 text-ink", "{name}" }
-                    span { class: "flex items-center gap-1.5 truncate text-[12px] leading-4 text-ink-secondary",
-                        if ready {
+                    span { class: if trouble.is_some() { "flex items-center gap-1.5 whitespace-normal text-[12px] leading-4 text-danger" } else { "flex items-center gap-1.5 truncate text-[12px] leading-4 text-ink-secondary" },
+                        "data-provider-trouble": trouble.is_some(),
+                        if trouble.is_some() {
+                            span { class: "size-1.5 shrink-0 rounded-full bg-danger" }
+                        } else if ready {
                             span { class: "size-1.5 shrink-0 rounded-full bg-success" }
                         }
                         "{state}"

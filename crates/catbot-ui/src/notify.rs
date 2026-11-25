@@ -40,10 +40,15 @@ pub enum Kind {
     Finished,
     Asking,
     Message,
+    /// An AI stopped working (stage 27); told once, when it first breaks.
+    Trouble,
 }
 
 /// The notification a live frame could call for, and its chat.
 pub fn wanted(frame: &Value) -> Option<(Kind, String)> {
+    if frame["kind"] == "ai-trouble" {
+        return Some((Kind::Trouble, frame["trouble"]["threadId"].as_str()?.to_string()));
+    }
     if frame["kind"] == "inbox" && frame["line"]["kind"] == "message" {
         return Some((Kind::Message, frame["line"]["origin"]["threadId"].as_str()?.to_string()));
     }
@@ -69,6 +74,10 @@ pub fn words(kind: Kind, frame: &Value, bot_name: &str, chat: Option<&str>, last
         Kind::Message => (format!("{bot_name} sent you a message{place}"), short(frame["line"]["text"].as_str().unwrap_or_default())),
         Kind::Finished if event["ok"] == false => (format!("{bot_name} ran into a problem{place}"), short(last)),
         Kind::Finished => (format!("{bot_name} finished{place}"), short(last)),
+        Kind::Trouble => (
+            format!("{} needs fixing", frame["trouble"]["name"].as_str().unwrap_or("An AI")),
+            format!("{} Open the Inbox to fix it.", frame["trouble"]["text"].as_str().unwrap_or_default()),
+        ),
     }
 }
 
@@ -86,6 +95,7 @@ pub fn on_frame(frame: &Value, prefs: Prefs, state: Signal<State>, ui: Ui) {
         Kind::Finished => prefs.finished,
         Kind::Asking => prefs.asking,
         Kind::Message => prefs.messages,
+        Kind::Trouble => true,
     };
     if !AVAILABLE || !allowed {
         return;
@@ -93,7 +103,7 @@ pub fn on_frame(frame: &Value, prefs: Prefs, state: Signal<State>, ui: Ui) {
     let state = state.peek();
     let Some(bot) = state.bots.iter().find(|b| b.has_chat(&thread)) else { return };
     let open_here = ui.selected.peek().as_deref() == Some(bot.id.as_str()) && bot.thread_id == thread;
-    if open_here && window_in_front() {
+    if open_here && window_in_front() && kind != Kind::Trouble {
         return;
     }
     let chat = bot.chats.iter().find(|c| c.id == thread).map(|c| c.title.as_str());
@@ -304,5 +314,8 @@ mod tests {
         assert_eq!(Prefs::default(), Prefs { finished: true, asking: true, messages: true });
         let saved: Prefs = serde_json::from_str(r#"{"finished":false,"asking":true}"#).unwrap();
         assert!(!saved.finished && saved.asking && saved.messages, "messages are on for those saved before");
+        let trouble = json!({ "kind": "ai-trouble", "trouble": { "name": "OpenAI", "text": "OpenAI turned its key away.", "threadId": "t9" } });
+        assert_eq!(wanted(&trouble), Some((Kind::Trouble, "t9".to_string())));
+        assert_eq!(words(Kind::Trouble, &trouble, "Scout", None, "").0, "OpenAI needs fixing");
     }
 }
