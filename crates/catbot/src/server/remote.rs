@@ -92,6 +92,9 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
             respond(super::engines::route(&app, &method, &rest, req, false).await)
         }
+        // The Inbox and AIs in trouble, on the phone too (stage 27).
+        ["api", "inbox", rest @ ..] => respond(super::inbox::route(&app, &method, rest)),
+        ["api", "ai-trouble", rest @ ..] => respond(super::health::route(&app, &method, rest).await),
         ["api", "local-ai"] if method == Method::GET => respond(super::local_ai::route(&app, &method, &[], None, json!({}), false).await),
         ["api", "voice", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();

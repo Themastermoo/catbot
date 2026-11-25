@@ -211,6 +211,8 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
                 None => None,
             };
             app.try_store(|store| store.set_engine_key(engine.id, &key, url.as_deref())).map_err(fail)?;
+            // A new key: whatever was wrong with the old one is for the next message to find.
+            super::health::works(app, engine.id);
             eprintln!("catbot: saved the {} settings", engine.name);
             app.hub.send(json!({ "kind": "engines" }));
             Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })))
@@ -350,5 +352,7 @@ fn describe(app: &App, engine: &Engine) -> Value {
         "chosenProgram": engines::chosen_path(engine.id),
         "terminalInstall": engines::terminal_command(engine.install).filter(|c| engines::runs_here(c)),
         "terminalSignIn": engines::terminal_command(engine.sign_in).filter(|c| engines::runs_here(c)),
+        // What went wrong when it last failed, and its fix (stage 27).
+        "trouble": super::health::of(app, engine.id),
     })
 }

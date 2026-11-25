@@ -42,6 +42,7 @@ pub mod pages;
 pub mod events;
 pub mod folders;
 pub mod history;
+pub mod health;
 pub mod hooks;
 pub mod hub;
 pub mod memory;
@@ -123,6 +124,8 @@ pub struct App {
     pub channels_busy: std::sync::Mutex<std::collections::HashSet<String>>,
     /// AIs that turned a turn away for their usage limit, and until when (`backups.rs`).
     pub limited_until: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
+    /// AIs that stopped working, by engine id: what went wrong and its fix (`health.rs`).
+    pub troubles: std::sync::Mutex<std::collections::BTreeMap<String, Value>>,
     /// Where the home door listens, once it does: how a turn's tools reach Catbot (`bot_tools.rs`).
     pub local: std::sync::OnceLock<SocketAddr>,
     /// The keys of turns using Catbot's tools, and whose they are.
@@ -162,6 +165,7 @@ impl App {
             plan_usage: std::sync::Mutex::new(None),
             limited_until: std::sync::Mutex::new(std::collections::HashMap::new()),
             channels_busy: std::sync::Mutex::new(std::collections::HashSet::new()),
+            troubles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             local: std::sync::OnceLock::new(),
             tool_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
             computers: computers::Computers::default(),
@@ -388,6 +392,7 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
         ["api", "usage", "csv", "save"] if method == Method::POST => usage_route(&app, &["csv", "save"], usage_query(&req)).await,
         ["api", "usage", rest @ ..] if method == Method::GET => usage_route(&app, rest, usage_query(&req)).await,
         ["api", "inbox", rest @ ..] => respond(inbox::route(&app, &method, rest)),
+        ["api", "ai-trouble", rest @ ..] => respond(health::route(&app, &method, rest).await),
         ["api", "version", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

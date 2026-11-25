@@ -66,7 +66,12 @@ pub fn ready(app: &App, engine: &str) -> bool {
 /// on its first backup that can go, and why (with when the limit lifts). An error when none can.
 pub fn choose(app: &App, bot: &Bot) -> Result<Option<(Bot, String)>, String> {
     let Some((why, until)) = super::limits::blocked(app, bot, &bot.engine) else { return Ok(None) };
-    let why = format!("{why}{}", until_words(until));
+    stand_in(app, bot, format!("{why}{}", until_words(until))).map(Some)
+}
+
+/// The first of the bot's backups that's ready, not at a limit and not in trouble, to answer
+/// instead (`why` says why the bot's own AI isn't), with the note for the chat.
+pub fn stand_in(app: &App, bot: &Bot, why: String) -> Result<(Bot, String), String> {
     let backups = app.with_store(|store| Ok(list(store, &bot.id))).unwrap_or_default();
     let mut tried = Vec::new();
     for backup in &backups {
@@ -79,10 +84,14 @@ pub fn choose(app: &App, bot: &Bot) -> Result<Option<(Bot, String)>, String> {
             tried.push(also);
             continue;
         }
+        if super::health::is_broken(app, &backup.engine) {
+            tried.push(format!("{name} isn't working either"));
+            continue;
+        }
         let mut stand_in = bot.clone();
         stand_in.engine = backup.engine.clone();
         stand_in.model = backup.model.clone();
-        return Ok(Some((stand_in, format!("{why}, so {name} (a backup) is answering."))));
+        return Ok((stand_in, format!("{why}, so {name} (a backup) is answering.")));
     }
     let tail = if backups.is_empty() {
         format!(". Add a backup AI in {}'s settings, or change the limits in Usage.", bot.name)

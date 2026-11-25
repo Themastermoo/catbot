@@ -153,6 +153,9 @@ fn register(app: &App, thread: &str, bot_id: &str) -> Result<(String, Arc<Notify
 }
 
 /// What one run of the CLI produced.
+/// How long an AI that didn't answer gets before it's tried once more (stage 27).
+const RETRY_SECONDS: u64 = 5;
+
 #[derive(Default)]
 struct Result_ {
     /// The model the AI said it's using.
@@ -251,9 +254,46 @@ async fn run(
                 app.with_store(|store| store.clear_session(thread));
             }
             let fresh = Session::New(uuid::Uuid::new_v4().to_string());
-            result = drive(app, &stand_in, &fresh, text, codex, thread, &item_id, &cancel, &emit, open.as_ref()).await;
+            result = drive(app, &stand_in, &fresh, text, codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
             ran_on = stand_in;
         }
+    }
+    // The bot's own AI failed for another reason (stage 27): an outage is tried once more after
+    // a few seconds; then the trouble is told (Inbox, Settings, a notification) and a backup
+    // answers. An AI that answers is fine again.
+    let failed = |r: &Result_| !r.stopped && r.reply.trim().is_empty() && r.steps.iter().all(|s| matches!(s, Step::Error { .. })) && !r.steps.is_empty();
+    let words = |r: &Result_| r.errors.iter().cloned().chain(r.outcome.as_ref().and_then(|o| o.result.clone())).collect::<Vec<_>>().join(" ");
+    if ran_on.engine == bot.engine
+        && failed(&result)
+        && let Some(engine) = engines::find(&bot.engine)
+        && let Some(mut what) = super::health::classify(engine, &words(&result))
+    {
+        if what == "down" {
+            save_and_send(app, thread, Role::Note, &format!("{} didn't answer, so Catbot is trying again in a few seconds.", engine.name), None);
+            let waited = tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(RETRY_SECONDS)) => true,
+                _ = cancel.notified() => false,
+            };
+            if waited {
+                result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
+            }
+            what = super::health::classify(engine, &words(&result)).unwrap_or(what);
+        }
+        if failed(&result) {
+            super::health::broke(app, engine, what, &words(&result), &bot.id, thread);
+            if let Ok((stand_in, why)) = super::backups::stand_in(app, bot, super::health::why(engine, what)) {
+                save_and_send(app, thread, Role::Note, &why, None);
+                if !guest {
+                    app.with_store(|store| store.clear_session(thread));
+                }
+                let fresh = Session::New(uuid::Uuid::new_v4().to_string());
+                result = drive(app, &stand_in, &fresh, text, codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
+                ran_on = stand_in;
+            }
+        }
+    }
+    if !failed(&result) && !result.stopped {
+        super::health::works(app, &ran_on.engine);
     }
     let bot = &ran_on;
 

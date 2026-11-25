@@ -239,8 +239,34 @@ fn line_row(store: &Store, line: &Line) -> Option<Row> {
     })
 }
 
+/// AIs that stopped working (stage 27): one row each, waiting on the person's fix; it goes when
+/// the AI works again.
+fn troubles(app: &App) -> Vec<Row> {
+    super::health::all(app)
+        .into_iter()
+        .map(|t| {
+            let engine = t["engine"].as_str().unwrap_or_default();
+            Row {
+                id: format!("fix-{engine}"),
+                kind: "fix",
+                tab: "needs-you",
+                at: t["at"].as_i64().unwrap_or(0),
+                unread: true,
+                wire: json!({
+                    "id": format!("fix-{engine}"),
+                    "from": { "name": t["name"] },
+                    "origin": { "botId": t["botId"], "threadId": t["threadId"] },
+                    "text": t["text"],
+                    "card": { "type": "fix", "engine": engine, "what": t["what"], "fix": t["fix"], "said": t["said"] },
+                }),
+            }
+        })
+        .collect()
+}
+
 fn rows(app: &App, store: &Store, kept: &Kept) -> Vec<Row> {
-    let mut rows = asks(app, store, &kept.seen_asks);
+    let mut rows = troubles(app);
+    rows.extend(asks(app, store, &kept.seen_asks));
     rows.extend(kept.lines.iter().filter_map(|l| line_row(store, l)));
     rows.sort_by_key(|r| std::cmp::Reverse(r.at));
     // What is still open comes first, so settled rows never push it out of the list.

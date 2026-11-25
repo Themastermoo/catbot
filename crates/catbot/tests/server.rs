@@ -4079,3 +4079,77 @@ async fn ollama_is_offered_started_and_its_models_got_and_removed() {
     assert_eq!(status, 200, "{after}");
     assert!(!after["ollama"]["models"].as_array().unwrap().iter().any(|m| m["name"] == "llama3.1:8b"));
 }
+
+/// A stand-in chat API that answers with each status in `plan` in turn (then 200s), saying
+/// "Hello from {name}." when it answers.
+fn flaky_api(name: &'static str, plan: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<u16>>>) -> Router {
+    Router::new().route("/v1/chat/completions", post(move || {
+        let plan = plan.clone();
+        async move {
+            let status = plan.lock().unwrap().pop_front().unwrap_or(200);
+            if status != 200 {
+                let body = json!({ "error": { "message": if status == 401 { "Incorrect API key" } else { "busy" } } });
+                return Response::builder().status(status).header("content-type", "application/json").body(Body::from(body.to_string())).unwrap();
+            }
+            let chunk = json!({ "choices": [{ "delta": { "content": format!("Hello from {name}.") } }] });
+            Response::builder().header("content-type", "text/event-stream").body(Body::from(format!("data: {chunk}\n\ndata: [DONE]\n\n"))).unwrap()
+        }
+    }))
+}
+
+#[tokio::test]
+async fn an_ai_that_stops_working_is_told_retried_and_handed_to_a_backup() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let plan = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let openai = listen(flaky_api("OpenAI", plan.clone())).await;
+    let grok = listen(flaky_api("Grok", std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())))).await;
+    s.call("PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-old-1234", "url": format!("http://{openai}/v1") }))).await;
+    s.call("PUT", "/api/engines/xai/key", Some(json!({ "key": "xai-test-5678", "url": format!("http://{grok}/v1") }))).await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "openai", "model": "gpt-test" } }))).await;
+    let say = |text: &'static str| {
+        let (s, bot, thread) = (&s, bot.clone(), thread.clone());
+        async move { s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": text, "threadId": thread }))).await }
+    };
+
+    // The key is turned away and there's no backup: the trouble is told, in the Inbox and on the AI.
+    plan.lock().unwrap().push_back(401);
+    say("hi").await;
+    let told = until(&mut events, "ai-trouble", |f| f["kind"] == "ai-trouble").await;
+    assert_eq!((told["trouble"]["engine"].as_str(), told["trouble"]["what"].as_str()), (Some("openai"), Some("key")));
+    until(&mut events, "turn.completed", |f| runtime(f, "turn.completed")).await;
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    let fix = inbox["rows"].as_array().unwrap().iter().find(|r| r["kind"] == "fix").cloned().expect("a fix row");
+    assert_eq!((fix["tab"].as_str(), fix["card"]["fix"]["how"].as_str()), (Some("needs-you"), Some("key")));
+    assert!(inbox["count"].as_u64().unwrap() >= 1);
+    let openai_row = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "openai").unwrap().clone();
+    assert_eq!(openai_row(&s.call("GET", "/api/engines", None).await.1)["trouble"]["what"], "key");
+
+    // With a backup, the backup answers, and says why.
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "backups": [{ "engine": "xai", "model": "grok-test" }] }))).await;
+    plan.lock().unwrap().push_back(401);
+    say("again").await;
+    let note = until(&mut events, "backup note", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("(a backup) is answering"))).await;
+    assert!(note["message"]["tool"]["name"].as_str().unwrap().starts_with("notice: OpenAI turned its key away, so Grok"), "{note}");
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot").await;
+    assert_eq!(reply["message"]["text"], "Hello from Grok.");
+    until(&mut events, "turn.completed", |f| runtime(f, "turn.completed")).await;
+    assert!(openai_row(&s.call("GET", "/api/engines", None).await.1)["trouble"].is_object(), "the backup answering doesn't fix OpenAI");
+
+    // A new key clears it.
+    s.call("PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-new-9999", "url": format!("http://{openai}/v1") }))).await;
+    assert!(openai_row(&s.call("GET", "/api/engines", None).await.1)["trouble"].is_null());
+    assert!(!s.call("GET", "/api/inbox", None).await.1["rows"].as_array().unwrap().iter().any(|r| r["kind"] == "fix"));
+
+    // An outage is tried again after a few seconds, and OpenAI answers itself.
+    plan.lock().unwrap().push_back(503);
+    say("third").await;
+    until(&mut events, "retry note", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("trying again in a few seconds"))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot").await;
+    assert_eq!(reply["message"]["text"], "Hello from OpenAI.");
+    assert!(openai_row(&s.call("GET", "/api/engines", None).await.1)["trouble"].is_null());
+}
