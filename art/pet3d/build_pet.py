@@ -757,6 +757,28 @@ def fit_square(parts, pose, yaw, pitch, margin=0.05):
     return target, max(u.max() - u.min(), v.max() - v.min()) * (1 + 2 * margin)
 
 
+def fit_head_crop(parts, pose, yaw, pitch, head_share=0.5, margin=0.03):
+    """A tighter square for a whole figure: the head (with its ears) takes `head_share` of the
+    square's height and sits at the top; sideways the square centres on whatever of the body
+    falls inside it, the tail aside (it may leave the picture), keeping the whole head in."""
+    right, up, _ = camera_axes(yaw, pitch)
+    xf = solve(pose)
+    head = np.vstack([skinned(p, xf) for p in parts if set(p.weights) <= {"head", "ear_n", "ear_f"}])
+    body = np.vstack([skinned(p, xf) for p in parts
+                      if len(p.verts) and not any(b.startswith("tail") for b in p.weights)])
+    hu, hv = head @ right, head @ up
+    units = (hv.max() - hv.min()) / head_share
+    top = hv.max() + margin * units
+    bu, bv = body @ right, body @ up
+    inside = bu[bv >= top - units]
+    cu = (inside.min() + inside.max()) / 2
+    lo, hi = hu.max() + margin * units - units / 2, hu.min() - margin * units + units / 2
+    cu = min(max(cu, lo), hi) if lo <= hi else (hu.min() + hu.max()) / 2
+    cv = top - units / 2
+    centre = body.mean(axis=0)
+    return centre + right * (cu - centre @ right) + up * (cv - centre @ up), units
+
+
 def point_on(xf, bone, v):
     """Where a rest-pose point bound to `bone` is in a solved pose."""
     R, pos = xf[bone]
@@ -1881,12 +1903,13 @@ def render_icon(pet, rnd, cfg, out_dir):
 MARK_FINE = ICON_FINE + ("neck_seam", "haunch_seam_hn", "haunch_seam_hf") + tuple(
     "body_seam%d" % k for k in range(4))
 MARK_VIEWS = {"head": (66.0, 5.0), "full": (38.0, 8.0)}   # camera yaw, pitch
+MARK_FULL_HEAD = 0.50           # how much of the full mark's height the head (with ears) takes
 MARK_SIZES = (256, 64)          # 64 is the simplified version, for marks shown at 32 px and less
 
 
 def mark_pose(kind, small):
-    """The pose of a bot's mark: the icon's head, or the whole cat sitting, turned a little
-    towards the viewer with its tail round its paws."""
+    """The pose of a bot's mark: the icon's head, or the cat sitting, turned a little towards
+    the viewer (the full mark is cropped close: see fit_head_crop)."""
     if kind == "head":
         return icon_pose(small)
     return P(SIT, ky=-34, kr=4, en_r=8, ef_r=8)
@@ -1913,7 +1936,10 @@ def render_marks(pet, rnd, cfg, out_dir):
             pet.show(wanted, extras=small)
             pose = mark_pose(kind, small)
             seen = [part for _, part in pet.parts if wanted(part) and (small or part.name not in pet.extras)]
-            target, units = fit_square(seen, pose, yaw, pitch, margin=0.03)
+            if kind == "full":   # cropped close: head and chest large, haunches and tail cut off
+                target, units = fit_head_crop(seen, pose, yaw, pitch, head_share=MARK_FULL_HEAD)
+            else:
+                target, units = fit_square(seen, pose, yaw, pitch, margin=0.03)
             over_sample = 8 if small else 1
             aim_camera(pet.scene, (size * over_sample, size * over_sample), yaw, pitch, units_w=units,
                        target=tuple(target))
@@ -1924,7 +1950,7 @@ def render_marks(pet, rnd, cfg, out_dir):
             for _ in range(3 if small else 0):
                 images = {p: halve(img) for p, img in images.items()}
                 # halve() weights colour by alpha; the mask's colour is white throughout
-            if touches_edge(images["base"][..., 3]):
+            if kind == "head" and touches_edge(images["base"][..., 3]):
                 log("WARNING: the %s mark at %d px touches the edge of its square" % (kind, size))
             entry["files"][str(size)] = {}
             for p, img in images.items():

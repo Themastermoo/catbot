@@ -69,12 +69,14 @@ square, a squarer-on view, and rendered at 8x then averaged down so edges stay c
 the pet's three passes so the app can tint the shell with the bot's colour the same way:
 
 - `head`: the head alone in the icon's view, eyes open and cyan, ear lights on.
-- `full`: the whole cat sitting, turned towards the viewer, tail round its paws.
+- `full`: the cat sitting, turned towards the viewer, cropped close so it reads at sidebar size:
+  the head (with ears) takes half the square's height, the chest and front legs fill the rest,
+  and the haunches, paws and tail run off the edges (`MARK_FULL_HEAD` sets the share).
 
 Files: `mark_<head|full>_<base|mask|gloss>_<256|64>.png`. The 256 px ones are the full model. The
 64 px ones are for marks shown at 32 px and below: bigger solid eyes, larger ear lights, no fine
-seams, rendered at 8x and averaged down. Each is framed automatically to fill its square with a
-3% margin; the full cat is tall and narrow, so it fills the height, not the width.
+seams, rendered at 8x and averaged down. The head is framed automatically to fill its square
+with a 3% margin.
 
 `marks.json` lists the files and, per size, the two eye centres as `[x, y]` fractions of the
 square from its top left (`near` is the eye on the viewer's side, `far` the other).
