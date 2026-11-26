@@ -257,7 +257,7 @@ async fn run(
         Session::New(_) if bot.engine == engines::CLAUDE => format!("{}{text}", so_far(app, thread, if fresh { i64::MAX } else { request_id }, bot)),
         _ => text.to_string(),
     };
-    let mut result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
+    let mut result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
     let lost = result.outcome.as_ref().is_some_and(|o| !o.ok && o.result.as_deref().is_some_and(chat::says_lost))
         || result.errors.iter().any(|e| chat::says_lost(e));
     if matches!(session, Session::Resume(_)) && lost && !result.stopped {
@@ -267,7 +267,7 @@ async fn run(
         let note = "Claude no longer had this conversation, so it continued in a fresh one.";
         save_and_send(app, thread, Role::Note, note, None);
         session = Session::New(id);
-        result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
+        result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
     }
 
     // Claude (or Codex) turned the turn away at its usage limit before doing anything: a backup takes it.
@@ -284,7 +284,7 @@ async fn run(
                 app.with_store(|store| store.clear_session(thread));
             }
             let fresh = Session::New(uuid::Uuid::new_v4().to_string());
-            result = drive(app, &stand_in, &fresh, text, codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
+            result = drive(app, &stand_in, &fresh, text, codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
             ran_on = stand_in;
         }
     }
@@ -305,7 +305,7 @@ async fn run(
                 _ = cancel.notified() => false,
             };
             if waited {
-                result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
+                result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
             }
             what = super::health::classify(engine, &words(&result)).unwrap_or(what);
         }
@@ -317,7 +317,7 @@ async fn run(
                     app.with_store(|store| store.clear_session(thread));
                 }
                 let fresh = Session::New(uuid::Uuid::new_v4().to_string());
-                result = drive(app, &stand_in, &fresh, text, codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref()).await;
+                result = drive(app, &stand_in, &fresh, text, codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
                 ran_on = stand_in;
             }
         }
@@ -411,6 +411,10 @@ async fn drive(
     cancel: &Notify,
     emit: &impl Fn(Value),
     tools: Option<&super::bot_tools::Open>,
+    // Whether the AI's session becomes the chat's. Not a guest's (stage 29.11): a bot handed into
+    // another bot's chat answering there must not leave its session for the chat's own bot to
+    // resume (it then went on as the guest).
+    keep_session: bool,
 ) -> Result_ {
     let mut result = Result_::default();
     let started = if bot.engine == engines::CLAUDE {
@@ -546,7 +550,7 @@ async fn drive(
                 result.errors.push(message);
             }
             Event::Finished(outcome) => {
-                if let Some(id) = outcome.session_id.as_deref().filter(|id| !id.is_empty()) {
+                if let Some(id) = outcome.session_id.as_deref().filter(|id| !id.is_empty() && keep_session) {
                     app.with_store(|store| store.set_session(thread, id));
                 }
                 result.outcome = Some(outcome);

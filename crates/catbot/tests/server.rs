@@ -1092,10 +1092,10 @@ async fn continue_with_chatgpt_signs_in_lists_the_plan_s_models_and_signs_out() 
     // tokens with an identity token it signs, lists models and takes the token back.
     let nonce = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
     let revoked = std::sync::Arc::new(std::sync::Mutex::new(false));
-    let fake_at = {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        listener.local_addr().unwrap()
-    };
+    // Kept open from the start: letting the port go and binding it again later let another test
+    // take it in between.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let fake_at = listener.local_addr().unwrap();
     let base = format!("http://{fake_at}");
     let (n2, r2, b2, b3) = (nonce.clone(), revoked.clone(), base.clone(), base.clone());
     let fake = Router::new()
@@ -1127,7 +1127,6 @@ async fn continue_with_chatgpt_signs_in_lists_the_plan_s_models_and_signs_out() 
             }
             (axum::http::StatusCode::OK, axum::Json(json!({ "models": [{ "slug": "gpt-6", "display_name": "GPT-6", "visibility": "list" }, { "slug": "secret", "display_name": "Hidden", "visibility": "hide" }] })))
         }));
-    let listener = tokio::net::TcpListener::bind(fake_at).await.unwrap();
     tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
     // SAFETY: only this test reads this variable.
     unsafe { std::env::set_var("CATBOT_CHATGPT_AUTH", &base) };
@@ -1793,7 +1792,14 @@ async fn a_bot_hands_work_on_within_the_limits_set() {
     let texts: Vec<&str> = page["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").filter_map(|m| m["text"].as_str()).collect();
     assert!(texts[1].contains("Scout: Hello, Plan the beds"), "Kiwi is shown the chat: {}", texts[1]);
     assert!(texts[2].contains("[Kiwi]: Hello,") && texts[2].contains("handed this back"), "Scout is told what Kiwi said: {}", texts[2]);
-    // Kiwi was a guest: Scout's chat keeps Scout's own session.
+    // Kiwi was a guest: Scout's chat keeps Scout's own session (stage 29.11: a guest's session
+    // used to become the chat's, and Scout then went on as Kiwi).
+    let (_, runs) = s.call("GET", &format!("/api/bots/{}/runs", ids[0]), None).await;
+    let first = runs["runs"].as_array().unwrap().last().unwrap()["id"].clone();
+    let (_, one) = s.call("GET", &format!("/api/bots/{}/runs/{}", ids[0], first), None).await;
+    let scouts = one["run"]["events"].as_array().unwrap().iter().find(|e| e["type"] == "session.started").unwrap()["sessionId"].as_str().unwrap().to_string();
+    let kept = s.app.with_store(|store| store.conversation(&thread)).flatten().unwrap().session_id;
+    assert_eq!(kept.as_deref(), Some(scouts.as_str()), "the chat's session is still Scout's");
     let (_, scout) = s.call("GET", &format!("/api/bots/{}", ids[0]), None).await;
     assert_eq!(scout["bot"]["tasks"].as_array().unwrap().len(), 1);
     // The Team map draws who handed work to whom, both ways.

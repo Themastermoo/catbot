@@ -316,6 +316,10 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
         }
     });
     let app = App::new(store, proxy, options.codex, memory, options.cli, helper, ui.clone());
+    app.with_store(|store| {
+        repair_guest_sessions(store);
+        Ok(())
+    });
 
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
@@ -1078,6 +1082,34 @@ fn apply_changes(bot: &mut Bot, body: &Value) -> Result<(), (StatusCode, String)
         bot.codex = codex;
     }
     Ok(())
+}
+
+/// Once (stage 29.11): a chat where another bot answered may have kept that guest's AI session as
+/// its own, and its bot then went on as the guest. Such chats start a fresh session, shown the
+/// chat so far with each bot's name.
+pub fn repair_guest_sessions(store: &Store) {
+    const DONE: &str = "repaired-guest-sessions";
+    if store.setting(DONE).ok().flatten().is_some() {
+        return;
+    }
+    let mut cleared = 0;
+    for bot in store.bots().unwrap_or_default() {
+        for conversation in store.conversations(&bot.id).unwrap_or_default() {
+            if conversation.channel_id.is_some() || conversation.session_id.is_none() {
+                continue;
+            }
+            let guests = store.messages(&conversation.id, 400).unwrap_or_default().iter().any(|m| {
+                m.role == Role::Bot && m.detail.as_ref().and_then(|d| d["botId"].as_str()).is_some_and(|id| id != conversation.bot_id)
+            });
+            if guests && store.clear_session(&conversation.id).is_ok() {
+                cleared += 1;
+            }
+        }
+    }
+    let _ = store.set_setting(DONE, &json!(true));
+    if cleared > 0 {
+        eprintln!("catbot: {cleared} chat(s) where other bots answered start a fresh session");
+    }
 }
 
 /// `POST /api/bots/:id/messages`: keep the person's message, show it everywhere, start the turn.
