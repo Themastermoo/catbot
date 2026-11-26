@@ -5,7 +5,7 @@
 //! - Either way a card asks which AI should draw it, offering those that are set up: OpenAI's
 //!   image model and xAI's (with their saved keys), and Claude working a drawing program: SVG
 //!   (rendered here, nothing to install) or Blender (when it's installed). A Blender script is
-//!   shown before it runs.
+//!   shown before it runs. ComfyUI too, with the workflow picked for it (stage 26).
 //! - The picture is saved in the bot's folder like an attachment and shown in the chat.
 //!
 //! Routes: `POST /api/bots/:id/images` `{ prompt, threadId }`, and
@@ -26,6 +26,7 @@ use crate::store::{Bot, Role};
 
 /// How long a picture may take.
 const PATIENCE: Duration = Duration::from_secs(300);
+const COMFY_PATIENCE: Duration = Duration::from_secs(30 * 60);
 
 /// The image models used unless the settings name others (`imageModels`: `{ "openai": …, "xai": … }`).
 pub const OPENAI_MODEL: &str = "gpt-image-2";
@@ -50,6 +51,9 @@ pub fn options(app: &App) -> Vec<(String, String)> {
     found.push(("claude-svg".into(), "Claude, drawing in SVG".into()));
     if blender().is_some() {
         found.push(("claude-blender".into(), "Claude, building it in Blender".into()));
+    }
+    if let Some(comfy) = super::comfyui::image_option(app) {
+        found.push(comfy);
     }
     found
 }
@@ -179,7 +183,9 @@ fn spawn_drawing(app: Arc<App>, bot: Bot, thread: String, id: i64, mut detail: V
     tokio::spawn(async move {
         let prompt = detail["prompt"].as_str().unwrap_or_default().to_string();
         let choice = detail["choice"].as_str().unwrap_or_default().to_string();
-        let result = tokio::time::timeout(PATIENCE, draw(&app, &bot, &choice, &prompt, &mut detail)).await.unwrap_or_else(|_| Err("it took too long".into()));
+        // ComfyUI on this computer can take a while on a big model.
+        let patience = if choice == "comfyui" { COMFY_PATIENCE } else { PATIENCE };
+        let result = tokio::time::timeout(patience, draw(&app, &bot, &choice, &prompt, &mut detail)).await.unwrap_or_else(|_| Err("it took too long".into()));
         match result {
             Ok(Some(png)) => match keep(&app, &bot, &thread, &prompt, &detail, png) {
                 Ok(attachment) => {
@@ -216,6 +222,7 @@ pub async fn draw_now(app: &App, bot: &Bot, choice: &str, prompt: &str) -> Resul
 async fn draw(app: &App, bot: &Bot, choice: &str, prompt: &str, detail: &mut Value) -> Result<Option<Vec<u8>>, String> {
     match choice {
         "openai" | "xai" => from_api(app, choice, prompt).await.map(Some),
+        "comfyui" => super::comfyui::draw(app, prompt).await.map(Some),
         "claude-svg" => {
             let reply = ask_claude(
                 app,

@@ -1,5 +1,25 @@
 # Catbot
 
+A team of AI bots you chat with, on your own computer.
+
+## Get Catbot
+
+Download it from this repository's **Releases** page (the latest release):
+
+| Your computer | Download | Then |
+|---|---|---|
+| **Windows 10 or 11** | `Catbot-Setup.exe` | Open it. Until Catbot is signed, Windows says "Windows protected your PC": choose **More info**, then **Run anyway**. No administrator needed. |
+| **Ubuntu, Kubuntu, Mint, Debian, Pop!_OS** | `catbot-amd64.deb` | Double-click it and choose Install (or `sudo apt install ./catbot-amd64.deb`). |
+| **Any other Linux** | `Catbot-x86_64.AppImage` | Allow it to run as a program (right-click › Properties, or `chmod +x`), then open it. It needs WebKitGTK 4.1, and says how to get it if it's missing. |
+| **Android** | `catbot-android.apk` | Open it on the phone and allow installing from your browser when asked. |
+
+Open Catbot and it walks you through choosing an AI (Claude with your Claude account, an API
+key, or a model on your computer) and making your first bot. Closing the window keeps your bots
+working in the tray; **Quit Catbot** there stops them. New versions show a banner with
+**Update**, and Settings › This app can go back to an earlier one.
+
+## For developers
+
 Working name. A self-hosted team of AI bots in a chat app: a Rust server on a
 home Linux box runs the agents (`claude`, `codex`), and any paired device
 (Windows PC, Android phone, a browser) connects to it over Tailscale.
@@ -297,6 +317,32 @@ can list the vault's items and fields (never values) and name a secret
 environment variable, or into a file only the bot can read there. The value isn't kept, isn't
 shown in the chat, and isn't given to the AI: Catbot blanks it (and its base64) out of what
 comes back. Every use is listed under "Last used". `CATBOT_OP` points at another `op`.
+
+**Blender.** Settings › Apps › Blender puts Catbot's add-on (`crates/catbot/blender/catbot_bridge.py`)
+into every Blender version folder it finds (open Blender once first so the folder exists),
+with a key beside it. Turn it on once in Blender (Edit › Preferences › Add-ons, search Catbot);
+while Blender is open it listens on 127.0.0.1 only (port 9871 unless changed). Ticked bots can
+look at the scene, an object, the viewport or their last render at once; making and changing
+objects, running a Python script, rendering and saving or exporting each show a card with
+exactly what would be done (a script in full) and run when you approve. A change can be undone
+in Blender with Ctrl+Z. Renders go to Catbot's `blender/renders` folder, exports with no path to
+`blender/files`. Works the same on Windows (Blender's folder under `%APPDATA%`). The add-on is
+tested against real Blender with `python crates/catbot/blender/test_with_bpy.py` after
+`pip install bpy` (the viewport picture needs Blender's window, so that one is tried by hand).
+
+**ComfyUI.** Settings › Apps › ComfyUI points Catbot at the ComfyUI on this computer
+(`http://127.0.0.1:8188` unless changed). Ticked bots can see its models, nodes and queue at
+once, and run your saved workflows (Workflow › Save in ComfyUI; Catbot reads them from ComfyUI's
+user folder and turns them into the form ComfyUI runs, subgraphs, reroutes and bypassed nodes
+included) with their prompts, seeds, sizes or input pictures changed, or workflows they build
+themselves. Every run, and stopping a job, shows a card with what will run first. On approval the
+job is queued and Catbot waits for it in the background; what it makes goes into the bot's
+attachments and the chat, and the bot hears the paths, so it can hand a picture to Blender
+(`blender_change` takes a picture's path as a texture, or as a picture card) or back into ComfyUI.
+Pick a saved workflow there for `/image` and ComfyUI becomes one of its choices (a new seed each
+time). The converter is checked against ComfyUI's own example workflows by
+`tests/comfy_templates.rs` (see the top of that file), and the whole connector against a real
+ComfyUI with `COMFY_URL=http://127.0.0.1:8188 cargo test -p catbot --test server comfyui`.
 
 **Moving a bot from Grok Bot.** Grok Bot has no export button, so Settings › Team › Move a bot
 from Grok Bot gives you a prompt to paste into a Grok Bot's chat: the bot writes its own setup

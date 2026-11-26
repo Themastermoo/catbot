@@ -417,6 +417,9 @@ pub async fn run_approved(app: &App, body: &Value) -> Result<String, String> {
     if body["composio"] == true {
         return super::composio::run_approved(app, body).await;
     }
+    if body["blender"] == true {
+        return super::blender::run_approved(app, body).await;
+    }
     let id = body["server"].as_str().unwrap_or_default();
     let server = servers(app).into_iter().find(|s| s.id == id).ok_or("that app was removed")?;
     if !server.enabled {

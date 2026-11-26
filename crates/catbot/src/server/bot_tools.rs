@@ -33,7 +33,7 @@ impl Drop for Open {
 }
 
 /// The tools a bot has: publishing pages, its triggers, its mailbox if it may use one, the
-/// connected apps it's ticked for, and its own computer if it has one.
+/// connected apps it's ticked for (Blender and ComfyUI among them), and its own computer if it has one.
 pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
     let mut tools = super::inbox::tools();
     tools.extend(super::pages::tools());
@@ -41,6 +41,8 @@ pub fn tools_for(app: &App, bot_id: &str) -> Vec<Value> {
     tools.extend(super::email::tools_for(app, bot_id));
     tools.extend(super::apps::tools_for(app, bot_id));
     tools.extend(super::composio::tools_for(app, bot_id));
+    tools.extend(super::blender::tools_for(app, bot_id));
+    tools.extend(super::comfyui::tools_for(app, bot_id));
     tools.extend(super::computers::tools_for(app, bot_id));
     tools.extend(super::secrets::tools_for(app, bot_id));
     tools
@@ -80,6 +82,13 @@ pub async fn route(app: &Arc<App>, call: bool, req: Request) -> Answer {
     // A bot's own computer: free inside its box, and a screenshot comes back as a picture.
     if super::computers::knows(name) {
         return Ok((StatusCode::OK, super::computers::call(app, &grant, name, &args).await));
+    }
+    // Blender: looking runs at once, and a picture comes back as a picture.
+    if super::blender::knows(name) {
+        return Ok((StatusCode::OK, super::blender::call(app, &grant, name, &args).await));
+    }
+    if super::comfyui::knows(name) {
+        return Ok((StatusCode::OK, super::comfyui::call(app, &grant, name, &args).await));
     }
     let answer = match name {
         "message_person" => super::inbox::message_person(app, &grant, &args),

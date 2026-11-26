@@ -340,6 +340,8 @@ async fn apply(app: &Arc<App>, detail: &Value) -> Result<Option<String>, String>
     let channel = || app.with_store(|store| store.channel(target)).flatten().ok_or_else(|| "that channel is gone".to_string());
     let done = match detail["action"].as_str().unwrap_or_default() {
         "publish_page" => return super::pages::publish(app, &body).await.map(Some),
+        // ComfyUI's jobs are queued and waited for in the background (`comfyui.rs`).
+        "app_call" if body["comfyui"] == true => return super::comfyui::run_approved(app, &body, target).await.map(Some),
         "app_call" => return super::apps::run_approved(app, &body).await.map(Some),
         "create_bot" => super::make_bot(app, &body).map(|_| ()).map_err(refused),
         "change_bot" => super::patch_bot(app, bot()?, body).map(|_| ()).map_err(refused),
@@ -367,7 +369,7 @@ fn update(app: &App, thread: &str, id: i64, detail: &Value) {
 }
 
 /// Keeps a line for the Chief to hear with the person's next message in this chat.
-fn remember(app: &App, thread: &str, line: &str) {
+pub(super) fn remember(app: &App, thread: &str, line: &str) {
     let key = format!("team-untold:{thread}");
     let mut lines: Vec<String> = app.with_store(|store| store.setting(&key)).flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default();
     lines.push(line.to_string());

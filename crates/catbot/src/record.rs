@@ -9,6 +9,8 @@ use tokio::{io::AsyncWriteExt, sync::mpsc};
 /// One line of a recording.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
+// JSON kept in its own order (stage 26) made a variant larger; records are few.
+#[allow(clippy::large_enum_variant)]
 pub enum Record {
     /// A finished request and its response.
     Http {

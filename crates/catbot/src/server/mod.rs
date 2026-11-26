@@ -11,7 +11,10 @@ pub mod attachments;
 pub mod backups;
 pub mod bot_tools;
 pub mod changes;
+pub mod blender;
 pub mod boat;
+pub mod comfy_graph;
+pub mod comfyui;
 pub mod composio;
 pub mod computers;
 pub mod channels;
@@ -592,6 +595,34 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
                 None
             };
             respond(composio::route(&app, &method, &rest, body, query).await)
+        }
+        ["api", "comfyui", rest @ ..] => {
+            // ComfyUI on this computer (stage 26).
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(comfyui::route(&app, &method, &rest, body).await)
+        }
+        ["api", "blender", rest @ ..] => {
+            // Blender through Catbot's own add-on (stage 25).
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::PUT {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(blender::route(&app, &method, &rest, body).await)
         }
         ["api", "apps", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();

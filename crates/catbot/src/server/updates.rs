@@ -15,6 +15,9 @@
 //!   `versions.json` (which one runs, which one is being tried, each one's storage format). The
 //!   launcher (`Catbot.exe` at the top) starts the current one.
 //! * **The phone** downloads the APK and hands it to Android's installer (28.5).
+//! * **The Linux packages** (stage 29.4): the .deb is updated through apt, with the person's
+//!   password asked by the desktop (pkexec); the AppImage replaces its own file, keeping the old
+//!   ones in `updates/appimages/` to go back to. Either restarts the app afterwards.
 //! * **The home PC** builds itself from its repo through the Claude helper, so it only checks.
 //!
 //! Routes, beside `version.rs`'s:
@@ -47,6 +50,10 @@ const SETTLED: Duration = Duration::from_secs(20);
 pub enum Platform {
     Windows,
     Android,
+    /// The Linux .deb, in /usr/lib/catbot (stage 29.4).
+    Deb,
+    /// The Linux AppImage (stage 29.4).
+    AppImage,
     /// The home PC: built from its repo by the helper.
     Home,
 }
@@ -56,6 +63,9 @@ impl Platform {
         match self {
             Platform::Windows => "windows",
             Platform::Android => "android",
+            // Also the release.json entries for them.
+            Platform::Deb => "linux_deb",
+            Platform::AppImage => "linux_appimage",
             Platform::Home => "home",
         }
     }
@@ -71,6 +81,11 @@ pub struct Place {
     pub api: String,
     /// The phone app's version code (Android refuses an APK whose code isn't higher).
     pub code: Option<u64>,
+    /// The AppImage file this Catbot runs from.
+    pub appimage: Option<PathBuf>,
+    /// The .deb's installer, given the downloaded file last: apt through pkexec, so the desktop
+    /// asks for the person's password.
+    pub installer: Vec<String>,
 }
 
 impl Place {
@@ -81,8 +96,12 @@ impl Place {
             Ok("windows") => Platform::Windows,
             Ok("android") => Platform::Android,
             Ok("home") => Platform::Home,
+            Ok("deb") => Platform::Deb,
+            Ok("appimage") => Platform::AppImage,
             _ if cfg!(target_os = "android") => Platform::Android,
             _ if cfg!(windows) => Platform::Windows,
+            _ if std::env::var_os("APPIMAGE").is_some_and(|a| !a.is_empty()) => Platform::AppImage,
+            _ if std::env::current_exe().is_ok_and(|exe| exe.starts_with("/usr/lib/catbot")) => Platform::Deb,
             _ => Platform::Home,
         };
         // The launcher says where it installed Catbot; otherwise the program's own folder tells,
@@ -98,6 +117,12 @@ impl Place {
             dir: if platform == Platform::Windows { dir } else { None },
             api: std::env::var("CATBOT_GITHUB_API").ok().filter(|a| !a.trim().is_empty()).unwrap_or_else(|| "https://api.github.com".into()),
             code: option_env!("CATBOT_ANDROID_CODE").and_then(|c| c.parse().ok()),
+            appimage: std::env::var_os("APPIMAGE").filter(|a| !a.is_empty()).map(PathBuf::from),
+            installer: std::env::var("CATBOT_DEB_INSTALLER")
+                .ok()
+                .filter(|i| !i.trim().is_empty())
+                .map(|i| i.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_else(|| ["pkexec", "apt-get", "install", "-y", "--allow-downgrades"].map(String::from).to_vec()),
         }
     }
 }
@@ -216,6 +241,8 @@ pub fn offer(app: &App, release: &Value, found: Option<&Value>) -> Value {
             let entry = &found[platform.name()];
             if entry.is_null() {
                 why_not("This release has nothing for this device.")
+            } else if platform == Platform::AppImage && place.appimage.is_none() {
+                why_not("Catbot can't tell which AppImage file it runs from.")
             } else if platform == Platform::Windows && place.dir.is_none() {
                 why_not("This Catbot wasn't installed by the launcher, so it can't swap versions. Install it once from the zip.")
             } else if platform == Platform::Android && entry["code"].as_u64().zip(place.code).is_some_and(|(theirs, ours)| theirs <= ours) {
@@ -391,6 +418,7 @@ async fn fetch_and_keep(app: &App, place: &Place, version: &str, store: i64, url
             json!({ "version": version, "store": store })
         }
         Platform::Android => json!({ "version": version, "store": store, "apk": file.to_string_lossy() }),
+        Platform::Deb | Platform::AppImage => json!({ "version": version, "store": store, "file": file.to_string_lossy() }),
         Platform::Home => return Err("nothing to install here".into()),
     };
     save(app, |kept| kept["ready"] = ready)
@@ -454,8 +482,79 @@ fn switch_to_new(app: &App) -> Result<Value, String> {
         }
         // The phone's interface opens Android's installer with it; the app restarts as the new one.
         Platform::Android => Ok(json!({ "openInstaller": ready["apk"] })),
+        Platform::Deb => {
+            install_deb(place, Path::new(ready["file"].as_str().unwrap_or_default()))?;
+            save(app, |kept| kept["ready"] = Value::Null)?;
+            Ok(json!({ "restart": true }))
+        }
+        Platform::AppImage => {
+            let target = place.appimage.clone().ok_or("no AppImage file")?;
+            let shelf = folder(app).join("appimages");
+            // This version, kept to go back to; then the new one in its place.
+            keep_appimage(&shelf, &target, VERSION, app.try_store(|store| store.format()).unwrap_or(STORE_VERSION))?;
+            let new = keep_appimage(&shelf, Path::new(ready["file"].as_str().unwrap_or_default()), &version, ready["store"].as_i64().unwrap_or(STORE_VERSION))?;
+            put_appimage(&new, &target)?;
+            let _ = std::fs::remove_file(ready["file"].as_str().unwrap_or_default());
+            save(app, |kept| kept["ready"] = Value::Null)?;
+            Ok(json!({ "restart": true }))
+        }
         Platform::Home => Err("nothing to install here".into()),
     }
+}
+
+/// Installs a .deb through the installer (apt, through pkexec: the desktop asks the person for
+/// their password). Waits for it.
+fn install_deb(place: &Place, file: &Path) -> Result<(), String> {
+    let (program, args) = place.installer.split_first().ok_or("no installer")?;
+    let status = std::process::Command::new(program)
+        .args(args)
+        .arg(file)
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .status()
+        .map_err(|e| format!("couldn't start {program}: {e}"))?;
+    match status.code() {
+        Some(0) => Ok(()),
+        // pkexec: the password was asked for and not given.
+        Some(126 | 127) => Err("the update needs your password, and it wasn't given".into()),
+        _ => Err(format!("the installer stopped ({status})")),
+    }
+}
+
+/// Copies an AppImage onto the shelf of kept ones as `Catbot-<version>.AppImage` (unless it's
+/// there already) and notes its storage format. Returns where it is.
+fn keep_appimage(shelf: &Path, from: &Path, version: &str, store: i64) -> Result<PathBuf, String> {
+    let kept = shelf.join(format!("Catbot-{version}.AppImage"));
+    if !kept.is_file() {
+        std::fs::create_dir_all(shelf).map_err(|e| e.to_string())?;
+        std::fs::copy(from, &kept).map_err(|e| format!("couldn't keep Catbot {version}: {e}"))?;
+    }
+    let mut list = read_json(&shelf.join("versions.json")).unwrap_or_else(|| json!({ "kept": {} }));
+    list["kept"][version] = json!({ "store": store });
+    // The last few.
+    if let Some(map) = list["kept"].as_object_mut() {
+        let mut versions: Vec<String> = map.keys().cloned().collect();
+        versions.sort_by(|a, b| if newer(a, b) { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less });
+        while versions.len() > KEPT + 1 {
+            let old = versions.remove(0);
+            map.remove(&old);
+            let _ = std::fs::remove_file(shelf.join(format!("Catbot-{old}.AppImage")));
+        }
+    }
+    write_json(&shelf.join("versions.json"), &list)?;
+    Ok(kept)
+}
+
+/// Puts an AppImage where the person keeps Catbot's: beside it first, then in its place, so a
+/// failure leaves the old one whole.
+fn put_appimage(from: &Path, target: &Path) -> Result<(), String> {
+    let part = target.with_extension("AppImage.part");
+    std::fs::copy(from, &part).map_err(|e| format!("couldn't write beside {}: {e}", target.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
+    }
+    std::fs::rename(&part, target).map_err(|e| format!("couldn't replace {}: {e}", target.display()))
 }
 
 /// A copy of the chats as they are, before changing version: `updates/snapshots/`.
@@ -505,6 +604,8 @@ async fn back(app: &std::sync::Arc<App>, body: &Value) -> Answer {
     match place.platform {
         Platform::Home => return Err(bad("this computer builds Catbot from its repo; go back with git and the Claude helper")),
         Platform::Android => return phone_back(app, &to, use_snapshot).await,
+        Platform::AppImage => return appimage_back(app, &to, use_snapshot),
+        Platform::Deb => return deb_back(app, &to, use_snapshot).await,
         Platform::Windows => {}
     }
     let dir = place.dir.clone().ok_or_else(|| bad("this Catbot wasn't installed by the launcher"))?;
@@ -570,6 +671,69 @@ async fn phone_back(app: &std::sync::Arc<App>, to: &str, use_snapshot: bool) -> 
     let url = asset(&release, &name).ok_or_else(|| (StatusCode::BAD_GATEWAY, format!("the release names {name} but doesn't have it")))?.to_string();
     let (bytes, sha) = (entry["bytes"].as_u64().unwrap_or(0), entry["sha256"].as_str().unwrap_or_default().to_string());
     let store = entry["store"].as_i64().unwrap_or(STORE_VERSION);
+    let place = app.updates.place().clone();
+    let version = to.to_string();
+    app.updates.now().downloading = Some((version.clone(), 0, bytes));
+    tell(app, json!({}));
+    let answer = wire(app);
+    let app = app.clone();
+    tokio::spawn(async move {
+        let done = fetch_and_keep(&app, &place, &version, store, &url, &name, bytes, &sha).await;
+        {
+            let mut now = app.updates.now();
+            now.downloading = None;
+            now.error = done.as_ref().err().cloned();
+        }
+        match done {
+            Ok(()) => finish_install(&app),
+            Err(_) => tell(&app, json!({})),
+        }
+    });
+    Ok((StatusCode::ACCEPTED, answer))
+}
+
+/// The AppImage goes back to one kept on the shelf.
+fn appimage_back(app: &App, to: &str, use_snapshot: bool) -> Answer {
+    let place = app.updates.place().clone();
+    let target = place.appimage.clone().ok_or_else(|| bad("Catbot can't tell which AppImage file it runs from"))?;
+    let shelf = folder(app).join("appimages");
+    let list = read_json(&shelf.join("versions.json")).unwrap_or_default();
+    let kept = shelf.join(format!("Catbot-{to}.AppImage"));
+    if to.is_empty() || to == VERSION || list["kept"][to].is_null() || !kept.is_file() {
+        return Err(bad(format!("Catbot {to} isn't kept on this computer")));
+    }
+    if let Some(ask) = chats_for(app, to, list["kept"][to]["store"].as_i64().unwrap_or(0), use_snapshot)? {
+        return Ok(ask);
+    }
+    keep_appimage(&shelf, &target, VERSION, app.try_store(|store| store.format()).unwrap_or(STORE_VERSION)).map_err(fail)?;
+    put_appimage(&kept, &target).map_err(fail)?;
+    let restored = folder(app).join("restore.json").is_file();
+    save(app, |kept| kept["back"] = json!({ "from": VERSION, "to": to, "at": chrono::Utc::now().to_rfc3339(), "restored": restored })).map_err(fail)?;
+    tell(app, json!({ "restart": true }));
+    Ok((StatusCode::OK, json!({ "restart": true, "to": to, "restored": restored })))
+}
+
+/// The .deb goes back to a version this computer ran before: that release's .deb, downloaded
+/// and installed like an update (apt allows going down).
+async fn deb_back(app: &std::sync::Arc<App>, to: &str, use_snapshot: bool) -> Answer {
+    let ran = saved(app)["ran"].clone();
+    if to.is_empty() || to == VERSION || ran[to].is_null() {
+        return Err(bad(format!("Catbot {to} isn't one this computer ran before")));
+    }
+    let repo = super::version::repo(app).ok_or_else(|| bad("name Catbot's GitHub repository first"))?;
+    let release = super::version::release_tagged(app, &repo, &format!("v{to}")).await.map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    let found = release_json(&release).await.map_err(|e| (StatusCode::BAD_GATEWAY, e))?.unwrap_or_default();
+    let entry = found["linux_deb"].clone();
+    if entry.is_null() {
+        return Err(bad(format!("Catbot {to}'s release has no .deb")));
+    }
+    if let Some(ask) = chats_for(app, to, found["store"].as_i64().unwrap_or(0), use_snapshot)? {
+        return Ok(ask);
+    }
+    let name = entry["file"].as_str().unwrap_or_default().to_string();
+    let url = asset(&release, &name).ok_or_else(|| (StatusCode::BAD_GATEWAY, format!("the release names {name} but doesn't have it")))?.to_string();
+    let (bytes, sha) = (entry["bytes"].as_u64().unwrap_or(0), entry["sha256"].as_str().unwrap_or_default().to_string());
+    let store = found["store"].as_i64().unwrap_or(STORE_VERSION);
     let place = app.updates.place().clone();
     let version = to.to_string();
     app.updates.now().downloading = Some((version.clone(), 0, bytes));
@@ -667,6 +831,12 @@ pub fn settle(app: &App) {
             kept["checked"] = Value::Null;
         });
     }
+    // The Linux packages remember which versions ran here, to go back to (the .deb downloads
+    // them again; the AppImage keeps them).
+    if matches!(app.updates.place().platform, Platform::Deb | Platform::AppImage) {
+        let format = app.try_store(|store| store.format()).unwrap_or(STORE_VERSION);
+        let _ = save(app, |kept| kept["ran"][VERSION] = json!({ "store": format }));
+    }
     let Some(dir) = app.updates.place().dir.clone() else { return };
     let mut kept = versions(&dir);
     if kept["trying"]["version"] == VERSION {
@@ -694,6 +864,25 @@ pub fn wire(app: &App) -> Value {
     let settings = saved(app);
     let now = app.updates.now();
     let kept = place.dir.as_deref().map(versions);
+    let linux: Option<Vec<Value>> = match place.platform {
+        Platform::AppImage => {
+            let shelf = folder(app).join("appimages");
+            let list = read_json(&shelf.join("versions.json")).unwrap_or_default();
+            let mut versions: Vec<String> = list["kept"].as_object().map(|m| m.keys().filter(|v| shelf.join(format!("Catbot-{v}.AppImage")).is_file()).cloned().collect()).unwrap_or_default();
+            if !versions.iter().any(|v| v == VERSION) {
+                versions.push(VERSION.to_string());
+            }
+            Some(versions.into_iter().map(|v| json!({ "version": v, "current": v == VERSION })).collect())
+        }
+        Platform::Deb => {
+            let mut versions: Vec<String> = settings["ran"].as_object().map(|m| m.keys().cloned().collect()).unwrap_or_default();
+            if !versions.iter().any(|v| v == VERSION) {
+                versions.push(VERSION.to_string());
+            }
+            Some(versions.into_iter().map(|v| json!({ "version": v, "current": v == VERSION })).collect())
+        }
+        _ => None,
+    };
     let list: Vec<Value> = kept
         .as_ref()
         .and_then(|k| k["kept"].as_object().cloned())
@@ -707,6 +896,8 @@ pub fn wire(app: &App) -> Value {
             list
         })
         .unwrap_or_default();
+    let mut list = linux.unwrap_or(list);
+    list.sort_by(|a, b| if newer(a["version"].as_str().unwrap_or(""), b["version"].as_str().unwrap_or("")) { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater });
     json!({
         "platform": place.platform.name(),
         "canSwap": place.platform != Platform::Home && (place.platform != Platform::Windows || place.dir.is_some()),

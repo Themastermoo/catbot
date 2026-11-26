@@ -249,6 +249,8 @@ struct Pending {
     started: Instant,
 }
 
+// JSON kept in its own order (stage 26) made a variant larger; one Mode per request.
+#[allow(clippy::large_enum_variant)]
 enum Mode {
     /// An ordinary response: keep the first `cap` bytes, record once it has all arrived.
     Http(Option<Pending>),

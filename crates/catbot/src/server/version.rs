@@ -126,6 +126,15 @@ pub async fn check(app: &App) -> Answer {
     Ok((StatusCode::OK, checked))
 }
 
+/// One release by its tag (`v0.2.0`), as GitHub gives it.
+pub async fn release_tagged(app: &App, repo: &str, tag: &str) -> Result<Value, String> {
+    match github(app, &format!("{repo}/releases/tags/{tag}")).await? {
+        (200, release) => Ok(release),
+        (404, _) => Err(format!("{repo} has no release {tag}")),
+        (other, _) => Err(format!("GitHub answered {other}")),
+    }
+}
+
 /// The repository's latest release, as GitHub gives it.
 pub async fn latest_release(app: &App, repo: &str) -> Result<Value, String> {
     match github(app, &format!("{repo}/releases/latest")).await? {

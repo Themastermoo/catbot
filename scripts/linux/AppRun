@@ -1,0 +1,27 @@
+#!/bin/sh
+# The AppImage's start (stage 29.4): Catbot's window, with its own Catbot beside it.
+#
+# The window draws with the computer's own WebKitGTK. Most desktops have it; when it's missing,
+# this says how to get it instead of failing silently.
+HERE="$(dirname "$(readlink -f "$0")")"
+
+if ! ldconfig -p 2>/dev/null | grep -q 'libwebkit2gtk-4.1.so.0'; then
+  how="Ubuntu, Kubuntu, Mint, Debian:  sudo apt install libwebkit2gtk-4.1-0 libayatana-appindicator3-1
+Fedora:  sudo dnf install webkit2gtk4.1 libayatana-appindicator-gtk3
+Arch:  sudo pacman -S webkit2gtk-4.1 libayatana-appindicator
+openSUSE:  sudo zypper install libwebkit2gtk-4_1-0"
+  text="Catbot needs WebKitGTK 4.1, which this computer doesn't have yet. Install it, then open Catbot again:
+
+$how"
+  if command -v kdialog >/dev/null 2>&1; then
+    kdialog --title Catbot --sorry "$text"
+  elif command -v zenity >/dev/null 2>&1; then
+    zenity --warning --title=Catbot --no-wrap --text="$text"
+  elif command -v notify-send >/dev/null 2>&1; then
+    notify-send "Catbot needs WebKitGTK 4.1" "$how"
+  fi
+  echo "$text" >&2
+  exit 1
+fi
+
+exec "$HERE/usr/lib/catbot/catbot-ui" "$@"

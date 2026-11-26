@@ -2547,6 +2547,389 @@ async fn connected_mcp_apps_give_ticked_bots_tools_and_writes_ask_first() {
     drop(http);
 }
 
+#[tokio::test]
+async fn blender_gives_ticked_bots_its_tools_and_changes_ask_first() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Lin" }))).await;
+    let lin = made["bot"]["id"].as_str().unwrap().to_string();
+
+    // Blender's settings folder, with the folder Blender made for its version.
+    let config = s._dir.path().join("blender-config");
+    std::fs::create_dir_all(config.join("5.3")).unwrap();
+    std::fs::create_dir_all(config.join("4.2")).unwrap();
+    // SAFETY: only this test reads it.
+    unsafe { std::env::set_var("CATBOT_BLENDER_CONFIG", &config) };
+    let (_, before) = s.call("GET", "/api/blender", None).await;
+    assert_eq!((before["enabled"].as_bool(), before["open"].as_bool(), before["found"].as_array().unwrap().len()), (Some(false), Some(false), 2), "{before}");
+    assert!(before["found"][0].as_str().unwrap().ends_with("5.3"), "newest first: {before}");
+
+    // A port nothing uses, then the add-on into every version, with its key beside it.
+    let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    assert_eq!(s.call("PUT", "/api/blender", Some(json!({ "port": 80 }))).await.0, 400);
+    s.call("PUT", "/api/blender", Some(json!({ "port": port }))).await;
+    let (status, put) = s.call("POST", "/api/blender/install", None).await;
+    assert_eq!(status, 200, "{put}");
+    assert_eq!((put["enabled"].as_bool(), put["installed"].as_array().unwrap().len()), (Some(true), 2));
+    let addons = config.join("5.3/scripts/addons");
+    assert!(std::fs::read_to_string(addons.join("catbot_bridge.py")).unwrap().contains("Catbot Bridge"));
+    let key_file = addons.join("catbot_bridge.json");
+    let written: Value = serde_json::from_str(&std::fs::read_to_string(&key_file).unwrap()).unwrap();
+    assert_eq!((written["port"].as_u64(), written["key"].as_str().unwrap().len()), (Some(u64::from(port)), 64));
+    assert!(put.get("key").is_none() && !put.to_string().contains(written["key"].as_str().unwrap()), "the key never goes back");
+    assert!(put["problem"].as_str().unwrap().contains("Blender isn't open"), "{put}");
+
+    // Blender opens with the add-on on.
+    struct Stop(std::process::Child);
+    impl Drop for Stop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+        }
+    }
+    let log = s._dir.path().join("blender.log");
+    let fake = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-blender.py");
+    let mut blender = Stop(std::process::Command::new("python3").arg(fake).arg(&key_file).arg(&log).stdout(std::process::Stdio::piped()).spawn().unwrap());
+    {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::BufReader::new(blender.0.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+    }
+    let (_, open) = s.call("GET", "/api/blender", None).await;
+    assert_eq!((open["open"].as_bool(), open["blender"].as_str(), open["problem"].is_null()), (Some(true), Some("5.3.0-fake"), true), "{open}");
+
+    let ask = async |events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, bot: &str, text: &str| -> String {
+        s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": text }))).await;
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+    let missing = |said: &str| said.starts_with("ERROR: ") || said.starts_with("(no tool ");
+    // Nobody ticked: no tools. Then Scout only.
+    assert!(missing(&ask(&mut events, &scout, "catbot-tool: blender_scene {}").await));
+    s.call("PUT", "/api/blender", Some(json!({ "bots": [scout] }))).await;
+    assert!(ask(&mut events, &scout, "catbot-tool: blender_scene {}").await.contains("\"Cube\""));
+    assert!(ask(&mut events, &scout, r#"catbot-tool: blender_object {"name": "Ball"}"#).await.contains("no object called 'Ball'"));
+    assert!(missing(&ask(&mut events, &lin, "catbot-tool: blender_scene {}").await), "Lin isn't ticked");
+    assert!(ask(&mut events, &scout, r#"catbot-tool: blender_look {"what": "last_render"}"#).await.contains("nothing has been rendered yet"));
+    assert!(!log.exists(), "looking changed nothing");
+
+    // A card for each change, showing exactly what would be done; nothing happens until yes.
+    let card = async || -> Value {
+        let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+        page["messages"].as_array().unwrap().iter().rev().find(|m| m["kind"] == "team-change").unwrap().clone()
+    };
+    let approve = async |card: &Value| -> Value {
+        let (_, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{}", card["id"].as_str().unwrap()), Some(json!({ "approve": true }))).await;
+        assert_eq!(answered["state"], "done", "{answered}");
+        let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+        page["messages"].as_array().unwrap().iter().find(|m| m["id"] == card["id"]).unwrap()["teamChange"]["doneText"].clone()
+    };
+    let waiting = ask(&mut events, &scout, r#"catbot-tool: blender_python {"code": "import bpy\nprint('hi')", "why": "count things"}"#).await;
+    assert!(waiting.contains("waiting for the person's approval"), "{waiting}");
+    assert!(!log.exists(), "not run yet");
+    let script = card().await;
+    assert_eq!(script["teamChange"]["title"], "Blender › Python script");
+    assert_eq!(script["teamChange"]["heading"], "Scout wants to run a script in Blender");
+    assert_eq!(script["teamChange"]["lines"], json!(["count things", "import bpy\nprint('hi')"]));
+    assert_eq!(approve(&script).await, "Ran. It printed: hi from blender result = 42");
+    assert!(std::fs::read_to_string(&log).unwrap().contains("print('hi')"));
+
+    ask(&mut events, &scout, r#"catbot-tool: blender_change {"steps": [{"action": "add", "kind": "cube", "name": "Box"}, {"action": "delete", "name": "Cube"}]}"#).await;
+    let change = card().await;
+    assert_eq!(change["teamChange"]["title"], "Blender › 2 changes");
+    assert!(change["teamChange"]["lines"][0].as_str().unwrap().starts_with("1. add "), "{change}");
+    assert_eq!(approve(&change).await, "Done: did add; did delete.");
+
+    // A render lands in Catbot's own folder, and the bot can look at it.
+    ask(&mut events, &scout, r#"catbot-tool: blender_render {"frame": 12, "percent": 50}"#).await;
+    let render = card().await;
+    assert_eq!(render["teamChange"]["lines"][1], "Frame 12");
+    assert!(approve(&render).await.as_str().unwrap().starts_with("Rendered in 0.5 seconds (CYCLES) to "));
+    let renders = s._dir.path().join("home/blender/renders");
+    assert_eq!(std::fs::read_dir(&renders).unwrap().count(), 1);
+    assert!(ask(&mut events, &scout, r#"catbot-tool: blender_look {"what": "last_render"}"#).await.contains("The last render"));
+
+    // Saving: a full path with the right ending, or Catbot's folder.
+    assert!(ask(&mut events, &scout, r#"catbot-tool: blender_save {"kind": "glb", "path": "out.glb"}"#).await.contains("full path"));
+    assert!(ask(&mut events, &scout, r#"catbot-tool: blender_save {"kind": "glb", "path": "/tmp/out.fbx"}"#).await.contains("ends .glb"));
+    ask(&mut events, &scout, r#"catbot-tool: blender_save {"kind": "stl"}"#).await;
+    let save = card().await;
+    assert!(save["teamChange"]["lines"][0].as_str().unwrap().contains("home/blender/files/"), "{save}");
+    assert!(approve(&save).await.as_str().unwrap().ends_with(".stl."));
+
+    // Turned off: no tools; a key that doesn't match says what to do.
+    s.call("PUT", "/api/blender", Some(json!({ "enabled": false }))).await;
+    assert!(missing(&ask(&mut events, &scout, "catbot-tool: blender_scene {}").await));
+    s.call("PUT", "/api/blender", Some(json!({ "enabled": true }))).await;
+    let (_, again) = s.call("POST", "/api/blender/install", None).await;
+    assert_eq!(again["open"], true, "the same key stays: {again}");
+    let mut changed: Value = serde_json::from_str(&std::fs::read_to_string(&key_file).unwrap()).unwrap();
+    changed["key"] = json!("x".repeat(64));
+    drop(blender);
+    std::fs::write(&key_file, changed.to_string()).unwrap();
+    let mut blender = Stop(std::process::Command::new("python3").arg(fake).arg(&key_file).arg(&log).stdout(std::process::Stdio::piped()).spawn().unwrap());
+    {
+        use std::io::BufRead;
+        let mut line = String::new();
+        std::io::BufReader::new(blender.0.stdout.as_mut().unwrap()).read_line(&mut line).unwrap();
+    }
+    assert!(ask(&mut events, &scout, "catbot-tool: blender_scene {}").await.contains("press Install again"));
+
+    // Taken out: the files go, and so do the tools.
+    let (_, gone) = s.call("DELETE", "/api/blender/install", None).await;
+    assert_eq!((gone["enabled"].as_bool(), gone["installed"].as_array().unwrap().len()), (Some(false), 0));
+    assert!(!addons.join("catbot_bridge.py").exists() && !key_file.exists());
+    assert!(missing(&ask(&mut events, &scout, "catbot-tool: blender_scene {}").await));
+    drop(blender);
+}
+
+/// A stand-in for ComfyUI: a few nodes that need no models, its user folder, a queue that runs
+/// at once, and a log of the changes it was asked for. `COMFY_URL` uses a real ComfyUI instead.
+async fn fake_comfyui() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+    let log = Arc::new(Mutex::new(Vec::<String>::new()));
+    let files = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let jobs = Arc::new(Mutex::new(HashMap::<String, Value>::new()));
+    let (seen, store) = (log.clone(), files.clone());
+    const PNG: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
+    let addr = listen(Router::new().fallback(move |req: axum::extract::Request| {
+        let (seen, store, done) = (seen.clone(), store.clone(), jobs.clone());
+        async move {
+            let (parts, body) = req.into_parts();
+            let path = parts.uri.path().to_string();
+            let query = parts.uri.query().unwrap_or_default().to_string();
+            let bytes = body.collect().await.unwrap().to_bytes();
+            let answer = |status: u16, v: Value| Response::builder().status(status).header("content-type", "application/json").body(Body::from(v.to_string())).unwrap();
+            let int = |d: i64| json!(["INT", { "default": d, "min": 1 }]);
+            let info = json!({
+                "EmptyImage": { "input": { "required": { "width": int(512), "height": int(512), "batch_size": int(1), "color": ["INT", { "default": 0, "min": 0 }] } }, "input_order": { "required": ["width", "height", "batch_size", "color"] }, "output": ["IMAGE"], "display_name": "EmptyImage", "category": "image" },
+                "SaveImage": { "input": { "required": { "images": ["IMAGE", {}], "filename_prefix": ["STRING", { "default": "ComfyUI" }] } }, "input_order": { "required": ["images", "filename_prefix"] }, "output": [], "output_node": true, "display_name": "Save Image", "category": "image" },
+                "LoadImage": { "input": { "required": { "image": [[], { "image_upload": true }] } }, "output": ["IMAGE", "MASK"], "display_name": "Load Image", "category": "image" },
+                "PrimitiveStringMultiline": { "input": { "required": { "value": ["STRING", { "multiline": true }] } }, "output": ["STRING"], "display_name": "String (Multiline)", "category": "utils/primitive" },
+            });
+            match (parts.method.as_str(), path.as_str()) {
+                ("GET", "/system_stats") => answer(200, json!({ "system": { "comfyui_version": "0.46.0-fake" }, "devices": [{ "name": "cuda:0 NVIDIA GeForce RTX 2070 SUPER", "vram_total": 8_589_934_592u64, "vram_free": 7_000_000_000u64 }] })),
+                ("GET", "/queue") => answer(200, json!({ "queue_running": [], "queue_pending": [] })),
+                ("POST", "/queue") | ("POST", "/interrupt") => {
+                    seen.lock().unwrap().push(format!("{path} {}", String::from_utf8_lossy(&bytes)));
+                    answer(200, json!({}))
+                }
+                ("GET", "/models") => answer(200, json!(["checkpoints", "loras"])),
+                ("GET", "/models/checkpoints") => answer(200, json!(["sdxl.safetensors"])),
+                ("GET", "/object_info") => answer(200, info),
+                ("GET", "/userdata") => {
+                    let names: Vec<String> = store.lock().unwrap().keys().filter_map(|k| k.strip_prefix("workflows/").map(str::to_string)).collect();
+                    if names.is_empty() { answer(404, json!("Directory not found")) } else { answer(200, json!(names)) }
+                }
+                (method, p) if p.starts_with("/userdata/") => {
+                    let name = p.trim_start_matches("/userdata/").replace("%2F", "/").replace("%20", " ");
+                    if method == "POST" {
+                        store.lock().unwrap().insert(name, bytes.to_vec());
+                        return answer(200, json!({}));
+                    }
+                    match store.lock().unwrap().get(&name) {
+                        Some(b) => Response::builder().status(200).header("content-type", "application/json").body(Body::from(b.clone())).unwrap(),
+                        None => answer(404, json!({})),
+                    }
+                }
+                ("POST", "/upload/image") => {
+                    let text = String::from_utf8_lossy(&bytes).to_string();
+                    let name = text.split("filename=\"").nth(1).and_then(|r| r.split('"').next()).unwrap_or("x.png").to_string();
+                    seen.lock().unwrap().push(format!("upload {name}"));
+                    store.lock().unwrap().insert(format!("input/{name}"), vec![1]);
+                    answer(200, json!({ "name": name, "subfolder": "", "type": "input" }))
+                }
+                ("POST", "/prompt") => {
+                    let ask: Value = serde_json::from_slice(&bytes).unwrap();
+                    let graph = ask["prompt"].as_object().unwrap().clone();
+                    let mut errors = serde_json::Map::new();
+                    for (id, n) in &graph {
+                        let class = n["class_type"].as_str().unwrap_or_default();
+                        if info.get(class).is_none() {
+                            errors.insert(id.clone(), json!({ "class_type": class, "errors": [{ "message": "no such node", "details": class }] }));
+                        } else if class == "LoadImage" && !store.lock().unwrap().contains_key(&format!("input/{}", n["inputs"]["image"].as_str().unwrap_or_default())) {
+                            errors.insert(id.clone(), json!({ "class_type": class, "errors": [{ "message": "Custom validation failed", "details": "image - Invalid image file" }] }));
+                        }
+                    }
+                    if !errors.is_empty() {
+                        return answer(400, json!({ "error": { "message": "Prompt outputs failed validation" }, "node_errors": errors }));
+                    }
+                    let job = format!("job-{}", done.lock().unwrap().len() + 1);
+                    let mut outputs = serde_json::Map::new();
+                    for (id, n) in &graph {
+                        if n["class_type"] == "SaveImage" {
+                            let file = format!("{}_00001_.png", n["inputs"]["filename_prefix"].as_str().unwrap_or("ComfyUI"));
+                            outputs.insert(id.clone(), json!({ "images": [{ "filename": file, "subfolder": "", "type": "output" }] }));
+                        }
+                    }
+                    seen.lock().unwrap().push(format!("prompt {}", serde_json::to_string(&graph).unwrap()));
+                    done.lock().unwrap().insert(job.clone(), json!({ "status": { "status_str": "success", "completed": true, "messages": [] }, "outputs": outputs }));
+                    answer(200, json!({ "prompt_id": job, "number": 1, "node_errors": {} }))
+                }
+                ("GET", p) if p.starts_with("/history/") => {
+                    let job = p.trim_start_matches("/history/");
+                    match done.lock().unwrap().get(job) {
+                        Some(entry) => answer(200, json!({ job: entry })),
+                        None => answer(200, json!({})),
+                    }
+                }
+                ("GET", "/view") => {
+                    use base64::Engine as _;
+                    assert!(query.contains("type=output"), "{query}");
+                    Response::builder().status(200).header("content-type", "image/png").body(Body::from(base64::engine::general_purpose::STANDARD.decode(PNG).unwrap())).unwrap()
+                }
+                _ => answer(404, json!({ "error": "not here" })),
+            }
+        }
+    }))
+    .await;
+    (format!("http://{addr}"), log)
+}
+
+#[tokio::test]
+async fn comfyui_runs_saved_and_built_workflows_once_approved() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let scout = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let real = std::env::var("COMFY_URL").ok();
+    let (url, log) = match &real {
+        Some(url) => (url.clone(), std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))),
+        None => fake_comfyui().await,
+    };
+
+    // Off, and not reached: no harm. Then on, at its address.
+    let (_, before) = s.call("GET", "/api/comfyui", None).await;
+    assert_eq!((before["enabled"].as_bool(), before["url"].as_str()), (Some(false), Some("http://127.0.0.1:8188")));
+    assert_eq!(s.call("PUT", "/api/comfyui", Some(json!({ "url": "127.0.0.1:8188" }))).await.0, 400);
+    let (_, on) = s.call("PUT", "/api/comfyui", Some(json!({ "url": format!("{url}/"), "enabled": true }))).await;
+    assert_eq!((on["open"].as_bool(), on["url"].as_str()), (Some(true), Some(url.as_str())), "{on}");
+
+    // A workflow saved from ComfyUI's editor: a flat colour, saved; and a prompt box beside it.
+    let saved = json!({
+        "nodes": [
+            { "id": 1, "type": "EmptyImage", "widgets_values": [64, 48, 1, 16711680], "outputs": [{ "name": "IMAGE", "type": "IMAGE", "links": [1] }] },
+            { "id": 2, "type": "SaveImage", "widgets_values": ["catbot_test"], "inputs": [{ "name": "images", "type": "IMAGE", "link": 1 }] },
+            { "id": 3, "type": "PrimitiveStringMultiline", "title": "Prompt", "widgets_values": ["a red square"], "outputs": [{ "name": "STRING", "type": "STRING", "links": [] }] },
+            { "id": 4, "type": "MarkdownNote", "widgets_values": ["How to use this"] },
+        ],
+        "links": [[1, 1, 0, 2, 0, "IMAGE"]],
+    });
+    let client = reqwest::Client::new();
+    client.post(format!("{url}/userdata/workflows%2Fflat%20colour.json?overwrite=true")).body(saved.to_string()).send().await.unwrap();
+
+    let ask = async |events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>, text: &str| -> String {
+        s.call("POST", &format!("/api/bots/{scout}/messages"), Some(json!({ "text": text }))).await;
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+        until(events, "done", |f| runtime(f, "turn.completed")).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+    let missing = |said: &str| said.starts_with("ERROR: ") || said.starts_with("(no tool ");
+    assert!(missing(&ask(&mut events, "catbot-tool: comfy_status {}").await), "nobody ticked");
+    s.call("PUT", "/api/comfyui", Some(json!({ "bots": [scout] }))).await;
+    assert!(ask(&mut events, "catbot-tool: comfy_status {}").await.contains("\"comfyui\""));
+    assert!(ask(&mut events, "catbot-tool: comfy_models {}").await.contains("checkpoints"));
+    assert!(ask(&mut events, r#"catbot-tool: comfy_nodes {"name": "EmptyImage"}"#).await.contains("\"width\""));
+    assert!(ask(&mut events, "catbot-tool: comfy_workflows {}").await.contains("flat colour"));
+    let shown = ask(&mut events, r#"catbot-tool: comfy_workflows {"name": "flat colour"}"#).await;
+    assert!(shown.contains("1.width") && shown.contains("3.value") && !shown.contains("MarkdownNote"), "{shown}");
+
+    let card = async || -> Value {
+        let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+        page["messages"].as_array().unwrap().iter().rev().find(|m| m["kind"] == "team-change").unwrap().clone()
+    };
+    let approve = async |card: &Value| -> Value {
+        let (_, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{}", card["id"].as_str().unwrap()), Some(json!({ "approve": true }))).await;
+        assert_eq!(answered["state"], "done", "{answered}");
+        let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
+        page["messages"].as_array().unwrap().iter().find(|m| m["id"] == card["id"]).unwrap()["teamChange"]["doneText"].clone()
+    };
+    let arrives = async |events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>| -> Value {
+        tokio::time::timeout(Duration::from_secs(60), async {
+            loop {
+                let f = events.recv().await.unwrap();
+                if f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["attachments"].is_array() {
+                    return f;
+                }
+            }
+        })
+        .await
+        .expect("ComfyUI's result came")
+    };
+
+    // A saved workflow, changed: a card first, then the picture in the chat.
+    let waiting = ask(&mut events, r#"catbot-tool: comfy_run {"workflow": "flat colour", "set": {"1.width": 32}, "why": "a test swatch"}"#).await;
+    assert!(waiting.contains("waiting for the person's approval"), "{waiting}");
+    let run = card().await;
+    assert_eq!(run["teamChange"]["title"], "ComfyUI › flat colour");
+    assert_eq!(run["teamChange"]["lines"], json!(["a test swatch", "Saved workflow: flat colour", "Set 1.width = 32"]));
+    assert!(approve(&run).await.as_str().unwrap().starts_with("Queued in ComfyUI as job "));
+    let picture = arrives(&mut events).await;
+    let text = picture["message"]["text"].as_str().unwrap().to_string();
+    assert!(text.starts_with("ComfyUI finished ComfyUI › flat colour. Saved in my folder: "), "{text}");
+    let first = text.rsplit(": ").next().unwrap().to_string();
+    assert_eq!(&std::fs::read(&first).unwrap()[1..4], b"PNG");
+    assert!(ask(&mut events, &format!(r#"catbot-tool: comfy_result {{"path": "{first}"}}"#)).await.contains("comfyui-catbot_test"));
+    assert!(ask(&mut events, r#"catbot-tool: comfy_result {"path": "/etc/passwd"}"#).await.contains("in your folder"));
+
+    // One the bot built, with that picture put in: its nodes are on the card.
+    let graph = json!({ "1": { "class_type": "LoadImage", "inputs": { "image": "placeholder.png" } }, "2": { "class_type": "SaveImage", "inputs": { "images": ["1", 0], "filename_prefix": "catbot_again" } } });
+    let asked = format!(r#"catbot-tool: comfy_run {{"graph": {graph}, "pictures": {{"1.image": "{first}"}}}}"#);
+    ask(&mut events, &asked).await;
+    let built = card().await;
+    assert_eq!(built["teamChange"]["title"], "ComfyUI › a new workflow");
+    let lines = built["teamChange"]["lines"].to_string();
+    assert!(lines.contains("A workflow the bot built: 2 nodes") && lines.contains("2 SaveImage: images ← 1") && lines.contains(&format!("Picture {first} into 1.image")), "{lines}");
+    approve(&built).await;
+    let again = arrives(&mut events).await;
+    assert!(again["message"]["text"].as_str().unwrap().contains("catbot_again"), "{again}");
+    // The bot hears where its pictures went (with its next message).
+    let mut untold = String::new();
+    for _ in 0..50 {
+        untold = s.app.with_store(|store| store.setting(&format!("team-untold:{thread}"))).flatten().map(|v| v.to_string()).unwrap_or_default();
+        if untold.contains("saved in your folder") {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(untold.contains("saved in your folder: ") && untold.contains("catbot_again"), "{untold}");
+    assert!(ask(&mut events, r#"catbot-tool: comfy_run {"graph": {"1": {"class_type": "NoSuchNode", "inputs": {}}}}"#).await.contains("ComfyUI has no node NoSuchNode"));
+
+    // Stopping a job asks too.
+    ask(&mut events, r#"catbot-tool: comfy_cancel {"job": "job-9"}"#).await;
+    assert_eq!(approve(&card().await).await, "Stopped job job-9.");
+    if real.is_none() {
+        assert!(log.lock().unwrap().iter().any(|l| l.starts_with("/queue") && l.contains("job-9")));
+        assert!(log.lock().unwrap().iter().any(|l| l.starts_with("upload ")));
+    }
+
+    // `/image` offers ComfyUI once a workflow is picked, and its description goes where it's told.
+    let (_, picked) = s.call("PUT", "/api/comfyui", Some(json!({ "imageWorkflow": "flat colour", "imagePrompt": "3.value" }))).await;
+    assert!(picked["prompts"].to_string().contains("3.value"), "{picked}");
+    let (_, asked) = s.call("POST", &format!("/api/bots/{scout}/images"), Some(json!({ "prompt": "a blue square", "threadId": thread }))).await;
+    let options: Vec<&str> = asked["card"]["image"]["options"].as_array().unwrap().iter().filter_map(|o| o["id"].as_str()).collect();
+    assert!(options.contains(&"comfyui"), "{options:?}");
+    let id = asked["card"]["id"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/images/{id}"), Some(json!({ "choice": "comfyui" }))).await;
+    let drawn = arrives(&mut events).await;
+    assert!(drawn["message"]["text"].as_str().unwrap().contains("drawn by ComfyUI · flat colour"), "{drawn}");
+    if real.is_none() {
+        let sent = log.lock().unwrap().iter().rev().find(|l| l.starts_with("prompt ")).unwrap().clone();
+        assert!(sent.contains("a blue square"), "{sent}");
+    }
+
+    // Off: no tools.
+    s.call("PUT", "/api/comfyui", Some(json!({ "enabled": false }))).await;
+    assert!(missing(&ask(&mut events, "catbot-tool: comfy_status {}").await));
+}
+
 /// A stand-in for Composio's API: two Gmail tools, sign-ins that finish at once, and a log of
 /// every call as "METHOD path body".
 /// The Composio tests each point CATBOT_COMPOSIO_API (one setting for the whole process) at a
@@ -4238,7 +4621,7 @@ async fn an_update_is_downloaded_checked_installed_and_can_go_back() {
         json!({ "current": here, "kept": { here: { "store": store }, "0.1.5": { "store": store }, "0.1.4": { "store": store - 1 } } }).to_string(),
     )
     .unwrap();
-    s.app.updates.set_place(Place { platform: Platform::Windows, dir: Some(install.path().into()), api: format!("http://{gh}"), code: None });
+    s.app.updates.set_place(Place { platform: Platform::Windows, dir: Some(install.path().into()), api: format!("http://{gh}"), code: None, appimage: None, installer: vec![] });
     let read_versions = || serde_json::from_slice::<Value>(&std::fs::read(install.path().join("versions.json")).unwrap()).unwrap();
 
     // A release whose download isn't what release.json says is thrown away.
@@ -4301,7 +4684,7 @@ async fn the_phone_updates_through_the_installer_and_goes_back_with_the_rebuilt_
     let release = std::sync::Arc::new(std::sync::Mutex::new(json!({})));
     let files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
     let gh = listen(fake_github(release.clone(), files.clone())).await;
-    s.app.updates.set_place(Place { platform: Platform::Android, dir: None, api: format!("http://{gh}"), code: Some(100) });
+    s.app.updates.set_place(Place { platform: Platform::Android, dir: None, api: format!("http://{gh}"), code: Some(100), appimage: None, installer: vec![] });
     let store = catbot::store::STORE_VERSION;
     let (new_apk, old_apk) = (b"new app".to_vec(), b"old app, rebuilt".to_vec());
     let sha = |b: &[u8]| format!("{:x}", sha2::Sha256::digest(b));
@@ -4340,4 +4723,81 @@ async fn the_phone_updates_through_the_installer_and_goes_back_with_the_rebuilt_
     let opened = until(&mut events, "the installer, going back", |f| f["kind"] == "update" && f["openInstaller"].as_str().is_some_and(|a| a.ends_with("rollback.apk"))).await;
     assert_eq!(std::fs::read(opened["openInstaller"].as_str().unwrap()).unwrap(), b"old app, rebuilt");
     assert_eq!(opened["update"]["installing"]["to"], "0.1.0");
+}
+
+/// Publishes a Linux release on the stand-in GitHub: the .deb and the AppImage, each saying `says`.
+fn publish_linux(gh: SocketAddr, release: &std::sync::Mutex<Value>, files: &std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>, version: &str, says: &str) {
+    use sha2::Digest;
+    let body = says.as_bytes().to_vec();
+    let entry = |name: &str| json!({ "file": name, "sha256": format!("{:x}", sha2::Sha256::digest(&body)), "bytes": body.len() });
+    let about = json!({ "version": version, "store": catbot::store::STORE_VERSION, "linux_deb": entry("catbot-amd64.deb"), "linux_appimage": entry("Catbot-x86_64.AppImage") });
+    let mut files = files.lock().unwrap();
+    files.insert("catbot-amd64.deb".into(), body.clone());
+    files.insert("Catbot-x86_64.AppImage".into(), body.clone());
+    files.insert("release.json".into(), about.to_string().into_bytes());
+    let asset = |name: &str| json!({ "name": name, "browser_download_url": format!("http://{gh}/dl/{name}") });
+    *release.lock().unwrap() = json!({ "tag_name": format!("v{version}"), "assets": [asset("release.json"), asset("catbot-amd64.deb"), asset("Catbot-x86_64.AppImage")] });
+}
+
+#[tokio::test]
+async fn the_appimage_replaces_itself_and_keeps_the_old_one_to_go_back_to() {
+    use server::updates::{Place, Platform};
+    let s = setup().await;
+    let release = std::sync::Arc::new(std::sync::Mutex::new(json!({})));
+    let files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let gh = listen(fake_github(release.clone(), files.clone())).await;
+    let where_it_is = tempfile::tempdir().unwrap();
+    let image = where_it_is.path().join("Catbot.AppImage");
+    std::fs::write(&image, "this version").unwrap();
+    s.app.updates.set_place(Place { platform: Platform::AppImage, dir: None, api: format!("http://{gh}"), code: None, appimage: Some(image.clone()), installer: vec![] });
+    publish_linux(gh, &release, &files, "9.0.0", "the new one");
+    s.call("PUT", "/api/version", Some(json!({ "repo": "moo/catbot" }))).await;
+    let (_, checked) = s.call("POST", "/api/version/check", None).await;
+    assert_eq!(checked["offer"]["canInstall"], true, "{checked}");
+    let mut events = s.events().await;
+    assert_eq!(s.call("POST", "/api/version/download", Some(json!({ "install": true }))).await.0, 202);
+    until(&mut events, "restart", |f| f["kind"] == "update" && f["restart"] == true).await;
+    assert_eq!(std::fs::read_to_string(&image).unwrap(), "the new one");
+    let shelf = s.app.with_store(|st| Ok(st.home().join("updates/appimages"))).unwrap();
+    let here = env!("CARGO_PKG_VERSION");
+    assert_eq!(std::fs::read_to_string(shelf.join(format!("Catbot-{here}.AppImage"))).unwrap(), "this version", "kept to go back to");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&image).unwrap().permissions().mode() & 0o111, 0o111, "still runnable");
+    }
+    // Going back: a kept one is put in place again (here, as though 9.0.0 were running and this
+    // version kept; it's another version that this test can go back to).
+    std::fs::write(shelf.join("Catbot-0.1.5.AppImage"), "an older one").unwrap();
+    let list: Value = serde_json::from_slice(&std::fs::read(shelf.join("versions.json")).unwrap()).unwrap();
+    let mut list = list;
+    list["kept"]["0.1.5"] = json!({ "store": catbot::store::STORE_VERSION });
+    std::fs::write(shelf.join("versions.json"), list.to_string()).unwrap();
+    let (status, went) = s.call("POST", "/api/version/back", Some(json!({ "to": "0.1.5" }))).await;
+    assert_eq!(status, 200, "{went}");
+    assert_eq!(std::fs::read_to_string(&image).unwrap(), "an older one");
+    let (_, version) = s.call("GET", "/api/version", None).await;
+    let kept: Vec<&str> = version["update"]["kept"].as_array().unwrap().iter().filter_map(|k| k["version"].as_str()).collect();
+    assert!(kept.contains(&"0.1.5") && kept.contains(&"9.0.0"), "{kept:?}");
+}
+
+#[tokio::test]
+async fn the_deb_is_handed_to_the_installer() {
+    use server::updates::{Place, Platform};
+    let s = setup().await;
+    let release = std::sync::Arc::new(std::sync::Mutex::new(json!({})));
+    let files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let gh = listen(fake_github(release.clone(), files.clone())).await;
+    let out = tempfile::tempdir().unwrap();
+    let installed = out.path().join("installed.deb");
+    // A stand-in for pkexec apt-get: copies the file it's given.
+    let installer = vec!["sh".to_string(), "-c".to_string(), format!("cp \"$0\" '{}'", installed.display())];
+    s.app.updates.set_place(Place { platform: Platform::Deb, dir: None, api: format!("http://{gh}"), code: None, appimage: None, installer });
+    publish_linux(gh, &release, &files, "9.0.0", "the new deb");
+    s.call("PUT", "/api/version", Some(json!({ "repo": "moo/catbot" }))).await;
+    s.call("POST", "/api/version/check", None).await;
+    let mut events = s.events().await;
+    assert_eq!(s.call("POST", "/api/version/download", Some(json!({ "install": true }))).await.0, 202);
+    until(&mut events, "restart", |f| f["kind"] == "update" && f["restart"] == true).await;
+    assert_eq!(std::fs::read_to_string(&installed).unwrap(), "the new deb");
 }

@@ -97,7 +97,7 @@ pub fn on_frame(frame: &Value, own: bool) {
 /// window when it's showing home's).
 fn act_on_installed(info: &Value) {
     match info["update"]["platform"].as_str() {
-        Some("windows") => restart(),
+        Some("windows" | "linux_deb" | "linux_appimage") => restart(),
         Some("android") => {
             if let Some(apk) = info["update"]["ready"]["apk"].as_str() {
                 open_installer(apk);
@@ -107,7 +107,9 @@ fn act_on_installed(info: &Value) {
     }
 }
 
-/// The Windows app closes with code 75; the launcher starts the version now current.
+/// The Windows app closes with code 75; the launcher starts the version now current. The Linux
+/// packages start the app again themselves (the AppImage file, or /usr/bin/catbot), a couple of
+/// seconds on, once this one and its Catbot have stopped.
 fn restart() {
     #[cfg(all(feature = "desktop", windows))]
     {
@@ -117,6 +119,28 @@ fn restart() {
                 // A moment for the banner to say so.
                 crate::events::pause(800).await;
                 std::process::exit(75);
+            });
+        });
+    }
+    #[cfg(all(feature = "desktop", target_os = "linux"))]
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        if !crate::link::has_own() {
+            return;
+        }
+        ONCE.call_once(|| {
+            spawn(async {
+                crate::events::pause(800).await;
+                let program = std::env::var_os("APPIMAGE")
+                    .filter(|a| !a.is_empty())
+                    .map(std::path::PathBuf::from)
+                    .or_else(|| Some(std::path::PathBuf::from("/usr/bin/catbot")).filter(|p| p.exists()))
+                    .or_else(|| std::env::current_exe().ok());
+                if let Some(program) = program {
+                    let _ = std::process::Command::new("sh").arg("-c").arg("sleep 2; exec \"$0\"").arg(program).env_remove("APPIMAGE").spawn();
+                }
+                crate::pet_window::bring_home();
+                std::process::exit(0);
             });
         });
     }
@@ -264,7 +288,7 @@ pub fn Versions() -> Element {
         spawn(async move {
             match api::own("POST", "/api/version/back", Some(&json!({ "to": to, "useSnapshot": use_snapshot }))).await {
                 Ok((200, _)) => said.set(Some(format!("Going back to Catbot {to}: it restarts now."))),
-                Ok((202, _)) => said.set(Some(format!("Getting Catbot {to}; Android asks you to install it next."))),
+                Ok((202, _)) => said.set(Some(format!("Getting Catbot {to}; you'll be asked to install it next."))),
                 Ok((409, answer)) if answer["needsSnapshot"] == true => asking.set(Some(answer)),
                 Ok((_, answer)) => said.set(Some(answer["error"].as_str().or(answer.as_str()).unwrap_or("Going back didn't work.").to_string())),
                 Err(err) => said.set(Some(err)),
@@ -277,10 +301,14 @@ pub fn Versions() -> Element {
     if update["platform"] == "android" && update["phoneBack"]["version"].is_string() {
         kept = vec![json!({ "version": info()["version"], "current": true }), json!({ "version": update["phoneBack"]["version"] })];
     }
-    if !matches!(update["platform"].as_str(), Some("windows" | "android")) || kept.len() < 2 {
+    if !matches!(update["platform"].as_str(), Some("windows" | "android" | "linux_deb" | "linux_appimage")) || kept.len() < 2 {
         return rsx! {};
     }
-    let title = if update["platform"] == "android" { "Versions for this phone" } else { "Versions on this PC" };
+    let title = match update["platform"].as_str() {
+        Some("android") => "Versions for this phone",
+        Some("windows") => "Versions on this PC",
+        _ => "Versions on this computer",
+    };
     rsx! {
         div { "data-versions": true, class: "border-t border-hairline/50 px-4 py-3",
             div { class: "text-[13px] font-medium text-ink", "{title}" }

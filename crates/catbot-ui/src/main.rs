@@ -10,6 +10,8 @@ mod scheduled;
 mod voice;
 mod profile;
 mod apps;
+mod blender;
+mod comfyui;
 mod computers;
 mod attach;
 mod emoji_list;

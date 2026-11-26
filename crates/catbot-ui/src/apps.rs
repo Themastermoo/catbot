@@ -1,7 +1,8 @@
 //! Settings › Apps (stage 16): the apps that give bots tools. 16.1 is MCP servers, run here as a
 //! command or reached at a link (`server/apps.rs`). Catbot tests each one when it's added or
 //! changed, and turns it on only when it answers. The person ticks which bots get its tools.
-//! Tools the server marks read-only run freely; every other use asks first.
+//! Tools the server marks read-only run freely; every other use asks first. Blender and ComfyUI
+//! have their own sections (`blender.rs`, `comfyui.rs`).
 
 use dioxus::prelude::*;
 use serde_json::{Value, json};
@@ -35,6 +36,8 @@ pub fn AppsSettings() -> Element {
     rsx! {
         section { class: "flex flex-col gap-3", "data-apps": true,
             ComposioSettings {}
+            crate::blender::BlenderSettings {}
+            crate::comfyui::ComfyUiSettings {}
             h2 { class: HEADING, "MCP servers" }
             p { class: "text-[13px] leading-relaxed text-ink-secondary",
                 "Programs that give bots tools: run here as a command, or reached at a link. Only the bots you tick get an app's tools. Tools the app marks as only reading run freely; anything else shows you a card first, with exactly what it would do."
