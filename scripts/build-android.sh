@@ -71,6 +71,24 @@ EOF
 say "Version $VERSION, code $CODE…"
 sed -i -E "s/versionCode = [0-9]+/versionCode = $CODE/; s/versionName = \"[^\"]*\"/versionName = \"$VERSION\"/" "$APP/app/build.gradle.kts"
 
+say "Letting it hand updates to Android's installer…"
+# Updates with rollback (stage 28.5): the app downloads a release's APK into its private files
+# and opens Android's installer on it, through a FileProvider sharing just that folder.
+MANIFEST="$APP/app/src/main/AndroidManifest.xml"
+if ! grep -q REQUEST_INSTALL_PACKAGES "$MANIFEST"; then
+  sed -i 's|<uses-permission android:name="android.permission.INTERNET" />|&\n    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />|' "$MANIFEST"
+fi
+if ! grep -q 'catbot_updates' "$MANIFEST"; then
+  sed -i 's|</application>|    <provider android:name="androidx.core.content.FileProvider" android:authorities="${applicationId}.updates"\n            android:exported="false" android:grantUriPermissions="true">\n            <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/catbot_updates" />\n        </provider>\n    </application>|' "$MANIFEST"
+fi
+mkdir -p "$RES/xml"
+cat >"$RES/xml/catbot_updates.xml" <<'EOF2'
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Only the downloaded updates, for Android's installer to read. -->
+<paths><files-path name="updates" path="catbot/updates/downloads/" /></paths>
+EOF2
+grep -q REQUEST_INSTALL_PACKAGES "$MANIFEST" && grep -q catbot_updates "$MANIFEST" || stop "Couldn't add the installer's permission and FileProvider to $MANIFEST."
+
 # No shrinking: the Rust side reaches Android classes by name, which a shrinker can't see.
 sed -i 's/isMinifyEnabled = true/isMinifyEnabled = false/' "$APP/app/build.gradle.kts"
 

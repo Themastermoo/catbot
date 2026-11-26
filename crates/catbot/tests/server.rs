@@ -4292,3 +4292,52 @@ async fn an_update_is_downloaded_checked_installed_and_can_go_back() {
     let (status, _) = s.call("POST", "/api/version/back", Some(json!({ "to": "0.0.1" }))).await;
     assert_eq!(status, 400, "not kept");
 }
+
+#[tokio::test]
+async fn the_phone_updates_through_the_installer_and_goes_back_with_the_rebuilt_app() {
+    use server::updates::{Place, Platform};
+    use sha2::Digest;
+    let s = setup().await;
+    let release = std::sync::Arc::new(std::sync::Mutex::new(json!({})));
+    let files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+    let gh = listen(fake_github(release.clone(), files.clone())).await;
+    s.app.updates.set_place(Place { platform: Platform::Android, dir: None, api: format!("http://{gh}"), code: Some(100) });
+    let store = catbot::store::STORE_VERSION;
+    let (new_apk, old_apk) = (b"new app".to_vec(), b"old app, rebuilt".to_vec());
+    let sha = |b: &[u8]| format!("{:x}", sha2::Sha256::digest(b));
+    let about = json!({
+        "version": "9.0.0", "store": store,
+        "android": { "file": "catbot-android.apk", "sha256": sha(&new_apk), "bytes": new_apk.len(), "code": 200 },
+        "android_rollback": { "file": "catbot-android-rollback.apk", "sha256": sha(&old_apk), "bytes": old_apk.len(), "code": 201, "version": "0.1.0", "store": store },
+    });
+    {
+        let mut files = files.lock().unwrap();
+        files.insert("catbot-android.apk".into(), new_apk);
+        files.insert("catbot-android-rollback.apk".into(), old_apk);
+        files.insert("release.json".into(), about.to_string().into_bytes());
+    }
+    let asset = |name: &str| json!({ "name": name, "browser_download_url": format!("http://{gh}/dl/{name}") });
+    *release.lock().unwrap() = json!({ "tag_name": "v9.0.0", "assets": [asset("release.json"), asset("catbot-android.apk"), asset("catbot-android-rollback.apk")] });
+    s.call("PUT", "/api/version", Some(json!({ "repo": "moo/catbot" }))).await;
+    let (_, checked) = s.call("POST", "/api/version/check", None).await;
+    assert_eq!(checked["offer"]["canInstall"], true, "{checked}");
+
+    // One click: downloaded, checked, and handed to Android's installer.
+    let mut events = s.events().await;
+    assert_eq!(s.call("POST", "/api/version/download", Some(json!({ "install": true }))).await.0, 202);
+    let opened = until(&mut events, "the installer", |f| f["kind"] == "update" && f["openInstaller"].is_string()).await;
+    let apk = opened["openInstaller"].as_str().unwrap().to_string();
+    assert_eq!(std::fs::read(&apk).unwrap(), b"new app");
+    assert_eq!(opened["update"]["installing"]["to"], "9.0.0");
+
+    // Going back: the rebuilt older app, through the installer the same way. It reads today's
+    // chats, so nothing is asked.
+    let (_, version) = s.call("GET", "/api/version", None).await;
+    assert_eq!(version["update"]["phoneBack"]["version"], "0.1.0", "{version}");
+    assert_eq!(s.call("POST", "/api/version/back", Some(json!({ "to": "0.2.5" }))).await.0, 400, "only the rebuilt one");
+    let (status, _) = s.call("POST", "/api/version/back", Some(json!({ "to": "0.1.0" }))).await;
+    assert_eq!(status, 202);
+    let opened = until(&mut events, "the installer, going back", |f| f["kind"] == "update" && f["openInstaller"].as_str().is_some_and(|a| a.ends_with("rollback.apk"))).await;
+    assert_eq!(std::fs::read(opened["openInstaller"].as_str().unwrap()).unwrap(), b"old app, rebuilt");
+    assert_eq!(opened["update"]["installing"]["to"], "0.1.0");
+}

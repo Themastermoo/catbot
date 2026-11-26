@@ -16,7 +16,7 @@ use std::{
 };
 
 /// Where this app's own Catbot listens.
-const ADDRESS: &str = "127.0.0.1:8788";
+pub const ADDRESS: &str = "127.0.0.1:8788";
 
 /// The phone app's own Catbot (stage 26): the same server, run inside the app on its own thread,
 /// keeping its data in the app's private storage. Only the chat APIs work there

@@ -90,9 +90,14 @@ pub async fn check(app: &App) -> Answer {
             let is_newer = newer(&tag, VERSION);
             // What this device could install (stage 28.2); a release without release.json is
             // still worth telling about.
-            if is_newer {
+            let phone = app.updates.place().platform == super::updates::Platform::Android;
+            if is_newer || phone {
                 let found = super::updates::release_json(&release).await.ok().flatten();
-                offer = super::updates::offer(app, &release, found.as_ref());
+                if is_newer {
+                    offer = super::updates::offer(app, &release, found.as_ref());
+                }
+                // The phone goes back with the release's rebuilt older app (stage 28.5).
+                super::updates::note_phone_back(app, found.as_ref());
             }
             (json!({ "kind": "release", "name": tag, "url": release["html_url"], "at": release["published_at"] }), is_newer)
         }

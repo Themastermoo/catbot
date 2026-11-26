@@ -10,6 +10,14 @@ use serde_json::{Value, json};
 
 use crate::api;
 
+/// `GET /api/version` from this device's own Catbot.
+async fn read() -> Option<Value> {
+    match api::own("GET", "/api/version", None).await {
+        Ok((200, answer)) => Some(answer),
+        _ => None,
+    }
+}
+
 /// What the banner shows, worked out from `GET /api/version` (or an `update` frame's state).
 #[derive(Clone, Debug, PartialEq)]
 pub enum Show {
@@ -74,17 +82,63 @@ pub fn show(info: &Value) -> Show {
 /// An `update` frame. On the Windows app's own Catbot, `restart` closes the app with code 75 so
 /// the launcher starts the version now current.
 pub fn on_frame(frame: &Value, own: bool) {
-    let restart = frame["kind"] == "update" && frame["restart"] == true && own;
+    if frame["kind"] != "update" || !own {
+        return;
+    }
+    if frame["restart"] == true {
+        restart();
+    }
+    if let Some(apk) = frame["openInstaller"].as_str() {
+        open_installer(apk);
+    }
+}
+
+/// The banner saw an install finish on this device's own Catbot (its frames may not reach this
+/// window when it's showing home's).
+fn act_on_installed(info: &Value) {
+    match info["update"]["platform"].as_str() {
+        Some("windows") => restart(),
+        Some("android") => {
+            if let Some(apk) = info["update"]["ready"]["apk"].as_str() {
+                open_installer(apk);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The Windows app closes with code 75; the launcher starts the version now current.
+fn restart() {
     #[cfg(all(feature = "desktop", windows))]
-    if restart {
-        spawn(async {
-            // A moment for the banner to say so.
-            crate::events::pause(800).await;
-            std::process::exit(75);
+    {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            spawn(async {
+                // A moment for the banner to say so.
+                crate::events::pause(800).await;
+                std::process::exit(75);
+            });
         });
     }
-    #[cfg(not(all(feature = "desktop", windows)))]
-    let _ = restart;
+}
+
+/// Hands the downloaded APK to Android's installer, once per file.
+fn open_installer(apk: &str) {
+    #[cfg(target_os = "android")]
+    {
+        static OPENED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+        let mut opened = OPENED.lock().unwrap_or_else(|e| e.into_inner());
+        if opened.as_deref() == Some(apk) {
+            return;
+        }
+        *opened = Some(apk.to_string());
+        if let Err(err) = crate::android::install_apk(apk) {
+            eprintln!("catbot: couldn't open Android's installer: {err}");
+            *opened = None;
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    let _ = apk;
 }
 
 /// The banner across the top of the window. It reads `GET /api/version` at start, and again on
@@ -97,12 +151,29 @@ pub fn UpdateBanner(changed: ReadSignal<u64>) -> Element {
     use_effect(move || {
         let _ = changed();
         spawn(async move {
-            if let Ok(answer) = api::get("/api/version").await {
+            if let Some(answer) = read().await {
                 info.set(answer);
             }
         });
     });
+    // This device's own Catbot may not be the one whose frames arrive (the phone or the Windows
+    // app showing home's), so it's also asked now and then: often while something's under way.
+    use_future(move || async move {
+        loop {
+            let active = matches!(show(&info.peek()), Show::Downloading(..) | Show::Waiting(_) | Show::Installed(_));
+            crate::events::pause(if active { 3_000 } else { 120_000 }).await;
+            if let Some(answer) = read().await {
+                info.set(answer);
+            }
+        }
+    });
     let shown = show(&info());
+    // Installed: the app restarts into it (Windows), or Android's installer opens (the phone).
+    use_effect(move || {
+        if let Show::Installed(_) = show(&info()) {
+            act_on_installed(&info.peek());
+        }
+    });
     if shown == Show::Nothing {
         return rsx! {};
     }
@@ -112,7 +183,7 @@ pub fn UpdateBanner(changed: ReadSignal<u64>) -> Element {
             let key = key.clone();
             spawn(async move {
                 if let Some(key) = key
-                    && let Ok(answer) = api::post("/api/version/dismiss", &json!({ "what": key })).await
+                    && let Ok((200, answer)) = api::own("POST", "/api/version/dismiss", Some(&json!({ "what": key }))).await
                 {
                     info.write()["update"] = answer;
                 }
@@ -122,8 +193,8 @@ pub fn UpdateBanner(changed: ReadSignal<u64>) -> Element {
     let mut post = move |path: &'static str, body: Value| {
         busy.set(true);
         spawn(async move {
-            let _ = api::post(path, &body).await;
-            if let Ok(answer) = api::get("/api/version").await {
+            let _ = api::own("POST", path, Some(&body)).await;
+            if let Some(answer) = read().await {
                 info.set(answer);
             }
             busy.set(false);
@@ -184,15 +255,16 @@ pub fn Versions() -> Element {
     let mut said = use_signal(|| None::<String>);
     use_effect(move || {
         spawn(async move {
-            if let Ok(answer) = api::get("/api/version").await {
+            if let Some(answer) = read().await {
                 info.set(answer);
             }
         });
     });
     let back = move |to: String, use_snapshot: bool| {
         spawn(async move {
-            match api::post_raw("/api/version/back", &json!({ "to": to, "useSnapshot": use_snapshot })).await {
+            match api::own("POST", "/api/version/back", Some(&json!({ "to": to, "useSnapshot": use_snapshot }))).await {
                 Ok((200, _)) => said.set(Some(format!("Going back to Catbot {to}: it restarts now."))),
+                Ok((202, _)) => said.set(Some(format!("Getting Catbot {to}; Android asks you to install it next."))),
                 Ok((409, answer)) if answer["needsSnapshot"] == true => asking.set(Some(answer)),
                 Ok((_, answer)) => said.set(Some(answer["error"].as_str().or(answer.as_str()).unwrap_or("Going back didn't work.").to_string())),
                 Err(err) => said.set(Some(err)),
@@ -200,13 +272,18 @@ pub fn Versions() -> Element {
         });
     };
     let update = info()["update"].clone();
-    let kept: Vec<Value> = update["kept"].as_array().cloned().unwrap_or_default();
-    if update["platform"] != "windows" || kept.len() < 2 {
+    let mut kept: Vec<Value> = update["kept"].as_array().cloned().unwrap_or_default();
+    // The phone keeps one app: it can go back to the rebuilt one the latest release carries.
+    if update["platform"] == "android" && update["phoneBack"]["version"].is_string() {
+        kept = vec![json!({ "version": info()["version"], "current": true }), json!({ "version": update["phoneBack"]["version"] })];
+    }
+    if !matches!(update["platform"].as_str(), Some("windows" | "android")) || kept.len() < 2 {
         return rsx! {};
     }
+    let title = if update["platform"] == "android" { "Versions for this phone" } else { "Versions on this PC" };
     rsx! {
         div { "data-versions": true, class: "border-t border-hairline/50 px-4 py-3",
-            div { class: "text-[13px] font-medium text-ink", "Versions on this PC" }
+            div { class: "text-[13px] font-medium text-ink", "{title}" }
             p { class: "mt-0.5 text-[12px] text-ink-secondary", "Going back keeps your chats. If an older version can't read them, Catbot asks first." }
             for v in kept {
                 {

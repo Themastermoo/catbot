@@ -3,6 +3,8 @@
 //! Layout and class names follow OpenMausBot's `src/App.tsx` and `src/components/Sidebar.tsx`
 //! (Apache-2.0, see NOTICE), so the stylesheet's tokens and skins apply unchanged.
 
+#[cfg(target_os = "android")]
+mod android;
 mod api;
 mod scheduled;
 mod voice;

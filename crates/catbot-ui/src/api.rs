@@ -18,10 +18,25 @@ pub async fn post(path: &str, body: &Value) -> Result<Value, String> {
     call("POST", path, Some(body)).await
 }
 
-/// POST JSON, and read the status beside the answer: for routes whose refusals carry a question
-/// back (going back to an older version answers 409 with what it needs).
-pub async fn post_raw(path: &str, body: &Value) -> Result<(u16, Value), String> {
-    let (status, text) = send("POST", path, Some(body)).await?;
+/// To this device's own Catbot, whichever place is open (stage 28.5): updates are about the app
+/// on this device, so on the phone and the Windows app they go to the Catbot inside it even
+/// while it's showing home's. The status comes beside the answer, for routes whose refusals
+/// carry a question back (going back to an older version answers 409 with what it needs).
+pub async fn own(method: &str, path: &str, body: Option<&Value>) -> Result<(u16, Value), String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    let (status, text) = if crate::link::has_own() {
+        let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
+        let mut request = client().request(method, format!("http://{}{path}", crate::local::ADDRESS));
+        if let Some(body) = body {
+            request = request.json(body);
+        }
+        let response = request.send().await.map_err(|e| format!("this device's Catbot didn't answer ({e})"))?;
+        (response.status().as_u16(), response.text().await.unwrap_or_default())
+    } else {
+        send(method, path, body).await?
+    };
+    #[cfg(target_arch = "wasm32")]
+    let (status, text) = send(method, path, body).await?;
     let answer = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "error": text }));
     Ok((status, answer))
 }

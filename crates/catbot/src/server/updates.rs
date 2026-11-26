@@ -231,6 +231,19 @@ pub fn offer(app: &App, release: &Value, found: Option<&Value>) -> Value {
     offer
 }
 
+/// What the phone can go back to: the latest release's `android_rollback`, the release before
+/// it rebuilt with a newer code (scripts/release/), when it's older than this Catbot and the
+/// phone would accept it.
+pub fn note_phone_back(app: &App, found: Option<&Value>) {
+    let code = app.updates.place().code;
+    let back = found
+        .map(|f| &f["android_rollback"])
+        .filter(|b| b["version"].as_str().is_some_and(|v| newer(VERSION, v)))
+        .filter(|b| b["code"].as_u64().zip(code).is_none_or(|(theirs, ours)| theirs > ours))
+        .map(|b| json!({ "version": b["version"], "store": b["store"], "bytes": b["bytes"] }));
+    let _ = save(app, |kept| kept["phoneBack"] = back.unwrap_or(Value::Null));
+}
+
 /// A release's asset by name: its download address.
 fn asset<'a>(release: &'a Value, name: &str) -> Option<&'a str> {
     release["assets"].as_array()?.iter().find(|a| a["name"] == name)?["browser_download_url"].as_str()
@@ -485,13 +498,13 @@ fn snapshots(app: &App) -> Vec<Value> {
 
 // ---- Going back ----
 
-async fn back(app: &App, body: &Value) -> Answer {
+async fn back(app: &std::sync::Arc<App>, body: &Value) -> Answer {
     let place = app.updates.place().clone();
     let to = body["to"].as_str().unwrap_or_default().trim().to_string();
     let use_snapshot = body["useSnapshot"] == true;
     match place.platform {
         Platform::Home => return Err(bad("this computer builds Catbot from its repo; go back with git and the Claude helper")),
-        Platform::Android => return Err(bad("going back on the phone comes in a later stage")),
+        Platform::Android => return phone_back(app, &to, use_snapshot).await,
         Platform::Windows => {}
     }
     let dir = place.dir.clone().ok_or_else(|| bad("this Catbot wasn't installed by the launcher"))?;
@@ -502,29 +515,80 @@ async fn back(app: &App, body: &Value) -> Answer {
     if kept["kept"][&to].is_null() || !dir.join("versions").join(&to).join("Catbot.exe").is_file() {
         return Err(bad(format!("Catbot {to} isn't kept on this PC")));
     }
+    // The older Catbot may not read today's chats: then the copy from before the update.
     let theirs = kept["kept"][&to]["store"].as_i64().unwrap_or(0);
-    let ours = app.try_store(|store| store.format()).map_err(fail)?;
-    let mut restore = Value::Null;
-    if theirs < ours {
-        // The older Catbot can't read today's chats: offer the copy from before the update.
-        let snapshot = snapshots(app).into_iter().rev().find(|s| s["store"].as_i64().is_some_and(|f| f <= theirs));
-        let Some(snapshot) = snapshot else {
-            return Err((StatusCode::CONFLICT, format!("Catbot {to} can't read how chats are stored now, and there's no copy from before the update")));
-        };
-        if !use_snapshot {
-            return Ok((StatusCode::CONFLICT, json!({ "needsSnapshot": true, "snapshot": snapshot, "to": to })));
-        }
-        restore = json!({ "file": snapshot["file"], "at": snapshot["at"], "asked": chrono::Utc::now().to_rfc3339(), "from": VERSION });
-        write_json(&folder(app).join("restore.json"), &restore).map_err(fail)?;
+    if let Some(ask) = chats_for(app, &to, theirs, use_snapshot)? {
+        return Ok(ask);
     }
+    let restored = folder(app).join("restore.json").is_file();
     kept["previous"] = json!(VERSION);
     kept["current"] = json!(to);
     kept["trying"] = Value::Null;
     kept["failed"] = Value::Null;
     save_versions(&dir, &kept).map_err(fail)?;
-    save(app, |kept| kept["back"] = json!({ "from": VERSION, "to": to, "at": chrono::Utc::now().to_rfc3339(), "restored": !restore.is_null() })).map_err(fail)?;
+    save(app, |kept| kept["back"] = json!({ "from": VERSION, "to": to, "at": chrono::Utc::now().to_rfc3339(), "restored": restored })).map_err(fail)?;
     tell(app, json!({ "restart": true }));
-    Ok((StatusCode::OK, json!({ "restart": true, "to": to, "restored": !restore.is_null() })))
+    Ok((StatusCode::OK, json!({ "restart": true, "to": to, "restored": restored })))
+}
+
+/// Whether going back to a version that reads storage format `theirs` needs the copy from
+/// before the update: `Ok(None)` when today's chats do, `Ok(Some(answer))` to ask first, and
+/// with `use_snapshot` the copy is asked for (`updates/restore.json`).
+fn chats_for(app: &App, to: &str, theirs: i64, use_snapshot: bool) -> Result<Option<(StatusCode, Value)>, (StatusCode, String)> {
+    let ours = app.try_store(|store| store.format()).map_err(fail)?;
+    if theirs >= ours {
+        return Ok(None);
+    }
+    let snapshot = snapshots(app).into_iter().rev().find(|s| s["store"].as_i64().is_some_and(|f| f <= theirs));
+    let Some(snapshot) = snapshot else {
+        return Err((StatusCode::CONFLICT, format!("Catbot {to} can't read how chats are stored now, and there's no copy from before the update")));
+    };
+    if !use_snapshot {
+        return Ok(Some((StatusCode::CONFLICT, json!({ "needsSnapshot": true, "snapshot": snapshot, "to": to }))));
+    }
+    let restore = json!({ "file": snapshot["file"], "at": snapshot["at"], "asked": chrono::Utc::now().to_rfc3339(), "from": VERSION });
+    write_json(&folder(app).join("restore.json"), &restore).map_err(fail)?;
+    Ok(None)
+}
+
+/// The phone goes back by installing the latest release's rebuilt older app: downloaded,
+/// checked, then handed to Android's installer like an update.
+async fn phone_back(app: &std::sync::Arc<App>, to: &str, use_snapshot: bool) -> Answer {
+    let repo = super::version::repo(app).ok_or_else(|| bad("name Catbot's GitHub repository first"))?;
+    let release = super::version::latest_release(app, &repo).await.map_err(|e| (StatusCode::BAD_GATEWAY, e))?;
+    let found = release_json(&release).await.map_err(|e| (StatusCode::BAD_GATEWAY, e))?.unwrap_or_default();
+    note_phone_back(app, Some(&found));
+    let back = saved(app)["phoneBack"].clone();
+    if back["version"] != json!(to) {
+        return Err(bad(format!("Catbot {to} isn't one this phone can go back to now")));
+    }
+    let entry = found["android_rollback"].clone();
+    if let Some(ask) = chats_for(app, to, entry["store"].as_i64().unwrap_or(0), use_snapshot)? {
+        return Ok(ask);
+    }
+    let name = entry["file"].as_str().unwrap_or_default().to_string();
+    let url = asset(&release, &name).ok_or_else(|| (StatusCode::BAD_GATEWAY, format!("the release names {name} but doesn't have it")))?.to_string();
+    let (bytes, sha) = (entry["bytes"].as_u64().unwrap_or(0), entry["sha256"].as_str().unwrap_or_default().to_string());
+    let store = entry["store"].as_i64().unwrap_or(STORE_VERSION);
+    let place = app.updates.place().clone();
+    let version = to.to_string();
+    app.updates.now().downloading = Some((version.clone(), 0, bytes));
+    tell(app, json!({}));
+    let answer = wire(app);
+    let app = app.clone();
+    tokio::spawn(async move {
+        let done = fetch_and_keep(&app, &place, &version, store, &url, &name, bytes, &sha).await;
+        {
+            let mut now = app.updates.now();
+            now.downloading = None;
+            now.error = done.as_ref().err().cloned();
+        }
+        match done {
+            Ok(()) => finish_install(&app),
+            Err(_) => tell(&app, json!({})),
+        }
+    });
+    Ok((StatusCode::ACCEPTED, answer))
 }
 
 /// Before the chats are opened: if going back asked for the copy from before an update, today's
@@ -656,6 +720,7 @@ pub fn wire(app: &App) -> Value {
         "updated": settings["updated"],
         "back": settings["back"],
         "dismissed": settings["dismissed"].as_array().cloned().unwrap_or_default(),
+        "phoneBack": settings["phoneBack"],
     })
 }
 

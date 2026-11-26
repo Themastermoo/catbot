@@ -42,6 +42,9 @@ webkit2gtk = { version = "=2.0.1", optional = true, features = ["v2_38"] }
 [target.'cfg(target_os = "android")'.dependencies]
 catbot = { path = "../catbot" }
 tokio = { version = "1", features = ["time", "rt-multi-thread"] }
+# Handing an update to Android's installer (stage 28.5).
+jni = "0.21"
+ndk-context = "0.1"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_UI_WindowsAndMessaging"] }
