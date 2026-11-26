@@ -37,10 +37,12 @@ use crate::record::{self, Record, Recorder};
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 type HttpClient = Client<HttpConnector, Full<Bytes>>;
 
-/// Passes requests to the reference server unchanged, recording them when asked to.
+/// Passes requests to the reference server unchanged, recording them when asked to. With no
+/// reference server ("off", the default since stage 29.1) it answers that Catbot has no such
+/// route instead.
 pub struct Proxy {
     client: HttpClient,
-    upstream: Uri,
+    upstream: Option<Uri>,
     recorder: Option<Recorder>,
     cap: usize,
     next_id: AtomicU64,
@@ -50,22 +52,32 @@ type App = Proxy;
 
 impl Proxy {
     pub fn new(upstream: &str, recorder: Option<Recorder>, cap: usize) -> Result<Arc<Self>, BoxError> {
-        let upstream: Uri = upstream.parse()?;
-        if upstream.scheme_str() != Some("http") || upstream.authority().is_none() {
-            return Err(format!("--upstream must look like http://127.0.0.1:8799, not {upstream}").into());
-        }
+        let upstream = match upstream.trim() {
+            "" | "off" => None,
+            upstream => {
+                let upstream: Uri = upstream.parse()?;
+                if upstream.scheme_str() != Some("http") || upstream.authority().is_none() {
+                    return Err(format!("--upstream must look like http://127.0.0.1:8799 (or be off), not {upstream}").into());
+                }
+                Some(upstream)
+            }
+        };
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
         let client = Client::builder(TokioExecutor::new()).build(connector);
         Ok(Arc::new(Self { client, upstream, recorder, cap, next_id: AtomicU64::new(1) }))
     }
 
-    pub fn upstream(&self) -> &Uri {
-        &self.upstream
+    pub fn upstream(&self) -> Option<&Uri> {
+        self.upstream.as_ref()
     }
 
     /// Sends a request on and returns the reference server's answer (a 502 if it has none).
     pub async fn handle(self: &Arc<Self>, req: Request) -> Response {
+        if self.upstream.is_none() {
+            let path = req.uri().path().to_string();
+            return (StatusCode::NOT_FOUND, axum::Json(serde_json::json!({ "error": format!("Catbot has nothing at {path}") }))).into_response();
+        }
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let path = req.uri().path().to_string();
         let result = if req.headers().contains_key(header::UPGRADE) {
@@ -81,12 +93,15 @@ impl Proxy {
 
     /// Sends a request the server builds itself (the bot list it merges, the event stream).
     pub async fn request(&self, req: hyper::Request<Full<Bytes>>) -> Result<hyper::Response<Incoming>, BoxError> {
+        if self.upstream.is_none() {
+            return Err("there's no reference server".into());
+        }
         Ok(self.client.request(req).await?)
     }
 
     /// The reference server's address for a path (and query).
     pub fn uri_for(&self, path_and_query: &str) -> Result<Uri, BoxError> {
-        let mut parts = self.upstream.clone().into_parts();
+        let mut parts = self.upstream.clone().ok_or("there's no reference server")?.into_parts();
         parts.path_and_query = Some(path_and_query.parse()?);
         Ok(Uri::from_parts(parts)?)
     }
@@ -105,7 +120,8 @@ pub async fn run(listen: SocketAddr, upstream: &str, out: &Path, cap: usize) -> 
     let listener = tokio::net::TcpListener::bind(listen)
         .await
         .map_err(|err| format!("could not listen on {listen}: {err} (is something else using that port?)"))?;
-    eprintln!("catbot: recording http://{listen} -> {}", proxy.upstream);
+    let Some(upstream) = proxy.upstream.clone() else { return Err("recording needs a reference server (--upstream)".into()) };
+    eprintln!("catbot: recording http://{listen} -> {upstream}");
     eprintln!("catbot: writing {}", file.display());
     eprintln!("catbot: start the interface with OMB_PORT={} pnpm dev", listen.port());
 
@@ -128,7 +144,7 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
 }
 
 fn upstream_uri(app: &App, uri: &Uri) -> Result<Uri, BoxError> {
-    let mut parts = app.upstream.clone().into_parts();
+    let mut parts = app.upstream.clone().ok_or("there's no reference server")?.into_parts();
     parts.path_and_query = uri.path_and_query().cloned();
     Ok(Uri::from_parts(parts)?)
 }

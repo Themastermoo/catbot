@@ -274,7 +274,7 @@ pub fn BotSettings(bot: Bot) -> Element {
                         div { class: CARD, crate::pets::PetSwitch { bot: bot.clone() } }
                     }
                     // Codex.
-                    div { class: "flex items-center justify-between gap-4 {CARD}", hidden: channel,
+                    div { class: "flex items-center justify-between gap-4 {CARD}", hidden: channel || !bot.codex_here,
                         div { class: "min-w-0",
                             div { class: "text-[15px] font-medium text-ink", "Codex vault" }
                             div { class: "mt-0.5 text-[12px] leading-relaxed text-ink-secondary",

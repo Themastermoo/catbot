@@ -23,13 +23,16 @@ use std::path::{Path, PathBuf};
 
 use crate::store::Bot;
 
-/// Where the vault is: `CATBOT_MEMORY`, else `~/CatbotMemory`. `CATBOT_MEMORY=off` turns it off.
+/// Where the vault is: `CATBOT_MEMORY`; else `~/CatbotMemory` when it's already there (the
+/// first home PC's); else inside Catbot's own data folder, so nothing new appears in a new
+/// user's home folder unasked (stage 29.1). `CATBOT_MEMORY=off` turns it off.
 pub fn default_dir() -> Option<PathBuf> {
     match std::env::var_os("CATBOT_MEMORY") {
         Some(dir) if dir == "off" => None,
         Some(dir) if !dir.is_empty() => Some(PathBuf::from(dir)),
         _ => {
-            Some(crate::store::user_home().join("CatbotMemory"))
+            let old = crate::store::user_home().join("CatbotMemory");
+            Some(if old.is_dir() { old } else { crate::store::default_home().join("memory") })
         }
     }
 }

@@ -8,7 +8,10 @@
 //! * `catbot record` and `catbot routes` record the reference interface's traffic and list
 //!   its routes: the to-do list for the coming Rust server.
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use catbot::{
     approval, ask, bots, chat,
@@ -98,8 +101,9 @@ enum Command {
         /// Address to listen on. Start the interface with OMB_PORT set to this port.
         #[arg(long, default_value = "127.0.0.1:8788")]
         listen: SocketAddr,
-        /// The reference server.
-        #[arg(long, default_value = "http://127.0.0.1:8799")]
+        /// OpenMausBot's reference server, for routes Catbot doesn't answer itself, or "off"
+        /// (the default: Catbot answers everything it has).
+        #[arg(long, default_value = "off")]
         upstream: String,
         /// The Claude Code program to run.
         #[arg(long, default_value = "claude")]
@@ -107,9 +111,11 @@ enum Command {
         /// Also record what goes to the reference server, into ~/Projects/catbot-traffic.
         #[arg(long)]
         record: bool,
-        /// Catbot's interface: the `public` folder of its dx build, served at `/`.
-        #[arg(long, default_value = "target/dx/catbot-ui/release/web/public")]
-        ui: PathBuf,
+        /// Catbot's interface: the `public` folder of its dx build, served at `/`. By default
+        /// the one installed beside Catbot (`ui/`, or `/usr/lib/catbot/ui` for the Linux
+        /// packages), else the repo's build.
+        #[arg(long)]
+        ui: Option<PathBuf>,
         /// The remote door for paired devices away from home (Tailscale Funnel points here),
         /// or "off".
         #[arg(long, default_value = "127.0.0.1:8789")]
@@ -195,6 +201,27 @@ enum BotAction {
 }
 
 /// Recordings live next to the repo, never inside it: ~/Projects/catbot-traffic.
+/// Where the interface is (stage 29.1): `$CATBOT_UI`; `ui/` beside this program (the Windows
+/// app, the AppImage); `../lib/catbot/ui` from it (the .deb, in /usr/bin); else the repo's build,
+/// found from the program in `target/<profile>/` or from the folder Catbot was started in.
+fn default_ui() -> PathBuf {
+    if let Some(ui) = std::env::var_os("CATBOT_UI").filter(|u| !u.is_empty()) {
+        return ui.into();
+    }
+    let built = Path::new("target").join("dx").join("catbot-ui").join("release").join("web").join("public");
+    let mut places = Vec::new();
+    if let Some(dir) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)) {
+        places.push(dir.join("ui"));
+        places.push(dir.join("..").join("lib").join("catbot").join("ui"));
+        // target/debug/catbot → the repo
+        if let Some(repo) = dir.parent().and_then(Path::parent) {
+            places.push(repo.join(&built));
+        }
+    }
+    places.push(built.clone());
+    places.into_iter().find(|p| p.join("index.html").is_file()).unwrap_or(built)
+}
+
 fn default_traffic_dir() -> PathBuf {
     store::user_home().join("Projects").join("catbot-traffic")
 }
@@ -284,7 +311,7 @@ async fn run() -> Result<(), BoxError> {
                 memory: catbot::memory::default_dir(),
                 cli: catbot::claude::locate(&cli),
                 record: record.then(default_traffic_dir),
-                ui: Some(ui),
+                ui: Some(ui.unwrap_or_else(default_ui)),
                 remote,
             })
             .await

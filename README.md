@@ -38,9 +38,11 @@ scripts/build-ui.sh       # builds the interface (run again after changing it)
 cargo run -- serve        # then open http://127.0.0.1:8788
 ```
 
-`catbot serve` serves the interface for every address outside `/api`, from
-`target/dx/catbot-ui/release/web/public` (`--ui` to change). OpenMausBot's interface on port 5199
-keeps working at the same time.
+`catbot serve` serves the interface for every address outside `/api`: the one installed beside
+it (`ui/`, or `/usr/lib/catbot/ui` from the Linux packages), else this repo's
+`target/dx/catbot-ui/release/web/public` (`--ui` or `CATBOT_UI` to change). Routes it doesn't
+answer get a 404; `--upstream http://127.0.0.1:8799` sends them to OpenMausBot's reference
+server instead, as in the early stages.
 
 ## Away from home (paired devices)
 

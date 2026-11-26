@@ -211,7 +211,10 @@ impl App {
 
     /// A bot on the wire, with its chats' activity.
     fn wire_bot(&self, store: &Store, bot: &Bot, messages: Option<usize>) -> Result<Value, BoxError> {
-        wire::bot(store, bot, &self.activity(), messages)
+        let mut wire = wire::bot(store, bot, &self.activity(), messages)?;
+        // Whether this computer has a Codex vault at all: without one, there's no switch for it.
+        wire["codexHere"] = json!(self.codex.is_dir());
+        Ok(wire)
     }
 
     /// Seeds the bot's own note in the memory vault, if the vault is on and the note isn't there.
@@ -302,7 +305,9 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
         .map_err(|err| format!("could not listen on {}: {err} (is something else using that port?)", options.listen))?;
     let _ = app.local.set(listener.local_addr().unwrap_or(options.listen));
     eprintln!("catbot: serving http://{} ({bots} Catbot bot(s) in {})", options.listen, options.home.display());
-    eprintln!("catbot: everything else goes to the reference server at {}", app.proxy.upstream());
+    if let Some(upstream) = app.proxy.upstream() {
+        eprintln!("catbot: everything else goes to the reference server at {upstream}");
+    }
     match &ui {
         Some(dir) => eprintln!("catbot: Catbot's interface: http://{} (from {})", options.listen, dir.display()),
         None => eprintln!("catbot: OpenMausBot's interface: start it with OMB_PORT={} pnpm dev", options.listen.port()),

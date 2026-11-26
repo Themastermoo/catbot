@@ -70,6 +70,8 @@ pub struct Bot {
     pub approval_mode: String,
     /// Whether it may use the Codex vault.
     pub codex: bool,
+    /// Whether its computer has a Codex vault at all (stage 29.1): no switch without one.
+    pub codex_here: bool,
     /// Whether it's the Chief of Staff (starred in the sidebar).
     pub chief: bool,
     /// Its department; empty for General.
@@ -204,6 +206,7 @@ impl Bot {
                 .unwrap_or_default(),
             approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
             codex: wire["codex"].as_bool().unwrap_or(true),
+            codex_here: wire["codexHere"].as_bool().unwrap_or(true),
             effort: wire["effort"].as_str().unwrap_or_default().to_string(),
             folder: wire["folder"].as_str().unwrap_or_default().to_string(),
             pet: wire["pet"].as_bool().unwrap_or(false),

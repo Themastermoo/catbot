@@ -570,7 +570,7 @@ fn Computer(bot: Bot, on_settings: EventHandler<()>) -> Element {
     let at_boat = entry.as_ref().is_some_and(|e| e["kind"] == "boat");
     let running = entry.as_ref().is_some_and(|e| e["state"] == "running");
     let approval = APPROVAL.iter().find(|(id, _)| *id == bot.approval_mode).map(|(_, l)| l.to_string()).unwrap_or_default();
-    let (id, codex) = (bot.id.clone(), bot.codex);
+    let (id, codex, codex_here) = (bot.id.clone(), bot.codex, bot.codex_here);
     rsx! {
         div { "data-panel-tabpanel": "computer", class: "pt-2",
             div { class: "mx-2 flex aspect-video flex-col items-center justify-center gap-2 rounded-xl bg-ink/[0.05] p-4 text-center", "data-panel-screen": true,
@@ -598,7 +598,7 @@ fn Computer(bot: Bot, on_settings: EventHandler<()>) -> Element {
             }
             div { class: LABEL, span { "Where it works" } }
             NavRow { icon: "home", title: "Folder", value: short_path(&bot.folder), data: "where", onclick: move |_| ui.prefs.set(Some("computers".into())) }
-            div { class: "{MENU_ROW} min-h-[42px] hover:bg-transparent", "data-panel-row": "codex",
+            div { class: "{MENU_ROW} min-h-[42px] hover:bg-transparent", "data-panel-row": "codex", hidden: !codex_here,
                 span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "book", size: 15 } }
                 span { class: "min-w-0 flex-1 truncate", "Codex vault" }
                 crate::settings::Switch { checked: codex, disabled: false, label: "Codex vault access".to_string(),
