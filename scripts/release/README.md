@@ -5,7 +5,10 @@ Catbot updates itself from its GitHub repository's releases (stage 28). This was
 
 | File | What it is |
 |---|---|
-| `catbot-windows-x64.zip` | the Windows app |
+| `Catbot-Setup.exe` | the Windows installer people download (stage 29.5) |
+| `catbot-amd64.deb` | Linux: Ubuntu, Kubuntu, Mint, Debian… (stage 29.4) |
+| `Catbot-x86_64.AppImage` | Linux: any other distro (stage 29.4) |
+| `catbot-windows-x64.zip` | the Windows app, as an update unpacks it |
 | `catbot-android.apk` | the phone app, signed with Catbot's key |
 | `catbot-android-rollback.apk` | the release before this one, rebuilt so a phone can go back to it |
 | `release.json` | the version, the storage format (`store`), and each file's SHA-256 |
@@ -67,8 +70,9 @@ The repository doesn't exist yet, so these steps are still to do.
    git tag -a v0.3.0 -m "What's new in 0.3.0"
    git push origin main v0.3.0
    ```
-3. GitHub › Actions › Release shows the build. It takes a while, because it makes two phone
-   builds. If the tag doesn't match `Cargo.toml`, it stops straight away.
+3. GitHub › Actions › Release shows the build. It takes a while: the Linux packages build on
+   their own machine first (Ubuntu 22.04, so they run on as many distros as possible), then the
+   Windows installer and zip and two phone builds. If the tag doesn't match `Cargo.toml`, it stops straight away.
 
 Version numbers:
 - `0.2.0` is the first version that can update itself. Builds from before stage 28 say `0.1.0`

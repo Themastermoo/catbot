@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """Puts a release's files together for GitHub (stage 28.1), in the folder given:
 
-    catbot-windows-x64.zip       the Windows app (scripts/build-windows.sh)
+    Catbot-Setup.exe             the Windows installer people download (stage 29.5)
+    catbot-windows-x64.zip       the Windows app, as an update unpacks it (scripts/build-windows.sh)
+    catbot-amd64.deb             Linux: Ubuntu, Kubuntu, Mint, Debian… (scripts/build-linux.sh)
+    Catbot-x86_64.AppImage       Linux: any other distro
     catbot-android.apk           the phone app (scripts/build-android.sh)
     catbot-android-rollback.apk  the release before this one, rebuilt so a phone can go back to it
     release.json                 what Catbot reads: version, storage format, each file's checksum
     SHA256SUMS                   the same checksums, for `sha256sum -c`
 
     python3 scripts/release/package.py OUT_DIR --android-code N
+        [--setup EXE] [--deb DEB] [--appimage APPIMAGE]
         [--rollback APK --rollback-version V --rollback-code N --rollback-store S]
 
 Catbot downloads a file only by the name and checksum in release.json, and refuses it if the
@@ -42,6 +46,9 @@ def main():
     ap.add_argument("--windows", default=os.path.join(ROOT, "dist/catbot-windows.zip"))
     ap.add_argument("--android", default=os.path.join(ROOT, "dist/catbot.apk"))
     ap.add_argument("--android-code", type=int, required=True)
+    ap.add_argument("--setup")
+    ap.add_argument("--deb")
+    ap.add_argument("--appimage")
     ap.add_argument("--rollback")
     ap.add_argument("--rollback-version")
     ap.add_argument("--rollback-code", type=int)
@@ -64,6 +71,14 @@ def main():
         shutil.copyfile(src, os.path.join(args.out, name))
         release[key] = describe(src, name)
     release["android"]["code"] = args.android_code
+    # The downloads for people installing Catbot for the first time (stage 29.4-29.5), under
+    # names that stay the same from release to release, so a link to the latest always works.
+    for key, src, name in [("windows_setup", args.setup, "Catbot-Setup.exe"), ("linux_deb", args.deb, "catbot-amd64.deb"), ("linux_appimage", args.appimage, "Catbot-x86_64.AppImage")]:
+        if src:
+            if not os.path.isfile(src):
+                sys.exit(f"{src} is missing")
+            shutil.copyfile(src, os.path.join(args.out, name))
+            release[key] = describe(src, name)
     if args.rollback:
         name = "catbot-android-rollback.apk"
         shutil.copyfile(args.rollback, os.path.join(args.out, name))
@@ -74,7 +89,7 @@ def main():
     with open(os.path.join(args.out, "release.json"), "w") as f:
         json.dump(release, f, indent=2)
         f.write("\n")
-    entries = [release[k] for k in ("windows", "android", "android_rollback") if k in release]
+    entries = [release[k] for k in ("windows", "windows_setup", "linux_deb", "linux_appimage", "android", "android_rollback") if k in release]
     with open(os.path.join(args.out, "SHA256SUMS"), "w") as f:
         for entry in entries:
             f.write(f"{entry['sha256']}  {entry['file']}\n")

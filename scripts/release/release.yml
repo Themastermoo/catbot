@@ -1,4 +1,4 @@
-# Catbot's releases (stage 28.1). This file belongs in .github/workflows/release.yml; it's kept
+# Catbot's releases (stage 28.1; Linux packages and the Windows installer since 29.4–29.5). This file belongs in .github/workflows/release.yml; it's kept
 # here until Moo copies it there (Claude's tools can't write into .github), see README.md.
 #
 # Pushing a tag like v0.2.0 builds:
@@ -39,7 +39,38 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # The Linux downloads: the .deb and the AppImage. Built on the oldest Ubuntu still supported,
+  # so they run on as many distros as possible (they need its glibc or newer).
+  linux:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust, dx, the desktop libraries and appimagetool
+        run: |
+          rustup update stable
+          rustup target add wasm32-unknown-unknown
+          sudo apt-get update -q
+          sudo apt-get install -y -q libwebkit2gtk-4.1-dev libxdo-dev libgtk-3-dev libayatana-appindicator3-dev libfuse2 file
+          curl -sSL "https://github.com/DioxusLabs/dioxus/releases/download/v$DX_VERSION/dx-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C "$HOME/.cargo/bin" dx
+          curl -sSL -o /usr/local/bin/appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          sudo chmod +x /usr/local/bin/appimagetool
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the .deb and the AppImage
+        run: bash scripts/build-linux.sh --appimage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            dist/catbot_*.deb
+            dist/Catbot-*.AppImage
+          if-no-files-found: error
+
   release:
+    needs: [linux]
+    # A hand-run phone rebuild doesn't need the Linux job.
+    if: always() && (github.event_name == 'workflow_dispatch' || needs.linux.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:
@@ -64,7 +95,7 @@ jobs:
           rustup update stable
           rustup target add wasm32-unknown-unknown x86_64-pc-windows-gnu aarch64-linux-android
           sudo apt-get update -q
-          sudo apt-get install -y -q gcc-mingw-w64-x86-64 zip
+          sudo apt-get install -y -q gcc-mingw-w64-x86-64 zip nsis
           curl -sSL "https://github.com/DioxusLabs/dioxus/releases/download/v$DX_VERSION/dx-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C "$HOME/.cargo/bin" dx
           dx --version
           yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK_VERSION" "build-tools;34.0.0" "platforms;android-34" > /dev/null
@@ -136,14 +167,24 @@ jobs:
             echo "ROLLBACK_ARGS=--rollback dist/rollback.apk --rollback-version ${prev#v} --rollback-code $((CODE + 1)) --rollback-store $(python3 -c "import sys; sys.path.insert(0, 'scripts/release'); import package; print(package.store_version('$RUNNER_TEMP/prev'))")"
           } >> "$GITHUB_ENV"
 
+      - uses: actions/download-artifact@v4
+        if: github.event_name == 'push'
+        with:
+          name: linux
+          path: dist/linux-built
+
       - name: Publish the release
         if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           notes="$(git tag --list --format='%(contents)' "$GITHUB_REF_NAME")"
+          version="${GITHUB_REF_NAME#v}"
           # shellcheck disable=SC2086
-          python3 scripts/release/package.py dist/release --android-code "$CODE" --notes "$notes" ${ROLLBACK_ARGS:-}
+          python3 scripts/release/package.py dist/release --android-code "$CODE" --notes "$notes" \
+            --setup "dist/Catbot-Setup-$version.exe" \
+            --deb "$(ls dist/linux-built/catbot_*.deb)" --appimage "$(ls dist/linux-built/Catbot-*.AppImage)" \
+            ${ROLLBACK_ARGS:-}
           gh release create "$GITHUB_REF_NAME" dist/release/* --title "Catbot ${GITHUB_REF_NAME#v}" --notes "${notes:-Catbot ${GITHUB_REF_NAME#v}}" --verify-tag
 
       - name: Forget the signing key

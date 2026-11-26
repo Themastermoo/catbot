@@ -12,6 +12,7 @@
 #                                  an update unpacks just this folder
 #   app/version.json               its version and storage format
 #   app/Catbot.exe                 the app (starts this PC's Catbot, switches to home's)
+# and, when NSIS is installed, dist/Catbot-Setup-<version>.exe: the installer (stage 29.5).
 #   app/catbot-server.exe          this PC's Catbot
 #   app/WebView2Loader.dll         Microsoft's loader for the window's web view
 #   app/assets/, app/ui/           the app's files, and the interface the server serves
@@ -63,3 +64,13 @@ sed -i 's/\r*$/\r/' "$OUT/Install.cmd" "$OUT/install.ps1"
 cp NOTICE "$OUT/app/NOTICE.txt"
 (cd dist && rm -f catbot-windows.zip && zip -qr catbot-windows.zip catbot-windows)
 say "Done: dist/catbot-windows.zip ($(du -h dist/catbot-windows.zip | cut -f1)), Catbot $VERSION"
+
+# The installer people download (stage 29.5): Catbot-Setup-<version>.exe, from the same files.
+# The zip stays: it's what an update unpacks, and it can be installed by hand with Install.cmd.
+if command -v makensis >/dev/null 2>&1; then
+  say "Making the installer…"
+  makensis -V2 -DVERSION="$VERSION" -DSRC="$OUT" -DOUT="$PWD/dist/Catbot-Setup-$VERSION.exe" scripts/windows/installer.nsi
+  say "Done: dist/Catbot-Setup-$VERSION.exe ($(du -h "dist/Catbot-Setup-$VERSION.exe" | cut -f1))"
+else
+  say "No makensis (sudo apt install nsis), so no Catbot-Setup.exe this time; the zip is ready."
+fi

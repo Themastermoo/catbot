@@ -260,9 +260,48 @@ mod dialogs {
     }
 }
 
+/// `Catbot.exe --register <version>` (stage 29.5): the installer has put `versions\<version>\` in
+/// place; make it current, the one it replaces the one to go back to, and note its storage
+/// format (from its `version.json`). Versions whose folders are gone are forgotten.
+pub fn register(dir: &Path, version: &str) -> Result<(), String> {
+    let folder = dir.join("versions").join(version);
+    if !folder.join("Catbot.exe").is_file() {
+        return Err(format!("{} has no Catbot.exe", folder.display()));
+    }
+    let about = read_json(&folder.join("version.json")).unwrap_or_else(|| json!({}));
+    let mut kept = read_json(&dir.join("versions.json")).unwrap_or_else(|| json!({}));
+    if !kept["kept"].is_object() {
+        kept["kept"] = json!({});
+    }
+    let old = kept["current"].as_str().map(str::to_string);
+    if let Some(old) = old.filter(|o| o != version && dir.join("versions").join(o).join("Catbot.exe").is_file()) {
+        kept["previous"] = json!(old);
+    }
+    kept["current"] = json!(version);
+    kept["trying"] = Value::Null;
+    kept["failed"] = Value::Null;
+    kept["kept"][version] = json!({ "store": about["store"], "at": chrono::Utc::now().to_rfc3339() });
+    if let Some(map) = kept["kept"].as_object_mut() {
+        map.retain(|v, _| dir.join("versions").join(v).join("Catbot.exe").is_file());
+    }
+    write_json(&dir.join("versions.json"), &kept).map_err(|e| e.to_string())
+}
+
 fn main() {
     let dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if let [flag, version] = args.as_slice()
+        && flag == "--register"
+    {
+        let code = match register(&dir, version) {
+            Ok(()) => 0,
+            Err(err) => {
+                eprintln!("catbot: {err}");
+                1
+            }
+        };
+        std::process::exit(code);
+    }
     let code = run(&dir, &home(), &args, &mut dialogs::Boxes);
     std::process::exit(code);
 }
@@ -325,6 +364,21 @@ mod tests {
         assert_eq!(run(dir.path(), home.path(), &[], &mut ask), 0);
         assert_eq!(ran(dir.path()), ["0.2.0", "0.3.0"]);
         assert!(ask.asked.is_empty());
+    }
+
+    #[test]
+    fn the_installer_registers_its_version() {
+        let dir = tempfile::tempdir().unwrap();
+        version(dir.path(), "0.2.0", &[]);
+        version(dir.path(), "0.3.0", &[]);
+        std::fs::write(dir.path().join("versions/0.3.0/version.json"), r#"{ "version": "0.3.0", "store": 13 }"#).unwrap();
+        write_json(&dir.path().join("versions.json"), &json!({ "current": "0.2.0", "kept": { "0.2.0": { "store": 12 }, "0.1.0": { "store": 11 } } })).unwrap();
+        register(dir.path(), "0.3.0").unwrap();
+        let now = kept(dir.path());
+        assert_eq!((now["current"].as_str(), now["previous"].as_str()), (Some("0.3.0"), Some("0.2.0")), "{now}");
+        assert_eq!(now["kept"]["0.3.0"]["store"], 13);
+        assert!(now["kept"]["0.1.0"].is_null(), "its folder is gone");
+        assert!(register(dir.path(), "9.9.9").is_err());
     }
 
     #[test]

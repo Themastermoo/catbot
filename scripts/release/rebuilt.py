@@ -19,7 +19,7 @@ with open(path, "w") as f:
     json.dump(release, f, indent=2)
     f.write("\n")
 with open(os.path.join(folder, "SHA256SUMS"), "w") as f:
-    for key in ("windows", "android", "android_rollback"):
+    for key in ("windows", "windows_setup", "linux_deb", "linux_appimage", "android", "android_rollback"):
         if key in release:
             f.write(f"{release[key]['sha256']}  {release[key]['file']}\n")
 print(f"{release['version']}: phone app rebuilt with code {code}")
