@@ -306,6 +306,25 @@ pub fn BotSettings(bot: Bot) -> Element {
                         if full {
                             p { class: "mt-2 text-[12px] text-warning", "{bot.name} acts without asking, anywhere it can reach." }
                         }
+                        // What "Always allow" on its approval cards let it do (allowed.rs).
+                        if !bot.allowed.is_empty() {
+                            div { class: "mt-4 {LABEL}", "Always allowed" }
+                            p { class: "mt-0.5 text-[12px] leading-snug text-ink-secondary", "{bot.name} does these without asking, in its own chat, channels and other bots' chats." }
+                            ul { "data-always-allowed": true, class: "mt-1 flex flex-col gap-1",
+                                for (rule, label) in bot.allowed.clone() {
+                                    li { key: "{rule}", class: "flex items-center justify-between gap-2 rounded-lg bg-raised px-3 py-1.5",
+                                        span { class: "min-w-0 truncate text-[13px] text-ink", "{label}" }
+                                        button {
+                                            r#type: "button",
+                                            "aria-label": "Stop always allowing: {label}",
+                                            class: "h-7 shrink-0 rounded-full px-3 text-[12px] font-medium text-ink-secondary hover:bg-ink/[0.07] hover:text-ink",
+                                            onclick: move |_| change(json!({ "forgetAllowed": rule })),
+                                            "Remove"
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                     // Desktop pet.
                     if !channel {

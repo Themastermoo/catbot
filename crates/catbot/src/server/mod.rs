@@ -6,6 +6,7 @@
 //! the live event stream are merged, so the interface sees one team. Over time Catbot answers
 //! more, until the reference server has nothing left to do.
 
+pub mod allowed;
 pub mod apps;
 pub mod attachments;
 pub mod backups;
@@ -217,6 +218,8 @@ impl App {
         let mut wire = wire::bot(store, bot, &self.activity(), messages)?;
         // Whether this computer has a Codex vault at all: without one, there's no switch for it.
         wire["codexHere"] = json!(self.codex.is_dir());
+        // What it may do without asking, besides its approval level (allowed.rs).
+        wire["allowed"] = allowed::wire(&allowed::rules_in(store, &bot.id));
         Ok(wire)
     }
 
@@ -993,6 +996,10 @@ pub(super) fn patch_bot_as(app: &Arc<App>, mut bot: Bot, body: Value, undo: bool
     if let Some(pet) = body["pet"].as_bool() {
         app.try_store(|store| pets::set(store, &bot.id, pet)).map_err(bad)?;
     }
+    // An "Always allow" taken back.
+    if let Some(rule) = body["forgetAllowed"].as_str() {
+        allowed::forget(app, &bot.id, rule);
+    }
     if let Some(memory) = &app.memory
         && let Err(err) = crate::memory::rename_bot(memory, &before, &bot)
     {
@@ -1277,15 +1284,27 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
         (Method::POST, ["respond"]) => {
             let body = json_body(req).await?;
             let request_id = body["requestId"].as_str().ok_or_else(|| bad("which request?"))?;
+            // "Always allow": the bot keeps this kind of action, wherever it works (allowed.rs).
+            let always = body["behavior"] == "always";
+            if always {
+                let asked = app.turns.card_of(thread, request_id);
+                let card = asked.as_ref().and_then(|(_, message)| app.with_store(|store| store.message(*message)).flatten()).and_then(|m| m.detail).map(|d| d["card"].clone()).unwrap_or(Value::Null);
+                let rules: Vec<String> = card["rules"].as_array().map(|r| r.iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
+                let Some((bot_id, _)) = asked.filter(|_| !rules.is_empty()) else {
+                    return Err(bad("this question can't be always allowed"));
+                };
+                allowed::add(app, &bot_id, &rules);
+                app.announce_bot(&bot_id);
+            }
             let decision = match body["behavior"].as_str() {
-                Some("allow") => Decision::Allow,
+                Some("allow" | "always") => Decision::Allow,
                 Some("deny") => Decision::Deny(match body["message"].as_str().filter(|m| !m.trim().is_empty()) {
                     Some(said) => format!("The person refused this step and said: {said}"),
                     None => "The person refused this step.".into(),
                 }),
                 other => return Err(bad(format!("unknown answer {other:?}"))),
             };
-            let behavior = if decision == Decision::Allow { "allow" } else { "deny" };
+            let behavior = if always { "always" } else if decision == Decision::Allow { "allow" } else { "deny" };
             let turn_id = app
                 .turns
                 .answer(thread, request_id, decision)

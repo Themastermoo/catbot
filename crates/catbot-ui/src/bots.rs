@@ -72,6 +72,8 @@ pub struct Bot {
     pub codex: bool,
     /// Whether its computer has a Codex vault at all (stage 29.1): no switch without one.
     pub codex_here: bool,
+    /// What "Always allow" let it do without asking: (rule, how it reads).
+    pub allowed: Vec<(String, String)>,
     /// Whether it's the Chief of Staff (starred in the sidebar).
     pub chief: bool,
     /// Its department; empty for General.
@@ -207,6 +209,10 @@ impl Bot {
             approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
             codex: wire["codex"].as_bool().unwrap_or(true),
             codex_here: wire["codexHere"].as_bool().unwrap_or(true),
+            allowed: wire["allowed"]
+                .as_array()
+                .map(|list| list.iter().filter_map(|a| Some((a["rule"].as_str()?.to_string(), a["label"].as_str().unwrap_or_default().to_string()))).collect())
+                .unwrap_or_default(),
             effort: wire["effort"].as_str().unwrap_or_default().to_string(),
             folder: wire["folder"].as_str().unwrap_or_default().to_string(),
             pet: wire["pet"].as_bool().unwrap_or(false),
@@ -332,7 +338,7 @@ fn line(message: &Value) -> Option<String> {
         "options" => {
             let card = &message["card"];
             Some(match card["answered"].as_str() {
-                Some("allow") => "Allowed".into(),
+                Some("allow" | "always") => "Allowed".into(),
                 Some(_) => "Denied".into(),
                 None if card["dismissed"] == true => "Denied".into(),
                 None => card["title"].as_str().unwrap_or("Approval needed").to_string(),

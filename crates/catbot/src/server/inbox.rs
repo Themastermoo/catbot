@@ -170,7 +170,7 @@ fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
                 "from": from(store, &bot_id, None),
                 "origin": origin(store, &conversation, Some(message_id)),
                 "text": clip(card["subtitle"].as_str().unwrap_or(&message.body)),
-                "card": { "type": "approval", "requestId": request, "tool": card["tool"] },
+                "card": { "type": "approval", "requestId": request, "tool": card["tool"], "always": card["always"] },
             }),
             id,
         });

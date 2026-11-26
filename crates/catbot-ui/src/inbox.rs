@@ -26,7 +26,7 @@ const FINISHED: usize = 10;
 #[derive(Clone, Debug, PartialEq)]
 pub enum Card {
     /// A step a running turn waits on: Allow once or Deny.
-    Approval { request: String, tool: Option<String> },
+    Approval { request: String, tool: Option<String>, always: Option<String> },
     /// A change a bot asks to make: Approve or Decline.
     Change { title: String, lines: Vec<String>, warning: Option<String> },
     /// A picture whose AI is still to be chosen, in its chat.
@@ -63,7 +63,11 @@ impl Row {
     fn from_wire(w: &Value) -> Option<Row> {
         let card = &w["card"];
         let card = match card["type"].as_str() {
-            Some("approval") => Some(Card::Approval { request: card["requestId"].as_str()?.to_string(), tool: card["tool"].as_str().map(str::to_string) }),
+            Some("approval") => Some(Card::Approval {
+                request: card["requestId"].as_str()?.to_string(),
+                tool: card["tool"].as_str().map(str::to_string),
+                always: card["always"].as_str().map(str::to_string),
+            }),
             Some("change") => Some(Card::Change {
                 title: card["title"].as_str().unwrap_or_default().to_string(),
                 lines: card["lines"].as_array().map(|l| l.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
@@ -323,8 +327,18 @@ impl Inbox {
 
     /// Answers an ask where it was asked: Allow (Approve) or Deny (Decline).
     pub fn answer(self, row: &Row, yes: bool, problem: Option<Signal<Option<String>>>) {
+        self.answer_as(row, if yes { "allow" } else { "deny" }, problem)
+    }
+
+    /// Allows it, and lets the bot do this kind of thing from now on without asking.
+    pub fn always(self, row: &Row, problem: Option<Signal<Option<String>>>) {
+        self.answer_as(row, "always", problem)
+    }
+
+    fn answer_as(self, row: &Row, behavior: &str, problem: Option<Signal<Option<String>>>) {
+        let yes = behavior != "deny";
         let (path, body) = match &row.card {
-            Some(Card::Approval { request, .. }) => (format!("/api/threads/{}/respond", row.thread), json!({ "requestId": request, "behavior": if yes { "allow" } else { "deny" } })),
+            Some(Card::Approval { request, .. }) => (format!("/api/threads/{}/respond", row.thread), json!({ "requestId": request, "behavior": behavior })),
             Some(Card::Change { .. }) => (format!("/api/threads/{}/team/{}", row.thread, row.id), json!({ "approve": yes })),
             _ => return,
         };
@@ -860,6 +874,11 @@ fn Reading(row: Row, position: Option<usize>, total: usize, on_step: EventHandle
                         match (&row.card, row.asks()) {
                             (Some(Card::Approval { .. }) | Some(Card::Change { .. }), true) => {
                                 let change = matches!(row.card, Some(Card::Change { .. }));
+                                let always = match &row.card {
+                                    Some(Card::Approval { always, .. }) => always.clone(),
+                                    _ => None,
+                                };
+                                let always_row = yes_row.clone();
                                 rsx! {
                                     div { class: "flex flex-wrap gap-2",
                                         button { r#type: "button", "data-inbox-answer": "deny",
@@ -871,6 +890,14 @@ fn Reading(row: Row, position: Option<usize>, total: usize, on_step: EventHandle
                                             class: "h-8 rounded-full bg-ink px-3.5 text-[13px] font-medium text-app hover:opacity-90",
                                             onclick: move |_| inbox.answer(&yes_row, true, Some(problem)),
                                             if change { "Approve" } else { "Allow once" }
+                                        }
+                                        if let Some(words) = always {
+                                            button { r#type: "button", "data-inbox-answer": "always",
+                                                title: "It won't ask about this again, anywhere it works. Remove it in the bot's settings.",
+                                                class: "h-8 rounded-full bg-composer px-3.5 text-[13px] font-medium text-ink ring-1 ring-inset ring-ink/[0.1] hover:bg-ink/[0.06]",
+                                                onclick: move |_| inbox.always(&always_row, Some(problem)),
+                                                "{words}"
+                                            }
                                         }
                                     }
                                 }

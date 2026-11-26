@@ -62,6 +62,13 @@ impl Turns {
         }
     }
 
+    /// An open card's bot (the one asking) and message.
+    pub fn card_of(&self, thread_id: &str, request_id: &str) -> Option<(String, i64)> {
+        let running = self.running.lock().expect("turns lock");
+        let handle = running.get(thread_id)?;
+        handle.open_cards.get(request_id).map(|m| (handle.bot_id.clone(), *m))
+    }
+
     /// Takes a card off the open list, returning its message id.
     fn close_card(&self, thread_id: &str, request_id: &str) -> Option<i64> {
         self.running.lock().expect("turns lock").get_mut(thread_id)?.open_cards.remove(request_id)
@@ -465,15 +472,28 @@ async fn drive(
             }
             Event::ApprovalRequested { id, tool, input } => {
                 let summary = format!("{tool} {}", summarize(&input)).trim().to_string();
+                // Its approval level as it is now, or an "Always allow" it was given: no card.
+                if super::allowed::covers(app, &bot.id, &tool, &input) && app.turns.answer(thread, &id, Decision::Allow).is_some() {
+                    emit(json!({ "type": "request.resolved", "requestId": id, "behavior": "allow", "source": "rule", "tool": tool, "summary": summary }));
+                    continue;
+                }
                 emit(json!({ "type": "request.opened", "requestId": id, "requestType": "permission", "tool": tool, "summary": summary }));
                 // The card the person answers, as the reference server draws it.
+                let always = super::allowed::offer(&tool, &input);
+                let mut options = vec!["Allow"];
+                if always.is_some() {
+                    options.push("Always allow");
+                }
+                options.push("Deny");
                 let card = json!({
                     "title": "Approval needed",
                     "subtitle": summary,
-                    "options": ["Allow", "Deny"],
+                    "options": options,
                     "requestId": id,
                     "requestType": "permission",
                     "tool": tool,
+                    "always": always,
+                    "rules": super::allowed::rules_for(&tool, &input),
                 });
                 if let Some(message) = save_and_send(app, thread, Role::Card, &summary, Some(&json!({ "card": card })))
                     && let Some(message_id) = message["id"].as_str().and_then(wire::parse_message_id)

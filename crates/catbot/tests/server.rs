@@ -258,7 +258,8 @@ async fn a_turn_streams_asks_and_is_kept() {
     assert_eq!(asked["event"]["tool"], "Bash");
     let card = until(&mut events, "card", |f| f["kind"] == "message" && f["message"]["kind"] == "options").await;
     assert_eq!(card["message"]["card"]["requestId"], request.as_str());
-    assert_eq!(card["message"]["card"]["options"], json!(["Allow", "Deny"]));
+    assert_eq!(card["message"]["card"]["options"], json!(["Allow", "Always allow", "Deny"]));
+    assert_eq!(card["message"]["card"]["always"], "Always allow `echo`");
     until(&mut events, "waiting bot", |f| f["kind"] == "bot" && f["bot"]["activity"] == "waiting-on-you").await;
     assert_eq!(s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "x" }))).await.0, 409);
 
@@ -293,6 +294,61 @@ async fn a_turn_streams_asks_and_is_kept() {
     assert_eq!(log.last(), Some(&"Finished"));
     assert!(one["run"]["events"].as_array().unwrap().iter().any(|e| e["type"] == "request.opened"));
     assert_eq!(s.call("GET", &format!("/api/bots/{bot}/runs/999"), None).await.0, 404);
+}
+
+#[tokio::test]
+async fn always_allow_and_full_access_stop_the_asking_even_mid_chain() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Codemonkey" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    assert_eq!(made["bot"]["allowed"], json!([]));
+    let send = |text: &'static str| {
+        let (s, bot, thread) = (&s, bot.clone(), thread.clone());
+        async move { s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": text, "threadId": thread }))).await.0 }
+    };
+
+    // Asked once, and "Always allow" pressed: the card shows it allowed, and the bot keeps the rule.
+    assert_eq!(send("approve").await, 202);
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    until(&mut events, "card", |f| f["kind"] == "message" && f["message"]["kind"] == "options").await;
+    let (status, _) = s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "always" }))).await;
+    assert_eq!(status, 200);
+    let kept = until(&mut events, "bot with the rule", |f| f["kind"] == "bot" && f["bot"]["id"] == bot.as_str() && f["bot"]["allowed"].as_array().is_some_and(|a| !a.is_empty())).await;
+    assert_eq!(kept["bot"]["allowed"], json!([{ "rule": "command:echo", "label": "Run `echo` commands" }]));
+    let settled = until(&mut events, "card answered", |f| f["kind"] == "message.patch").await;
+    assert_eq!(settled["message"]["card"]["answered"], "always");
+    until(&mut events, "idle bot", |f| f["kind"] == "bot" && f["bot"]["busy"] == false).await;
+
+    // The same kind of command again: allowed without a card.
+    assert_eq!(send("approve").await, 202);
+    let resolved = until(&mut events, "allowed by the rule", |f| runtime(f, "request.resolved") || runtime(f, "request.opened")).await;
+    assert_eq!((resolved["event"]["type"].as_str(), resolved["event"]["source"].as_str()), (Some("request.resolved"), Some("rule")));
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Hello, approve");
+    until(&mut events, "idle bot", |f| f["kind"] == "bot" && f["bot"]["busy"] == false).await;
+
+    // Taken back in its settings: it asks again. Then Full access, given while it waits on that
+    // card, answers the next question at once (as it would for a teammate already in the queue).
+    let (_, patched) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "forgetAllowed": "command:echo" }))).await;
+    assert_eq!(patched["bot"]["allowed"], json!([]));
+    assert_eq!(send("approve").await, 202);
+    let asked = until(&mut events, "asked again", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "approvalMode": "full" }))).await;
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    until(&mut events, "idle bot", |f| f["kind"] == "bot" && f["bot"]["busy"] == false).await;
+    assert_eq!(send("approve").await, 202);
+    let resolved = until(&mut events, "allowed by its level", |f| runtime(f, "request.resolved") || runtime(f, "request.opened")).await;
+    assert_eq!((resolved["event"]["type"].as_str(), resolved["event"]["source"].as_str()), (Some("request.resolved"), Some("rule")));
+    until(&mut events, "idle bot", |f| f["kind"] == "bot" && f["bot"]["busy"] == false).await;
+
+    // A command with another hidden inside can't be always allowed.
+    let (status, _) = s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": "nope", "behavior": "always" }))).await;
+    assert_eq!(status, 400);
 }
 
 #[tokio::test]

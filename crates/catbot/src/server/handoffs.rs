@@ -201,13 +201,16 @@ pub async fn follow(app: &Arc<App>, key: &str, thread: &str, request_id: i64, mu
             break; // Stopped.
         }
         let Some(conversation) = app.with_store(|store| store.conversation(thread)).flatten() else { break };
+        // The bot as it is now, not as it was when it was handed the work: a change made while
+        // it waited (Full access, say) holds for its turn.
+        let now = app.with_store(|store| store.bot_by_id(&turn.bot.id)).flatten().unwrap_or_else(|| turn.bot.clone());
         // A backup takes the turn if the bot's AI is at a limit; a bot that can't go is noted.
-        let bot = match super::backups::choose(app, &turn.bot) {
+        let bot = match super::backups::choose(app, &now) {
             Ok(Some((stand_in, why))) => {
                 turns::save_and_send(app, thread, Role::Note, &format!("{}: {why}", turn.bot.name), None);
                 stand_in
             }
-            Ok(None) => turn.bot.clone(),
+            Ok(None) => now,
             Err(why) => {
                 turns::save_and_send(app, thread, Role::Note, &format!("{} can't answer: {why}", turn.bot.name), None);
                 continue;

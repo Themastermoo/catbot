@@ -77,6 +77,8 @@ pub enum Body {
         request_id: Option<String>,
         /// The tool asked for ("Bash", "Write", ...).
         tool: Option<String>,
+        /// The "Always allow" button's words, when this kind of question can be always allowed.
+        always: Option<String>,
     },
 }
 
@@ -119,7 +121,7 @@ impl Msg {
             ("options", _) => {
                 let card = &wire["card"];
                 let answer = match card["answered"].as_str() {
-                    Some("allow") if card["dismissed"] != true => Answer::Allowed,
+                    Some("allow" | "always") if card["dismissed"] != true => Answer::Allowed,
                     Some(_) if card["dismissed"] == true => Answer::Dismissed,
                     Some(_) => Answer::Denied,
                     None if card["dismissed"] == true => Answer::Dismissed,
@@ -131,6 +133,7 @@ impl Msg {
                     answer,
                     request_id: card["requestId"].as_str().map(str::to_string),
                     tool: card["tool"].as_str().map(str::to_string),
+                    always: card["always"].as_str().filter(|_| card["options"].as_array().is_some_and(|o| o.iter().any(|x| x == "Always allow"))).map(str::to_string),
                 }
             }
             _ => return None,
@@ -1319,6 +1322,8 @@ pub struct Pending {
     pub request_id: String,
     pub tool: Option<String>,
     pub subtitle: String,
+    /// The "Always allow" button's words, if it can be offered.
+    pub always: Option<String>,
 }
 
 /// Unanswered approval cards, oldest first (their `pendingApprovals`).
@@ -1326,8 +1331,8 @@ pub fn pending_approvals(messages: &[Msg]) -> Vec<Pending> {
     messages
         .iter()
         .filter_map(|m| match &m.body {
-            Body::Card { answer: Answer::Waiting, request_id: Some(id), tool, subtitle, .. } => {
-                Some(Pending { request_id: id.clone(), tool: tool.clone(), subtitle: subtitle.clone() })
+            Body::Card { answer: Answer::Waiting, request_id: Some(id), tool, subtitle, always, .. } => {
+                Some(Pending { request_id: id.clone(), tool: tool.clone(), subtitle: subtitle.clone(), always: always.clone() })
             }
             _ => None,
         })
@@ -1464,7 +1469,7 @@ fn ApprovalPanel(bot: Bot, pending: Pending, count: usize, on_cancel_turn: Event
         c = bot.color
     );
     let details_id = format!("approval-details-{}", pending.request_id);
-    let (mut deny, mut allow) = (decide.clone(), decide);
+    let (mut deny, mut allow, mut always) = (decide.clone(), decide.clone(), decide);
     let chevron: &'static str = if open() { "rotate-180 motion-safe:transition-transform" } else { "motion-safe:transition-transform" };
     rsx! {
         div { class: "mb-2 overflow-hidden rounded-[18px] bg-composer ring-[0.5px] ring-ink/10",
@@ -1515,6 +1520,17 @@ fn ApprovalPanel(bot: Bot, pending: Pending, count: usize, on_cancel_turn: Event
                         style: "{allow_style}",
                         onclick: move |_| allow("allow"),
                         "Allow once"
+                    }
+                    if let Some(words) = pending.always.clone() {
+                        button {
+                            r#type: "button",
+                            "data-approval-action": "always",
+                            disabled: answering(),
+                            title: "{bot.name} won't ask about this again, anywhere it works. Remove it in its settings.",
+                            class: "{ASK_BUTTON_SHAPE} {ASK_LOOK} {ASK_SECONDARY}",
+                            onclick: move |_| always("always"),
+                            "{words}"
+                        }
                     }
                 }
                 div { id: "{details_id}", hidden: !open(), class: "mt-3 space-y-2",
