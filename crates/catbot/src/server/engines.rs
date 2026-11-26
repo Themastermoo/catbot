@@ -311,14 +311,20 @@ fn list(app: &App) -> Vec<Value> {
 fn describe(app: &App, engine: &Engine) -> Value {
     let saved = app.with_store(|store| store.engine_key(engine.id)).flatten();
     let access = engines::access(engine, saved.as_ref());
-    let installed = matches!(engine.kind, Kind::Agent | Kind::Codex | Kind::Pi).then(|| engines::agent_program(engine).is_some());
+    let installed = match engine.kind {
+        Kind::Agent | Kind::Codex | Kind::Pi => Some(engines::agent_program(engine).is_some()),
+        // Claude Code (stage 29.3): told apart, so a new computer's first run can say what's missing.
+        Kind::Claude => Some(crate::claude::installed(&app.cli)),
+        Kind::Api => None,
+    };
     let signed_in = match engine.kind {
         Kind::Codex => Some(crate::codex::signed_in()),
         Kind::Pi => crate::pi::signed_in(),
+        Kind::Claude => engines::claude_signed_in(),
         _ => engines::agent_signed_in(engine),
     };
     let ready = match engine.kind {
-        Kind::Claude => true,
+        Kind::Claude => installed == Some(true) && signed_in != Some(false),
         // One on this computer once the person added it (stage 24), or a bot uses it.
         Kind::Api if !engine.needs_key => super::local_ai::is_added(app, engine.id),
         Kind::Api => access.is_some(),

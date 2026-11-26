@@ -381,7 +381,19 @@ pub fn locate(program: &str) -> Vec<String> {
             return vec![node.to_string_lossy().into_owned(), cli.to_string_lossy().into_owned()];
         }
     }
+    // Claude Code's installer puts it in ~/.local/bin, which a desktop menu's PATH may not have
+    // (stage 29.3): found there too.
+    if program == "claude"
+        && let Some(found) = crate::engines::find_program(program)
+    {
+        return vec![found.to_string_lossy().into_owned()];
+    }
     vec![program.to_string()]
+}
+
+/// Whether the Claude Code program Catbot runs is on this computer.
+pub fn installed(cli: &[String]) -> bool {
+    cli.last().is_some_and(|p| crate::engines::find_program(p).is_some())
 }
 
 /// Starts a turn. Events arrive on [`Running::events`]; the last one is always [`Event::Finished`].

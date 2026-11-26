@@ -164,7 +164,12 @@ async fn check(app: &App, engine: &Engine) -> Result<(), String> {
             let access = engines::access(engine, saved.as_ref()).ok_or("there's no key")?;
             crate::api::models(&access).await.map(|_| ())
         }
-        Kind::Claude => Ok(()),
+        Kind::Claude => {
+            if !crate::claude::installed(&app.cli) {
+                return Err("Claude Code isn't installed on this computer".into());
+            }
+            if engines::claude_signed_in() == Some(false) { Err("Claude Code isn't signed in yet".into()) } else { Ok(()) }
+        }
         Kind::Codex => {
             engines::agent_program(engine).ok_or("Codex isn't installed")?;
             if crate::codex::signed_in() { Ok(()) } else { Err("Codex isn't signed in".into()) }

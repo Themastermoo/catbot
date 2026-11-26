@@ -50,6 +50,7 @@ mod looks;
 mod prefs;
 mod departments;
 mod update;
+mod welcome;
 mod inbox;
 mod mapcomposer;
 mod model_menu;
@@ -263,6 +264,8 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     // Talking to home through the link, and home has removed this device.
     let unpaired = move || place == link::Place::Home && link::current().is_none();
     let mut problem = use_signal(|| None::<String>);
+    // Whether the bot list has come at least once (so the welcome doesn't flash up first).
+    let mut listed = use_signal(|| false);
 
     // Fetches the bot list, and has every open conversation fetched again: at start, and after
     // the event stream reconnects (anything could have happened in between).
@@ -282,6 +285,7 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
                         thread.live = None;
                     }
                     problem.set(None);
+                    listed.set(true);
                 }
                 Err(_) if unpaired() => on_unpaired.call(()),
                 Err(err) => problem.set(Some(err)),
@@ -326,6 +330,17 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
             selected.set(bots.first().map(|b| b.id.clone()));
         }
     });
+    // A new Catbot with no bots opens on the welcome (stage 29.3) until it's done or skipped.
+    let mut skipped_welcome = use_context_provider(|| welcome::Skipped(Signal::new(false))).0;
+    let welcome = listed() && bots.read().is_empty() && !skipped_welcome() && !unpaired();
+    if welcome {
+        return rsx! {
+            div { class: "flex h-screen flex-col bg-app text-ink",
+                update::UpdateBanner { changed: update_changed }
+                welcome::Welcome { on_skip: move |_| skipped_welcome.set(true) }
+            }
+        };
+    }
     rsx! {
         div { class: "flex h-screen flex-col bg-app text-ink",
             update::UpdateBanner { changed: update_changed }
@@ -362,6 +377,8 @@ fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, proble
 fn MainView(open: Option<Bot>, problem: Option<String>) -> Element {
     let ui = use_context::<settings::Ui>();
     let inbox = use_context::<inbox::Inbox>();
+    let mut skipped = use_context::<welcome::Skipped>().0;
+    let no_bots = use_context::<Signal<live::State>>().read().bots.is_empty();
     match (problem, open) {
         (Some(err), _) => rsx! {
             main { class: "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center bg-app",
@@ -387,6 +404,9 @@ fn MainView(open: Option<Bot>, problem: Option<String>) -> Element {
             main { class: "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center gap-2 bg-app text-ink-secondary",
                 p { class: "text-[15px] font-semibold text-ink", "No bots yet" }
                 p { class: "text-[13px]", "Make one with the + at the top of the sidebar." }
+                if no_bots {
+                    button { r#type: "button", "data-open-welcome": true, class: "mt-2 rounded-full bg-control px-3 py-1 text-[13px] font-medium text-ink hover:bg-raised", onclick: move |_| skipped.set(false), "Set up Catbot" }
+                }
             }
         },
     }

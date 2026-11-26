@@ -307,6 +307,13 @@ pub const ALL: &[Engine] = &[
         needs_key: false,
         key_page: "https://claude.com/product/claude-code",
         models: &[("", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")],
+        // Claude Code's own installers (stage 29.3, for a new computer's first run).
+        install: if cfg!(windows) {
+            "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""
+        } else {
+            "curl -fsSL https://claude.ai/install.sh | bash"
+        },
+        sign_in: "claude (then sign in, and type /exit)",
         ..BLANK
     },
     Engine {
@@ -594,6 +601,20 @@ pub fn agent_signed_in(engine: &Engine) -> Option<bool> {
         }
         _ => None,
     }
+}
+
+/// Whether Claude Code is signed in on this computer (stage 29.3): its credentials file, or an
+/// Anthropic key in the environment. None when it keeps them where Catbot can't look (a Mac's
+/// keychain).
+pub fn claude_signed_in() -> Option<bool> {
+    if std::env::var_os("ANTHROPIC_API_KEY").is_some_and(|k| !k.is_empty()) {
+        return Some(true);
+    }
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()).map(std::path::PathBuf::from).unwrap_or_else(|| crate::store::user_home().join(".claude"));
+    Some(dir.join(".credentials.json").metadata().is_ok_and(|m| m.len() > 0))
 }
 
 /// Where an agent's program is: on the PATH, or in the folders installers usually use.
