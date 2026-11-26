@@ -322,16 +322,20 @@ async fn bots_become_desktop_pets_when_ticked() {
 
 #[tokio::test]
 async fn the_version_and_where_updates_are_checked() {
+    use server::updates::{Place, Platform};
     let s = setup().await;
+    // Nothing answers here, so the check never reaches the real GitHub.
+    s.app.updates.set_place(Place { platform: Platform::Home, dir: None, api: "http://127.0.0.1:9".into(), code: None, appimage: None, installer: vec![] });
+    let own = server::version::REPO.expect("Catbot's own repository");
     let (_, version) = s.call("GET", "/api/version", None).await;
-    assert_eq!((version["version"].as_str(), version["repo"].clone()), (Some(env!("CARGO_PKG_VERSION")), Value::Null));
+    assert_eq!((version["version"].as_str(), version["repo"].as_str()), (Some(env!("CARGO_PKG_VERSION")), Some(own)), "Catbot's own by default");
     assert!(version["built"].is_string(), "{version}");
-    assert_eq!(s.call("POST", "/api/version/check", None).await.0, 400, "nothing to check yet");
+    assert_eq!(s.call("POST", "/api/version/check", None).await.0, 502, "GitHub (here, nothing) didn't answer");
     assert_eq!(s.call("PUT", "/api/version", Some(json!({ "repo": "just-a-name" }))).await.0, 400);
     let (_, set) = s.call("PUT", "/api/version", Some(json!({ "repo": "https://github.com/moo/catbot" }))).await;
     assert_eq!(set["repo"], "moo/catbot");
     let (_, forgot) = s.call("PUT", "/api/version", Some(json!({ "repo": "" }))).await;
-    assert_eq!(forgot["repo"], Value::Null);
+    assert_eq!(forgot["repo"], own, "back to Catbot's own");
 }
 
 #[tokio::test]

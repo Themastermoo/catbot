@@ -20,11 +20,8 @@ use super::{Answer, App, bad, fail};
 const KEY: &str = "updates";
 
 /// Catbot's GitHub repository, `owner/name`, where every Catbot looks for updates unless
-/// Settings › This app names another.
-///
-/// PLACEHOLDER: Moo makes the repository later (2026-11-25). When he gives its name, put it
-/// here, e.g. `Some("moo/catbot")`, and see scripts/release/README.md for the rest.
-pub const REPO: Option<&str> = None;
+/// Settings › This app names another (Moo made it 2026-11-26).
+pub const REPO: Option<&str> = Some("Themastermoo/catbot");
 
 /// The version this server was built as.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

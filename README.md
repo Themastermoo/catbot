@@ -4,7 +4,7 @@ A team of AI bots you chat with, on your own computer.
 
 ## Get Catbot
 
-Download it from this repository's **Releases** page (the latest release):
+Download it from the [latest release](https://github.com/Themastermoo/catbot/releases/latest):
 
 | Your computer | Download | Then |
 |---|---|---|

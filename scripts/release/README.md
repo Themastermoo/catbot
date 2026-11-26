@@ -18,9 +18,10 @@ Each Catbot checks the latest release. When it finds a newer one, it shows **Upd
 downloads only the files named in `release.json`, and throws away any download whose checksum
 doesn't match.
 
-## Setting it up (once, when the repository exists)
+## Setting it up (once)
 
-The repository doesn't exist yet, so these steps are still to do.
+The repository is `github.com/Themastermoo/catbot` (made 2026-11-26), and `REPO` in
+`crates/catbot/src/server/version.rs` names it. The steps, for the record:
 
 1. **Before anything goes public:**
    - **Your email.** Every commit carries its author's email. To see which addresses are in
