@@ -3,6 +3,8 @@
 # KDE menu (and any other desktop that follows the freedesktop.org standards).
 #
 #   bash scripts/install-app.sh            build the app and add it to the menu
+#   bash scripts/install-app.sh --icons    only put the repo's current icons in place (no build);
+#                                          scripts/build-ui.sh does this on each build
 #   bash scripts/install-app.sh --remove   take it out of the menu again
 #
 # The app is a window onto Catbot, so Catbot itself has to be running: as the background
@@ -32,10 +34,29 @@ say() { printf '\033[1;36m%s\033[0m\n' "$*"; }
 refresh() {
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q "$DATA/applications" 2>/dev/null || true
   command -v gtk-update-icon-cache >/dev/null 2>&1 && [[ -f "$ICONS/index.theme" ]] && gtk-update-icon-cache -q "$ICONS" 2>/dev/null || true
+  # KDE keeps the icons it has drawn in one cache file and keeps showing them after the files
+  # change. It's rebuilt when missing.
+  rm -f "${XDG_CACHE_HOME:-$HOME/.cache}/icon-cache.kcache"
   for tool in kbuildsycoca6 kbuildsycoca5; do
     if command -v "$tool" >/dev/null 2>&1; then "$tool" --noincremental >/dev/null 2>&1 || true; break; fi
   done
 }
+
+# The icons, from the repo into your icon folder.
+put_icons() {
+  for size in "${SIZES[@]}"; do
+    install -D -m 644 "$ICON_SRC/catbot-$size.png" "$ICONS/${size}x${size}/apps/catbot.png"
+  done
+  install -D -m 644 "$ICON_SRC/catbot.svg" "$ICONS/scalable/apps/catbot.svg"
+}
+
+if [[ "${1:-}" == "--icons" ]]; then
+  put_icons
+  refresh
+  say "Catbot's icons are the repo's current ones. The taskbar may keep the old one until Plasma restarts:"
+  echo "    systemctl --user restart plasma-plasmashell     (or log out and back in)"
+  exit 0
+fi
 
 if [[ "${1:-}" == "--remove" ]]; then
   rm -f "$ENTRY"
@@ -65,10 +86,7 @@ say "Building Catbot's desktop app…"
 dx build -p catbot-ui --platform desktop --release
 
 say "Adding it to the menu…"
-for size in "${SIZES[@]}"; do
-  install -D -m 644 "$ICON_SRC/catbot-$size.png" "$ICONS/${size}x${size}/apps/catbot.png"
-done
-install -D -m 644 "$ICON_SRC/catbot.svg" "$ICONS/scalable/apps/catbot.svg"
+put_icons
 
 mkdir -p "$(dirname "$ENTRY")"
 # Spaces in the path are quoted for the Exec line; % is doubled (the entry format's escape).
