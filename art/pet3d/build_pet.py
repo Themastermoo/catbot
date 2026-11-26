@@ -417,6 +417,8 @@ def eye_pixels(shape, lx=0, ly=0, sweep=None):
                 on = abs(x) <= 3.6 and abs(y - (-1.8 + 1.7 * (x / 3.6) ** 2)) <= 0.62
             elif shape == "happy":     # an arch
                 on = abs(x) <= 3.7 and abs(y - (1.6 - 2.6 * (x / 3.7) ** 2)) <= 0.85
+            elif shape == "squeeze":   # shut tight (a yawn): a thin line, its ends pulled down
+                on = abs(x) <= 3.8 and abs(y - (0.4 - 1.5 * (x / 3.8) ** 2)) <= 0.5
             else:
                 raise ValueError("unknown eye shape %r" % shape)
             if on:
@@ -471,6 +473,111 @@ def icon_parts():
         lower, tip, prof, kw = _ear(sgn)
         v, f = tube([lower, tip], prof, n_len=8, t0=0.64, t1=1.0, grow=0.012, **kw)
         parts.append(Part("ear_biglight_%s" % tag, v, f, ["ear_light"], rigid("ear_" + tag, len(v))))
+    return parts
+
+
+# ---- props: the things a cat works at (stage 29.8) ---------------------------------------------
+
+def box(c, size, R=None, pivot=None):
+    """A box: centre `c`, full sizes `size`, turned by `R` about `pivot` (default: its centre).
+    Returns (verts, faces) wound outwards."""
+    c = np.asarray(c, float)
+    hx, hy, hz = (np.asarray(size, float) / 2).tolist()
+    corners = np.array([[sx * hx, sy * hy, sz * hz] for sz in (-1, 1) for sy in (-1, 1) for sx in (-1, 1)]) + c
+    if R is not None:
+        o = c if pivot is None else np.asarray(pivot, float)
+        corners = (corners - o) @ np.asarray(R).T + o
+    faces = [(0, 2, 3, 1), (4, 5, 7, 6), (0, 1, 5, 4), (2, 6, 7, 3), (0, 4, 6, 2), (1, 3, 7, 5)]
+    return corners, _face_out(corners, faces, corners.mean(axis=0))
+
+
+def _local(origin, R):
+    """A function placing points given in a prop's own frame (origin, turn R) in the world."""
+    origin, R = np.asarray(origin, float), np.asarray(R, float)
+    return lambda v: origin + R @ np.asarray(v, float)
+
+
+# The desk the cat codes at: a low table with a laptop turned towards the camera.
+DESK_TOP = 1.50                       # the desk's top surface (world z)
+LAPTOP_YAW = 50.0                     # the screen faces back towards the cat and the camera
+LAPTOP_HINGE = np.array([3.00, 0.30, DESK_TOP])
+LAPTOP_R = RZ(LAPTOP_YAW)
+KEYS_AT = LAPTOP_HINGE + LAPTOP_R @ np.array([-0.62, 0.0, 0.10])   # the middle of the keyboard
+
+# The drafting table the cat designs at: a board sloping up away from it, turned (like the
+# laptop) so its face shows to the camera.
+BOARD_TILT = 38.0
+BOARD_YAW = 34.0
+BOARD_LOW = np.array([1.78, -0.10, 1.40])  # the board's near (low) edge, middle
+BOARD_R = RZ(BOARD_YAW) @ RY(-BOARD_TILT)  # pitched so the far edge rises
+
+# The book the cat reads: open, propped up on a little stand, turned towards it and the camera.
+BOOK_AT = np.array([2.70, -0.05, 0.16])    # the bottom of the spine
+BOOK_R = RZ(48.0) @ RY(-28.0)              # leaning back, away from the cat
+
+
+def build_props():
+    """The props, each named prop_<set>_<piece>: "desk" (coding), "drafting" (designing), "book"
+    (researching). They stand still in the world, except the pencil, held in the near front paw.
+    Hidden unless an animation asks for its set (ANIM_PROPS)."""
+    parts = []
+
+    def add(name, vf, kind, bone="root"):
+        v, f = vf
+        parts.append(Part(name, v, f, [kind], rigid(bone, len(v))))
+
+    # -- desk: top, four legs; the laptop: base, keyboard, lid, screen, a glowing line of code
+    add("prop_desk_top", box((3.20, 0.15, DESK_TOP - 0.07), (2.50, 2.00, 0.14)), "wood")
+    for k, (x, y) in enumerate(((2.08, -0.72), (4.32, -0.72), (2.08, 1.02), (4.32, 1.02))):
+        add("prop_desk_leg%d" % k, box((x, y, (DESK_TOP - 0.14) / 2), (0.15, 0.15, DESK_TOP - 0.14)), "wood")
+    at = _local(LAPTOP_HINGE, LAPTOP_R)
+    add("prop_desk_laptop", box(at((-0.60, 0.0, 0.04)), (1.20, 1.56, 0.08), LAPTOP_R), "graphite")
+    add("prop_desk_keys", box(at((-0.66, 0.0, 0.09)), (0.78, 1.32, 0.02), LAPTOP_R), "metal")
+    lid_R = LAPTOP_R @ RY(-14.0)           # leaning back a little, away from the cat
+    lid = _local(LAPTOP_HINGE + [0, 0, 0.08], lid_R)
+    add("prop_desk_lid", box(lid((0.03, 0.0, 0.60)), (0.06, 1.56, 1.20), lid_R), "graphite")
+    add("prop_desk_screen", box(lid((-0.006, 0.0, 0.62)), (0.012, 1.40, 1.04), lid_R), "screen")
+    for k, (y, z, w) in enumerate(((-0.30, 0.95, 0.56), (-0.18, 0.80, 0.80), (-0.24, 0.65, 0.40), (-0.12, 0.50, 0.70))):
+        add("prop_desk_code%d" % k, box(lid((-0.016, y + w / 2 - 0.3, z)), (0.006, w, 0.05), lid_R), "code")
+
+    # -- drafting table: a sloping board on two legs, a sheet of paper, a drawing of a house
+    brd = _local(BOARD_LOW, BOARD_R)
+    add("prop_drafting_board", box(brd((0.95, 0.0, -0.05)), (1.90, 1.90, 0.10), BOARD_R), "wood")
+    add("prop_drafting_ledge", box(brd((0.02, 0.0, 0.05)), (0.08, 1.90, 0.10), BOARD_R), "wood")
+    for k, (u, v) in enumerate(((0.25, -0.80), (0.25, 0.80), (1.65, -0.80), (1.65, 0.80))):
+        top = brd((u, v, -0.10))
+        add("prop_drafting_leg%d" % k, box((top[0], top[1], top[2] / 2), (0.10, 0.10, top[2])), "wood")
+    add("prop_drafting_paper", box(brd((1.00, 0.0, 0.015)), (1.50, 1.50, 0.02), BOARD_R), "paper")
+    # the drawing, on the paper: walls, a roof, a door, a window, a ground line
+    lines = [((0.55, -0.42), (0.55, 0.42)), ((1.25, -0.42), (1.25, 0.42)), ((0.55, -0.42), (1.25, -0.42)),
+             ((0.55, 0.42), (1.25, 0.42)), ((1.25, -0.50), (1.62, 0.0)), ((1.25, 0.50), (1.62, 0.0)),
+             ((0.55, -0.10), (0.85, -0.10)), ((0.55, 0.10), (0.85, 0.10)), ((0.85, -0.10), (0.85, 0.10)),
+             ((0.95, 0.18), (1.12, 0.18)), ((0.95, 0.34), (1.12, 0.34)), ((0.95, 0.18), (0.95, 0.34)),
+             ((1.12, 0.18), (1.12, 0.34)), ((0.40, -0.62), (0.40, 0.62))]
+    for k, ((x0, y0), (x1, y1)) in enumerate(lines):
+        a, b = np.array([x0, y0]), np.array([x1, y1])
+        mid, d = (a + b) / 2, b - a
+        turn = RZ(math.degrees(math.atan2(d[1], d[0])))
+        R = BOARD_R @ turn
+        add("prop_drafting_line%d" % k, box(brd((mid[0] - 0.05, mid[1], 0.03)), (float(np.linalg.norm(d)) + 0.03, 0.04, 0.012), R), "ink")
+    # the pencil, in the near front paw (rest pose: held under the paw, point forward and down)
+    paw = head_of("paw_fn")
+    v, f = tube([paw + [0.05, -0.20, -0.02], paw + [0.62, -0.20, -0.30]], [(0, 0.055, 0.055), (0.85, 0.055, 0.055), (1, 0.012, 0.012)],
+                n_len=4, n_seg=8, round0=0.1, round1=0.0)
+    add("prop_drafting_pencil", (v, f), "pencil", bone="paw_fn")
+
+    # -- book: open, leaning on a little stand; two pages of text, a red cover, a ribbon
+    bk = _local(BOOK_AT, BOOK_R)
+    for k, sgn in enumerate((-1, 1)):
+        half = BOOK_R @ RZ(-sgn * 12.0)          # the halves open in a shallow V
+        hb = _local(BOOK_AT, half)
+        add("prop_book_cover%d" % k, box(hb((0.05, sgn * 0.56, 0.62)), (0.05, 1.10, 1.30), half), "cover")
+        add("prop_book_pages%d" % k, box(hb((-0.02, sgn * 0.53, 0.62)), (0.08, 1.02, 1.20), half), "paper")
+        for j in range(6):
+            w = 0.78 if j % 3 else 0.56
+            add("prop_book_text%d_%d" % (k, j), box(hb((-0.07, sgn * (0.12 + w / 2), 1.02 - 0.16 * j)), (0.01, w, 0.045), half), "ink")
+    add("prop_book_ribbon", box(bk((-0.06, 0.02, 0.20)), (0.01, 0.06, 0.70), BOOK_R), "cover")
+    add("prop_book_stand", box((BOOK_AT[0] + 0.35, BOOK_AT[1] + 0.30, 0.08), (0.9, 1.6, 0.16), RZ(48.0)), "wood")
     return parts
 
 
@@ -798,6 +905,17 @@ def hang_leg(p, leg, dx, dz, pp=0.0, mp=0.0, dy=0.0):
     p[leg + "_x"], p[leg + "_z"], p[leg + "_pp"] = float(c[0]), float(c[2]), float(pp)
     p[leg + "_y"] = float(c[1] - LEG_Y[leg])
     return p
+
+
+def reach(p, leg, at, pp=0.0, mp=0.0):
+    """Put a paw at a world point `at` (for a paw off the ground: a wave, a lick)."""
+    xf = solve(p)
+    if leg in LEGS_FRONT:
+        j = point_on(xf, "scap_" + leg, head_of("upper_" + leg))
+    else:
+        j = point_on(xf, "hips", head_of("thigh_" + leg))
+    d = np.asarray(at, float) - j
+    return hang_leg(p, leg, d[0], d[2], pp=pp, mp=mp, dy=d[1])
 
 
 def pin(p, bone, v, target):
@@ -1134,6 +1252,146 @@ def anim_stretch(t):
     return p, face(shape), lights()
 
 
+# -- stage 29.8: grooming, yawning, waving, a pounce crouch, and work at a desk -----------------
+
+def anim_groom(t):
+    """Sitting, it licks the near front paw (little head bobs), then wipes the paw over its face
+    and up behind the ear, and puts it down again."""
+    lift = smooth(t / 0.16) * (1 - smooth((t - 0.86) / 0.14))
+    lick = bump(t, 0.36, 0.22)
+    wipe = bump(t, 0.68, 0.18)
+    p = _sit_idle(t)
+    p["kp"] = SIT["kp"] + 14 * lick + 6 * lick * wave(t, 9) - 4 * wipe
+    p["ky"] = SIT["ky"] + 6 * lick - 26 * wipe
+    p["kr"] = -16 * wipe
+    p["np"] = SIT["np"] + 10 * lick - 4 * wipe
+    p["en_p"], p["en_r"] = -18 * wipe, 14 * wipe
+    if lift > 0.01:
+        rest = np.array([p["fn_x"], LEG_Y["fn"] + p["fn_y"], p["fn_z"]])
+        lick_at = np.array([2.90, -0.55, 3.10])          # in front of the muzzle
+        wipe_at = np.array([2.05, -1.45, 4.20])          # up the near cheek, by the ear
+        up_at = lick_at + (wipe_at - lick_at) * smooth(wipe * 1.4)
+        reach(p, "fn", rest + (up_at - rest) * lift, pp=-90 * lift)
+    shape = "happy" if lick > 0.3 else ("blink" if wipe > 0.4 else ("squint" if wipe > 0.15 else "open"))
+    return p, face(shape), lights(0.3, 0.3)
+
+
+def anim_yawn(t):
+    """A big yawn: the head tips back, ears fold, eyes squeeze shut, the chest lifts; then it
+    shakes its head a little and settles."""
+    y = bump(t, 0.40, 0.32)
+    p = P(hz=0.06 * y, hp=-4 * y, cp=-5 * y, np=-16 * y, kp=-30 * y, ky=-16 - 10 * y,
+          en_p=-22 * y, ef_p=-22 * y, en_r=18 * y, ef_r=18 * y,
+          tail=[38 + 8 * y, 58, 70 + 10 * y, 62, 40 + 20 * y, 14 + 30 * y])
+    shake = bump(t, 0.84, 0.10)
+    p["kr"] = 10 * shake * wave(t, 10)
+    shape = "squeeze" if y > 0.45 else ("squint" if y > 0.15 else "open")
+    return p, face(shape, hi=0.8), lights(0.22 - 0.12 * y, 0.22 - 0.12 * y)
+
+
+def anim_wave(t):
+    """Hello: the near front paw goes up high and waves, head tipped, eyes happy."""
+    up = smooth(t / 0.2) * (1 - smooth((t - 0.82) / 0.18))
+    w = wave(t, 3) * bump(t, 0.5, 0.36)
+    p = P(hz=0.32 * up, hp=-14 * up, cp=-4 * up, np=-8 * up, kr=8 * up, ky=-24 * up - 16,
+          en_p=8 * up, ef_p=8 * up, tail=[48, 70, 84, 80, 60, 30])
+    sway_tail(p, t, 0.6, k=2)
+    if up > 0.01:
+        rest = np.array([p["fn_x"], LEG_Y["fn"] + p["fn_y"], p["fn_z"]])
+        high = np.array([2.30 + 0.16 * w, -1.38 + 0.06 * w, 5.15 + 0.06 * abs(w)])   # up beside the face
+        reach(p, "fn", rest + (high - rest) * up, pp=-70 * up + 35 * w)
+    return p, face("happy" if up > 0.3 else "open"), lights(0.25 + 0.6 * up, 0.25 + 0.6 * up)
+
+
+def anim_crouch(t):
+    """Ready to pounce: low on its front, rump up and wiggling, tail tip twitching, eyes wide
+    and fixed on the target."""
+    wig = wave(t, 2)
+    p = P(CROUCH, hz=-1.05, hp=-9, hy=7 * wig, wp=2, np=4, kp=-4, ky=-6, hr=2 * wig,
+          tail=[2, -2, 2, 10, 26, 40], en_p=14, ef_p=14)
+    p["hn_mp"] = -10 + 6 * wig
+    p["hf_mp"] = -10 - 6 * wig
+    p["te" + TIP] += 30 * wave(t, 4)
+    p["th" + TIP] += 20 * wave(t, 4, 0.25)
+    return p, face("wide", lx=1, ly=-1), lights(0.7, 0.7)
+
+
+AT_DESK = P(SIT, hp=-30, hx=-0.15, hz=-1.80, cp=-4, np=42, kp=16, ky=-6, en_p=10, ef_p=10)
+
+
+def anim_coding(t):
+    """At its desk, paws on the laptop's keys, typing in quick bursts; eyes scanning the
+    screen, ear lights blinking with the keys."""
+    p = P(AT_DESK, ky=AT_DESK["ky"] + 4 * wave(t, 1), np=AT_DESK["np"] + 1.0 * wave(t, 2))
+    for leg, dy, ph in (("fn", -0.30, 0.0), ("ff", 0.30, 0.5)):
+        key = KEYS_AT + LAPTOP_R @ np.array([0.10, dy, 0.0])
+        tap = max(0.0, wave(t, 6, ph)) * (1 - bump(t, 0.80, 0.10))
+        p[leg + "_x"] = float(key[0]) + 0.05 * wave(t, 3, ph)
+        p[leg + "_y"] = float(key[1] - LEG_Y[leg])
+        p[leg + "_z"] = float(key[2]) + 0.16 * tap
+        p[leg + "_pp"] = 18 * tap
+    step = int(t * 12) % 12
+    sweep = [-3, -2, -1, 0, 1, 2, 3, 2, 1, 0, -1, -2][step]
+    blink = int(t * 12) % 2
+    return p, face("half", lx=1, ly=-1, sweep=sweep, lo=0.32), lights(1.0 if blink else 0.15, 0.15 if blink else 1.0)
+
+
+AT_BOARD = P(SIT, hp=-28, hx=0.05, hz=-1.80, cp=-4, np=44, kp=20, ky=-4, en_p=8, ef_p=8)
+
+
+def board_point(u, v, lift=0.0):
+    """A point on the drafting board's paper: u up the slope, v across, `lift` off it."""
+    n = BOARD_R @ np.array([0.0, 0.0, 1.0])
+    return BOARD_LOW + BOARD_R @ np.array([u, v, 0.03]) + n * lift
+
+
+def anim_designing(t):
+    """At the drafting table, a pencil in the near paw: short strokes across the drawing, a
+    pause to look it over with the head tipped, the far paw holding the paper."""
+    p = P(AT_BOARD, kr=-8 * bump(t, 0.75, 0.16), ky=AT_BOARD["ky"] - 10 * bump(t, 0.75, 0.16))
+    stroke = (t * 4) % 1.0
+    drawing = 1 - bump(t, 0.75, 0.16)
+    u = 0.55 + 0.45 * stroke * drawing + 0.20 * (int(t * 4) % 2)
+    v = -0.30 + 0.25 * wave(t, 2)
+    pen = board_point(u, v, 0.16 + 0.30 * (1 - drawing) + 0.06 * bump(stroke, 0.0, 0.15))
+    p["fn_x"], p["fn_y"], p["fn_z"] = float(pen[0]), float(pen[1] - LEG_Y["fn"]), float(pen[2])
+    p["fn_pp"] = 30.0
+    hold = board_point(0.35, 0.45, 0.10)
+    p["ff_x"], p["ff_y"], p["ff_z"] = float(hold[0]), float(hold[1] - LEG_Y["ff"]), float(hold[2])
+    p["ff_pp"] = -BOARD_TILT
+    shape = "open" if drawing > 0.5 else blink_shape(t, 0.75, span=0.05)
+    return p, face(shape, lx=1, ly=-2), lights(0.5, 0.5)
+
+
+AT_BOOK = P(SIT, hp=-34, hx=-0.05, hz=-1.86, np=44, kp=20, ky=-8, en_p=6, ef_p=6)
+
+
+def anim_researching(t):
+    """Reading the open book on the floor: the eyes run along the lines, the head follows a
+    little, now and then a paw pats the page and the ears twitch."""
+    line = (t * 3) % 1.0
+    p = P(AT_BOOK, ky=AT_BOOK["ky"] - 10 + 18 * line, kp=AT_BOOK["kp"] + 3 * (int(t * 3) % 3))
+    pat = bump(t, 0.85, 0.10)
+    page = BOOK_AT + BOOK_R @ RZ(12.0) @ np.array([-0.25, -0.55, 0.55])
+    p["fn_x"] = lerp(AT_BOOK["fn_x"], float(page[0]) - 0.30, pat)
+    p["fn_z"] = lerp(0.0, float(page[2]) - 0.30, pat)
+    p["fn_y"] = lerp(0.0, float(page[1] - LEG_Y["fn"]), pat)
+    p["fn_pp"] = -40 * pat
+    flick = bump(t, 0.45, 0.05)
+    p["en_p"] += -14 * flick
+    look = int(-2 + 4 * line)
+    return p, face(blink_shape(t, 0.62), lx=look, ly=-2), lights(0.3, 0.3)
+
+
+# What each animation shows besides the cat: the prop sets (build_props) it needs.
+ANIM_PROPS = {"coding": ("desk",), "designing": ("drafting",), "researching": ("book",)}
+
+
+def props_for(name):
+    """The prop sets an animation shows."""
+    return ANIM_PROPS.get(name, ())
+
+
 # name: (function, frames, fps, loop, next)
 ANIMATIONS = {
     "idle": (anim_idle, 36, 12, True, None),
@@ -1150,6 +1408,13 @@ ANIMATIONS = {
     "land": (anim_land, 10, 14, False, "idle"),
     "drag": (anim_drag, 24, 12, True, None),
     "stretch": (anim_stretch, 30, 12, False, "idle"),
+    "groom": (anim_groom, 40, 12, False, "sit"),
+    "yawn": (anim_yawn, 22, 12, False, "idle"),
+    "wave": (anim_wave, 18, 12, False, "idle"),
+    "crouch": (anim_crouch, 16, 12, True, None),
+    "coding": (anim_coding, 24, 12, True, None),
+    "designing": (anim_designing, 32, 12, True, None),
+    "researching": (anim_researching, 36, 12, True, None),
 }
 
 # What the app's poses (data-pet) play: an optional one-shot intro, then the animation.
@@ -1157,12 +1422,17 @@ POSES = {
     "idle": (None, "idle"), "walk": (None, "walk"), "sit": ("sit_down", "sit"),
     "sleep": ("lie_down", "sleep"), "working": (None, "working"), "waiting": (None, "waiting"),
     "happy": (None, "happy"), "jump": ("jump", "air"), "land": (None, "land"), "drag": (None, "drag"),
+    # stage 29.8
+    "stretch": ("stretch", "idle"), "groom": ("groom", "sit"), "yawn": ("yawn", "idle"),
+    "wave": ("wave", "idle"), "crouch": (None, "crouch"), "coding": (None, "coding"),
+    "designing": (None, "designing"), "researching": (None, "researching"),
 }
 
 # The frame of each animation shown in the preview (0..1 through it).
 KEY_FRAME = {"idle": 0.0, "walk": 0.19, "sit_down": 0.5, "sit": 0.0, "lie_down": 0.5, "sleep": 0.5,
              "working": 0.25, "waiting": 0.34, "happy": 0.25, "jump": 0.62, "air": 0.0, "land": 0.33,
-             "drag": 0.25, "stretch": 0.5}
+             "drag": 0.25, "stretch": 0.5, "groom": 0.62, "yawn": 0.42, "wave": 0.45, "crouch": 0.0,
+             "coding": 0.08, "designing": 0.30, "researching": 0.85}
 
 
 def frame_time(name, i):
@@ -1314,6 +1584,14 @@ class Materials:
             "graphite": mat_principled("graphite", (0.030, 0.033, 0.040), 0.42),
             "metal": mat_principled("metal", (0.60, 0.62, 0.66), 0.34, metallic=0.85),
             "visor": mat_principled("visor", (0.008, 0.010, 0.016), 0.10, coat=1.0, coat_roughness=0.03),
+            # the props (stage 29.8): never tinted, no gloss
+            "wood": mat_principled("wood", (0.30, 0.17, 0.08), 0.62),
+            "paper": mat_principled("paper", (0.82, 0.82, 0.78), 0.80),
+            "ink": mat_principled("ink", (0.03, 0.07, 0.26), 0.55),
+            "cover": mat_principled("cover", (0.42, 0.06, 0.05), 0.50),
+            "pencil": mat_principled("pencil", (0.85, 0.55, 0.05), 0.45),
+            "screen": mat_emission("screen", (0.10, 0.32, 0.62), 1.0),
+            "code": mat_emission("code", (0.55, 0.95, 1.0), 1.0),
         }
         self.white = mat_emission("mask_white", (1, 1, 1))
         self.black = mat_emission("mask_black", (0, 0, 0), 0.0)
@@ -1561,6 +1839,10 @@ class Pet:
         self.parts = [(make_object(scene, part, self.arm, self.mats), part) for part in build_parts()]
         self.extras = {part.name for part in icon_parts()}
         self.parts += [(make_object(scene, part, self.arm, self.mats), part) for part in icon_parts()]
+        # the props (stage 29.8): shown only for the animations that ask for their set
+        self.props = [(make_object(scene, part, self.arm, self.mats), part) for part in build_props()]
+        for obj, _ in self.props:
+            obj.hide_render = True
         self.faces = {}
         self.show(lambda part: True)
         log("model: %d parts, %d faces, %d bones" % (
@@ -1581,13 +1863,16 @@ class Pet:
             self.faces[key] = (make_object(self.scene, part, self.arm, self.mats), part)
         return key
 
-    def set(self, pose, face_spec, light_spec, pass_name):
+    def set(self, pose, face_spec, light_spec, pass_name, props=()):
         apply_pose(self.arm, self.rest, pose)
         key = self.face_object(face_spec)
         state = {"face": face_spec, "lights": light_spec, "part": ""}
         for k, (obj, part) in self.faces.items():
             obj.hide_render = k != key
-        for obj, part in self.parts + [self.faces[key]]:
+        shown = [(obj, part) for obj, part in self.props if any(part.name.startswith("prop_%s_" % s) for s in props)]
+        for obj, part in self.props:
+            obj.hide_render = (obj, part) not in shown
+        for obj, part in self.parts + shown + [self.faces[key]]:
             state["part"] = part.name
             for i, kind in enumerate(part.slots):
                 mat = self.mats.get(pass_name, kind, state)
@@ -1662,10 +1947,10 @@ def calibrate(pet, rnd, lamps, bg, target):
     return float(q75)
 
 
-def render_passes(pet, rnd, pose, face_spec, light_spec, passes):
+def render_passes(pet, rnd, pose, face_spec, light_spec, passes, props=()):
     out = {}
     for pass_name in passes:
-        pet.set(pose, face_spec, light_spec, pass_name)
+        pet.set(pose, face_spec, light_spec, pass_name, props)
         out[pass_name] = rnd.shot()
     if "mask" in out:
         out["mask"] = mask_alpha(out["mask"])
@@ -1694,7 +1979,7 @@ def render_full(pet, rnd, cfg, out_dir):
         edge = []
         for i in range(n):
             pose, face_spec, light_spec = sample(name, frame_time(name, i))
-            got = render_passes(pet, rnd, pose, face_spec, light_spec, passes)
+            got = render_passes(pet, rnd, pose, face_spec, light_spec, passes, props_for(name))
             x = i * fw
             for p in passes:
                 if p == "mask":   # white, with the shell's coverage as alpha
@@ -1779,10 +2064,12 @@ def render_preview(pet, rnd, cfg, out_dir):
     # 2. one key frame per animation, in the sprite's own framing, five times the CSS size
     big = (FRAME_CSS[0] * 5, FRAME_CSS[1] * 5)
     keys_big = []
-    for name in ANIMATIONS:
+    # "only" (stage 29.8): just these animations' key frames
+    names = cfg.get("only") or list(ANIMATIONS)
+    for name in names:
         aim_camera(scene, big)
         pose, face_spec, light_spec = sample(name, KEY_FRAME[name])
-        got = render_passes(pet, rnd, pose, face_spec, light_spec, ["base"])
+        got = render_passes(pet, rnd, pose, face_spec, light_spec, ["base"], props_for(name))
         if touches_edge(got["base"][..., 3]):
             log("WARNING: the %s key frame touches the edge of its frame" % name)
         keys_big.append(save("preview_%s.png" % name, got["base"]))
@@ -1792,9 +2079,9 @@ def render_preview(pet, rnd, cfg, out_dir):
     small = (FRAME_CSS[0] * 2, FRAME_CSS[1] * 2)
     aim_camera(scene, small)
     strips = {tint: [] for tint in PREVIEW_TINTS}
-    for name in ANIMATIONS:
+    for name in names:
         pose, face_spec, light_spec = sample(name, KEY_FRAME[name])
-        got = render_passes(pet, rnd, pose, face_spec, light_spec, ["base", "mask", "gloss"])
+        got = render_passes(pet, rnd, pose, face_spec, light_spec, ["base", "mask", "gloss"], props_for(name))
         for tint, rgb in PREVIEW_TINTS.items():
             strips[tint].append(tinted(got["base"], got["mask"], got["gloss"], np.array(rgb) / 255.0))
     log("preview: tinted real-size frames")
@@ -1802,7 +2089,7 @@ def render_preview(pet, rnd, cfg, out_dir):
     # 4. the contact sheet
     cols = 4
     rows_big = (len(keys_big) + cols - 1) // cols
-    n = len(ANIMATIONS)
+    n = len(names)
     sheet_w = max(cols * big[0], n * small[0])
     strip_h = small[1] + small[1] // 2
     sheet_h = 512 + rows_big * big[1] + len(PREVIEW_TINTS) * strip_h
@@ -1823,7 +2110,7 @@ def render_preview(pet, rnd, cfg, out_dir):
     write_png(os.path.join(out_dir, "preview.png"), to_bytes(np.dstack([sheet, np.ones(sheet.shape[:2])])))
     made.append("preview.png")
     with open(os.path.join(out_dir, "preview.json"), "w") as fh:
-        json.dump({"files": made, "key_frames": list(ANIMATIONS), "tints": list(PREVIEW_TINTS),
+        json.dump({"files": made, "key_frames": list(names), "tints": list(PREVIEW_TINTS),
                    "layout": "preview.png: row 1 hero/front/side; then key frames, 4 a row, in "
                              "key_frames order; then one strip per tint of the key frames at 2x "
                              "with the 1x size under each (last tint on a light background)",

@@ -31,9 +31,11 @@ struct Page {
     words: &'static str,
 }
 
-const COMPUTER: [Page; 7] = [
+const COMPUTER: [Page; 8] = [
     Page { key: "devices", name: "Phone & devices", glyph: "phone", words: "pair pairing phone android remote away tailscale qr" },
-    Page { key: "ai", name: "AI", glyph: "sparkles", words: "providers models keys claude codex grok gemini openai sign in install engines" },
+    Page { key: "ai", name: "AI", glyph: "sparkles", words: "providers programs claude codex grok cli gemini kimi cursor antigravity sign in install engines ollama lm studio" },
+    // The APIs that take a key, on a page of their own (stage 29.9).
+    Page { key: "apis", name: "APIs", glyph: "key", words: "api apis keys openai anthropic xai grok gemini google openrouter groq mistral deepseek cerebras minimax" },
     Page { key: "voice", name: "Voice", glyph: "mic", words: "voice microphone speak talk listen whisper kokoro piper elevenlabs read aloud mute" },
     Page { key: "apps", name: "Apps", glyph: "puzzle", words: "connect apps mcp servers composio tools gmail slack notion" },
     Page { key: "computers", name: "Computers & secrets", glyph: "monitor", words: "computer boat docker secrets 1password vault" },
@@ -82,11 +84,16 @@ fn matches(page: &Page, query: &str) -> bool {
     q.is_empty() || page.name.to_lowercase().contains(&q) || page.words.split(' ').any(|w| w.starts_with(&q))
 }
 
+/// The page the Settings window shows, for a page that hands over to another.
+#[derive(Clone, Copy)]
+struct ShownPage(Signal<&'static str>);
+
 #[component]
 pub fn SettingsWindow(on_close: EventHandler<()>, start: String) -> Element {
     // On a phone the list and a page take turns: it opens on the list, unless asked for a page.
     let mut showing_page = use_signal(|| !matches!(start.as_str(), "" | "general" | "computer"));
     let mut page = use_signal(move || known(&start));
+    use_context_provider(|| ShownPage(page));
     let mut query = use_signal(String::new);
     let state = use_context::<Signal<State>>();
     let bots = state.read().bots.iter().filter(|b| b.channel.is_none()).count();
@@ -187,7 +194,8 @@ pub fn SettingsWindow(on_close: EventHandler<()>, start: String) -> Element {
                         match current {
                             "computer" => rsx! { ComputerPage { on_go: go } },
                             "devices" => rsx! { crate::devices::DevicesDialog { embedded: true, on_close: move |_| {} } },
-                            "ai" => rsx! { AiPage {} },
+                            "ai" => rsx! { AiPage { apis: false } },
+                            "apis" => rsx! { AiPage { apis: true } },
                             "voice" => rsx! { crate::voice::VoiceSettings {} },
                             "apps" => rsx! { crate::apps::AppsSettings {} },
                             "computers" => rsx! { crate::computers::ComputersSettings {} },
@@ -273,12 +281,14 @@ fn Row(label: String, #[props(default)] line: String, #[props(default)] value: S
 #[component]
 fn ComputerPage(on_go: EventHandler<&'static str>) -> Element {
     let mut glance = use_signal(|| None::<(Option<usize>, usize, usize, usize)>);
+    let mut keyed_count = use_signal(|| 0usize);
     let at_home = !crate::link::pairs() && !crate::link::has_own();
     use_effect(move || {
         spawn(async move {
             let devices = if at_home { api::get("/api/devices").await.ok().map(|d| d["devices"].as_array().map(Vec::len).unwrap_or(0)) } else { None };
             let engines = api::get("/api/engines").await.ok().and_then(|e| e["engines"].as_array().cloned()).unwrap_or_default();
-            let ready = engines.iter().filter(|e| e["ready"] == true && e["id"] != "").count();
+            let ready = engines.iter().filter(|e| e["ready"] == true && e["id"] != "" && !is_api(e)).count();
+            keyed_count.set(engines.iter().filter(|e| e["ready"] == true && is_api(e)).count());
             let apps = api::get("/api/apps").await.ok().and_then(|a| a["servers"].as_array().map(|s| s.iter().filter(|x| x["enabled"] != false).count())).unwrap_or(0);
             glance.set(Some((devices, ready, engines.len(), apps)));
         });
@@ -286,6 +296,7 @@ fn ComputerPage(on_go: EventHandler<&'static str>) -> Element {
     let look = use_context::<Signal<Looks>>();
     let now = look();
     let (devices, ready, _total, apps) = glance().unwrap_or((None, 0, 0, 0));
+    let keyed = keyed_count();
     let loading = glance().is_none();
     rsx! {
         h3 { class: SECTION, "At a glance" }
@@ -294,6 +305,7 @@ fn ComputerPage(on_go: EventHandler<&'static str>) -> Element {
                 Row { label: "Phone & devices".to_string(), value: if loading { String::new() } else { match devices { Some(0) | None => "Not set up".to_string(), Some(n) => format!("{n} paired") } }, on_go: move |_| on_go.call("devices") }
             }
             Row { label: "AI".to_string(), value: if loading { String::new() } else if ready == 0 { "None ready".to_string() } else { format!("{ready} ready") }, warn: !loading && ready == 0, on_go: move |_| on_go.call("ai") }
+            Row { label: "APIs".to_string(), value: if loading { String::new() } else if keyed == 0 { "No keys yet".to_string() } else { format!("{keyed} with a key") }, on_go: move |_| on_go.call("apis") }
             Row { label: "Apps".to_string(), value: if loading { String::new() } else if apps == 0 { "None yet".to_string() } else { format!("{apps} connected") }, on_go: move |_| on_go.call("apps") }
         }
         h3 { class: SECTION, "In the sidebar" }
@@ -324,10 +336,17 @@ fn ComputerPage(on_go: EventHandler<&'static str>) -> Element {
 /// The AI Settings › AI opens on, once (an Inbox fix, stage 27).
 pub static OPEN_PROVIDER: GlobalSignal<Option<String>> = Signal::global(|| None);
 
+/// An API that takes a key (OpenAI, xAI, OpenRouter…): these have their own page, APIs (stage
+/// 29.9). AIs on this computer (Ollama, LM Studio) stay with the programs.
+fn is_api(engine: &Value) -> bool {
+    engine["kind"] == "api" && engine["needsKey"] == true
+}
+
 /// The AIs Catbot can run bots on: the main ones and any that are ready, then the rest. Each
-/// opens how to set it up or manage it.
+/// opens how to set it up or manage it. `apis`: the APIs page; else the AI page, the programs.
 #[component]
-fn AiPage() -> Element {
+fn AiPage(apis: bool) -> Element {
+    let shown = use_context::<ShownPage>();
     let mut engines = use_signal(|| None::<Result<Vec<Value>, String>>);
     let mut checked = use_signal(|| 0u32);
     let mut open = use_signal(|| OPEN_PROVIDER.write().take());
@@ -340,13 +359,25 @@ fn AiPage() -> Element {
             engines.set(Some(api::get("/api/engines").await.map(|e| e["engines"].as_array().cloned().unwrap_or_default())));
         });
     });
-    const LEAD: [&str; 11] = ["claude", "codex", "grok-cli", "xai", "openai", "antigravity", "gemini", "kimi", "cursor", "muse-code", "pi"];
-    let list = match engines() {
+    const LEAD_PROGRAMS: [&str; 9] = ["claude", "codex", "grok-cli", "antigravity", "gemini", "kimi", "cursor", "muse-code", "pi"];
+    const LEAD_APIS: [&str; 5] = ["openai", "anthropic", "google", "xai", "openrouter"];
+    let lead: &[&str] = if apis { &LEAD_APIS } else { &LEAD_PROGRAMS };
+    let all = match engines() {
         None => return rsx! { p { class: "px-4 pt-4 text-[13px] text-ink-tertiary", "Checking…" } },
         Some(Err(err)) => return rsx! { p { role: "alert", class: "px-4 pt-4 text-[13px] text-danger", "{err}" } },
         Some(Ok(list)) => list.into_iter().filter(|e| e["id"] != "").collect::<Vec<_>>(),
     };
-    let lead_rank = |e: &Value| LEAD.iter().position(|id| e["id"] == *id);
+    // An Inbox fix for an AI on the other page: hand it over there.
+    if let Some(id) = open.peek().clone()
+        && let Some(engine) = all.iter().find(|e| e["id"] == id.as_str())
+        && is_api(engine) != apis
+    {
+        *OPEN_PROVIDER.write() = Some(id);
+        let mut page = shown.0;
+        spawn(async move { page.set(if apis { "ai" } else { "apis" }) });
+    }
+    let list: Vec<Value> = all.into_iter().filter(|e| is_api(e) == apis).collect();
+    let lead_rank = |e: &Value| lead.iter().position(|id| e["id"] == *id);
     let wanted = open.peek().clone();
     let shown_first = |e: &Value| e["ready"] == true || lead_rank(e).is_some() || e["trouble"].is_object() || wanted.as_deref() == e["id"].as_str();
     let mut first: Vec<Value> = list.iter().filter(|e| shown_first(e)).cloned().collect();
@@ -354,11 +385,14 @@ fn AiPage() -> Element {
     let rest: Vec<Value> = list.iter().filter(|e| !shown_first(e)).cloned().collect();
     let rest_count = rest.len();
     rsx! {
-        if !crate::link::is_phone() {
+        if !apis && !crate::link::is_phone() {
             crate::local_ai::OnThisComputer {}
         }
+        if apis {
+            p { class: "px-4 pt-4 text-[13px] leading-[19px] text-ink-secondary", "AIs reached over the internet with a key of your own, billed by their maker. Keys stay on this computer." }
+        }
         div { class: "flex items-center px-4 pb-2 pt-6",
-            h3 { class: "flex-1 text-[13px] font-semibold text-ink", "Providers" }
+            h3 { class: "flex-1 text-[13px] font-semibold text-ink", if apis { "APIs" } else { "AI programs" } }
             button { r#type: "button", "data-check-again": true, class: "rounded-md px-2 py-1 text-[13px] text-ink-secondary hover:bg-raised hover:text-ink", onclick: move |_| *checked.write() += 1, "Check again" }
         }
         div { class: CARD, "data-providers": true,
@@ -370,7 +404,7 @@ fn AiPage() -> Element {
                     Provider { key: "{engine[\"id\"]}", open: open().as_deref() == engine["id"].as_str(), engine: engine.clone(), on_toggle: move |id: String| open.set(if open.peek().as_deref() == Some(id.as_str()) { None } else { Some(id) }) }
                 }
             } else if rest_count > 0 {
-                Row { label: "More providers".to_string(), value: "{rest_count}", on_go: move |_| more.set(true) }
+                Row { label: if apis { "More APIs".to_string() } else { "More programs".to_string() }, value: "{rest_count}", on_go: move |_| more.set(true) }
             }
         }
     }

@@ -21,24 +21,24 @@ import build_pet as bp  # noqa: E402
 COLORS = {
     "shell": (0.80, 0.62, 0.93), "graphite": (0.16, 0.17, 0.20), "metal": (0.62, 0.64, 0.68),
     "visor": (0.05, 0.06, 0.09), "ear_light": (0.4, 0.9, 1.0), "led_hi": (0.5, 0.95, 1.0),
-    "led_lo": (0.15, 0.4, 0.5),
+    "led_lo": (0.15, 0.4, 0.5), "wood": (0.45, 0.30, 0.18), "paper": (0.92, 0.92, 0.88),
+    "ink": (0.12, 0.22, 0.55), "screen": (0.25, 0.55, 0.85), "code": (0.7, 0.95, 1.0),
+    "pencil": (0.95, 0.75, 0.15), "cover": (0.55, 0.12, 0.10),
 }
-EMIT = {"ear_light", "led_hi", "led_lo"}
+EMIT = {"ear_light", "led_hi", "led_lo", "screen", "code"}
 PARTS = bp.build_parts()
+PROPS = bp.build_props()
+
+
+def props_of(sets):
+    return [p for p in PROPS if any(p.name.startswith("prop_%s_" % s) for s in sets)]
 FACES = {}
 
 
-def skin(part, xf):
-    out = np.zeros_like(part.verts)
-    total = np.zeros(len(part.verts))
-    for bone, w in part.weights.items():
-        R, pos = xf[bone]
-        out += w[:, None] * ((part.verts - bp.head_of(bone)) @ R.T + pos)
-        total += w
-    return out / total[:, None]
+skin = bp.skinned
 
 
-def render(pose, face, size=(480, 400), view=None, scale_units=bp.FRAME_UNITS_W, bg=(58, 60, 66), target=None):
+def render(pose, face, size=(480, 400), view=None, scale_units=bp.FRAME_UNITS_W, bg=(58, 60, 66), target=None, props=()):
     """Draw a pose. Returns (image, touches_edge)."""
     W, H = size
     yaw, pitch = view if view else (bp.CAM_YAW, bp.CAM_PITCH)
@@ -54,7 +54,7 @@ def render(pose, face, size=(480, 400), view=None, scale_units=bp.FRAME_UNITS_W,
     color[:] = np.array(bg) / 255.0
     depth = np.full((H, W), 1e9)
     cover = np.zeros((H, W), bool)
-    for part in PARTS + [FACES[key]]:
+    for part in PARTS + props_of(props) + [FACES[key]]:
         if not len(part.verts):
             continue
         v = skin(part, xf) - target
@@ -98,14 +98,14 @@ def render(pose, face, size=(480, 400), view=None, scale_units=bp.FRAME_UNITS_W,
     return img, touches
 
 
-def extent(pose):
+def extent(pose, props=()):
     """The pose's bounds in the pet's box, CSS px: (left, top, right, bottom)."""
     right, up, _ = bp.camera_axes()
     target = np.array(bp.CAM_TARGET)
     ppu = bp.FRAME_CSS[0] / bp.FRAME_UNITS_W
     xf = bp.solve(pose)
     lo, hi = np.array([1e9, 1e9]), np.array([-1e9, -1e9])
-    for part in PARTS:
+    for part in PARTS + props_of(props):
         v = skin(part, xf) - target
         xy = np.column_stack([v @ right * ppu + bp.FRAME_CSS[0] / 2, bp.FRAME_CSS[1] / 2 - v @ up * ppu])
         lo, hi = np.minimum(lo, xy.min(axis=0)), np.maximum(hi, xy.max(axis=0))
@@ -115,7 +115,7 @@ def extent(pose):
 def check_framing(names):
     for name in names:
         n = bp.ANIMATIONS[name][1]
-        box = np.array([extent(bp.sample(name, bp.frame_time(name, i))[0]) for i in range(n)])
+        box = np.array([extent(bp.sample(name, bp.frame_time(name, i))[0], bp.props_for(name)) for i in range(n)])
         l, t, r, b = box[:, 0].min(), box[:, 1].min(), box[:, 2].max(), box[:, 3].max()
         bad = l < 1 or t < 1 or r > bp.FRAME_CSS[0] - 1 or b > bp.FRAME_CSS[1] - 0.5
         print("  %-9s x %5.1f..%5.1f  y %5.1f..%5.1f %s" % (name, l, r, t, b, " <-- outside the box" if bad else ""))
@@ -127,7 +127,7 @@ def strip(name, size=(240, 200), every=1):
     sheet = Image.new("RGB", (size[0] * len(frames), size[1]))
     for k, i in enumerate(frames):
         pose, face, _ = bp.sample(name, bp.frame_time(name, i))
-        img, _ = render(pose, face, size)
+        img, _ = render(pose, face, size, props=bp.props_for(name))
         sheet.paste(img, (k * size[0], 0))
     return sheet
 
@@ -143,7 +143,7 @@ def main():
         sheet = Image.new("RGB", (384 * cols, 320 * rows))
         for k, name in enumerate(names):
             pose, face, _ = bp.sample(name, bp.KEY_FRAME[name])
-            img, _ = render(pose, face, (384, 320))
+            img, _ = render(pose, face, (384, 320), props=bp.props_for(name))
             sheet.paste(img, (384 * (k % cols), 320 * (k // cols)))
         sheet.save(os.path.join(out, "keys.png"))
     else:
