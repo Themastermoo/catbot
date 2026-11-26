@@ -11,7 +11,12 @@
 //! - **What it does**: walks along the bottom of the screen above the taskbar, stops, sits, now
 //!   and then lies down to sleep; stands and bobs while its bot works and hops when the bot
 //!   needs the person. Drag it to put it somewhere (it drops back to the ground). Click it for a
-//!   small chat beside it; right-click for Chat, Open Catbot and Send home.
+//!   small chat beside it (it waves hello); right-click for Chat, Open Catbot and Send home.
+//! - **Stage 29.8**: at work it sits at what its bot is doing (a laptop on a desk for code, a
+//!   drafting table for design, a book for looking things up); a job done gets a happy hop;
+//!   sitting, it washes its face now and then; it yawns before a nap and stretches and yawns on
+//!   waking; and when the mouse pointer rests on the ground near it, it crouches, wiggles and
+//!   pounces (KDE Plasma and Windows, where the pet can see the pointer).
 //!
 //! One program holds every pet, each its own window; sending the last one home ends it.
 
@@ -213,6 +218,25 @@ enum Act {
     /// Landing, for this much longer (seconds).
     Land(f64),
     Chat,
+    /// Ready to pounce on the mouse pointer (stage 29.8): this much longer, then at `x`
+    /// (physical pixels, where the pointer stands).
+    Crouch(f64, i32),
+    /// Pouncing, from one window position to another, `t` of the way.
+    Pounce((i32, i32), (i32, i32), f64),
+}
+
+/// How long a pounce takes, and how often a pet may pounce (seconds).
+const POUNCE: f64 = 0.45;
+const POUNCE_EVERY: f64 = 25.0;
+
+/// How long a one-shot pose plays: its way in, or two rounds of a loop (the happy hop).
+fn play_seconds(pose: &str) -> f64 {
+    let first = first_of(pose);
+    match anim(&first) {
+        Some(a) if a.looped => a.seconds * 2.0,
+        Some(a) => a.seconds,
+        None => 0.0,
+    }
 }
 
 /// How long a leap takes, and a landing.
@@ -260,9 +284,12 @@ fn leap_to(surfaces: &[crate::pet_tops::Surface], x: i32, feet: i32, reach: i32,
     Some((land, Perch { id: s.id.clone(), left: s.left, right: s.right, feet: s.y }))
 }
 
-/// The pet's pose for its picture (`data-pet` on Fable's cat; the stand-in cat maps it).
-fn pose(act: Act, mood: &str) -> &'static str {
+/// The pet's pose for its picture (`data-pet` on Fable's cat; the stand-in cat maps it). At
+/// work it sits at what its bot is doing (stage 29.8): a laptop, a drafting table or a book.
+fn pose(act: Act, mood: &str, doing: Option<&str>) -> &'static str {
     match act {
+        Act::Crouch(..) => "crouch",
+        Act::Pounce(..) => "jump",
         Act::Walk => "walk",
         Act::Sit => "sit",
         Act::Sleep => "sleep",
@@ -271,7 +298,12 @@ fn pose(act: Act, mood: &str) -> &'static str {
         Act::Land(_) => "land",
         Act::Carried(..) => "drag",
         Act::Chat | Act::Idle => match mood {
-            "working" => "working",
+            "working" => match doing {
+                Some("coding") => "coding",
+                Some("designing") => "designing",
+                Some("researching") => "researching",
+                _ => "working",
+            },
             "waiting" => "waiting",
             _ => "idle",
         },
@@ -326,6 +358,12 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
     let mut text = use_signal(String::new);
     let mut sending = use_signal(|| false);
     let mut pressed = use_signal(|| None::<(f64, f64)>);
+    // What its bot is at while it works (stage 29.8).
+    let mut doing = use_signal(|| None::<String>);
+    // A one-shot pose played over whatever it's doing (a stretch, a yawn, grooming, a wave, the
+    // happy hop), until when; and the ones lined up after it.
+    let mut flourish = use_signal(|| None::<(&'static str, std::time::Instant)>);
+    let mut lined_up = use_signal(Vec::<&'static str>::new);
 
     // Start on the ground, spread out along the screen.
     let start = desktop.clone();
@@ -353,7 +391,15 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         _ => "idle",
                     };
                     if *mood.peek() != now {
+                        // A job done: the happy hop.
+                        if *mood.peek() == "working" && now == "idle" {
+                            flourish.set(Some(("happy", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("happy")))));
+                        }
                         mood.set(now.to_string());
+                    }
+                    let at = bot["doing"].as_str().map(str::to_string);
+                    if *doing.peek() != at {
+                        doing.set(at);
                     }
                     let reply = bot["messages"].as_array().and_then(|m| m.iter().rev().find(|m| m["role"] == "bot" && m["kind"] == "text")).and_then(|m| m["text"].as_str()).map(crate::bots::plain);
                     if *last.peek() != reply {
@@ -381,6 +427,8 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
             // Part-pixels walked, carried to the next step.
             let mut walked = 0.0f64;
             let mut looked = 0.0;
+            // Seconds since it last pounced (it starts ready, after a little while).
+            let mut pounced_ago = POUNCE_EVERY - 8.0;
             loop {
                 crate::events::pause(TICK.as_millis() as u32).await;
                 let dt = ticked.elapsed().as_secs_f64().min(0.2);
@@ -400,6 +448,20 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                 let now = *act.peek();
                 // A bot at work or waiting holds the pet where it stands.
                 let busy = *mood.peek() != "idle";
+                // A one-shot pose holds it too while it plays; then the next lined up, if any.
+                let current_flourish = *flourish.peek();
+                let playing = match current_flourish {
+                    Some((_, until)) if std::time::Instant::now() < until => true,
+                    Some(_) => {
+                        let next = {
+                            let mut queue = lined_up.write();
+                            if queue.is_empty() { None } else { Some(queue.remove(0)) }
+                        };
+                        flourish.set(next.map(|p| (p, std::time::Instant::now() + Duration::from_secs_f64(play_seconds(p)))));
+                        next.is_some()
+                    }
+                    None => false,
+                };
                 // The window it stands on moved or went: follow it, or fall.
                 if let Some(p) = perch.clone() {
                     let middle = at.x + w / 2;
@@ -470,13 +532,49 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         act.set(if left - dt <= 0.0 { Act::Idle } else { Act::Land(left - dt) });
                         continue;
                     }
+                    Act::Crouch(left, x) => {
+                        if left - dt > 0.0 {
+                            act.set(Act::Crouch(left - dt, x));
+                        } else {
+                            let to = (x - w / 2).clamp(lo, hi - w);
+                            act.set(Act::Pounce((at.x, at.y), (to, top), 0.0));
+                        }
+                        continue;
+                    }
+                    Act::Pounce(from, to, t) => {
+                        let t = t + dt / POUNCE;
+                        let (x, y) = arc(from, to, t, 26.0 * scale);
+                        window.set_outer_position(PhysicalPosition::new(x, y));
+                        act.set(if t >= 1.0 { Act::Land(LANDING) } else { Act::Pounce(from, to, t) });
+                        continue;
+                    }
                     _ => {}
+                }
+                if playing {
+                    continue;
                 }
                 // Not where it should stand (the screen changed, say): down it goes.
                 if (at.y - top).abs() > 2 {
                     perch = None;
                     act.set(Act::Fall(0.0));
                     continue;
+                }
+                // The pointer, still for a moment on the ground ahead: crouch, wiggle, pounce.
+                pounced_ago += dt;
+                if !busy && pounced_ago > POUNCE_EVERY && matches!(now, Act::Walk | Act::Idle | Act::Sit)
+                    && let Some((cx, cy, still)) = crate::pet_tops::cursor(span(&desktop))
+                {
+                    let middle = at.x + w / 2;
+                    let feet = at.y + h;
+                    let off = (cx - middle).abs();
+                    let near_floor = cy <= feet + (10.0 * scale) as i32 && cy >= feet - (150.0 * scale) as i32;
+                    let in_reach = off >= (40.0 * scale) as i32 && off <= (300.0 * scale) as i32 && cx > lo + w / 2 && cx < hi - w / 2;
+                    if near_floor && in_reach && still.as_secs_f64() > 0.6 && still.as_secs_f64() < 4.0 {
+                        pounced_ago = 0.0;
+                        facing_left.set(cx < middle);
+                        act.set(Act::Crouch(1.2, cx));
+                        continue;
+                    }
                 }
                 left_for -= dt;
                 if now == Act::Walk && !busy {
@@ -522,6 +620,12 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                             continue;
                         }
                     }
+                    // Sitting, now and then it washes its face instead (stage 29.8).
+                    if now == Act::Sit && chance(&mut seed) < 0.35 {
+                        flourish.set(Some(("groom", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("groom")))));
+                        left_for = play_seconds("groom") + 1.0 + chance(&mut seed) * 3.0;
+                        continue;
+                    }
                     let next = match now {
                         Act::Sleep if roll < 0.7 => Act::Sleep,
                         _ if roll < 0.6 => Act::Walk,
@@ -529,6 +633,13 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         _ if roll < 0.95 => Act::Sit,
                         _ => Act::Sleep,
                     };
+                    // A yawn before a nap; on waking, a long stretch and a yawn.
+                    if next == Act::Sleep && now != Act::Sleep {
+                        flourish.set(Some(("yawn", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("yawn")))));
+                    } else if now == Act::Sleep && next != Act::Sleep {
+                        flourish.set(Some(("stretch", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("stretch")))));
+                        lined_up.set(vec!["yawn"]);
+                    }
                     if next == Act::Walk && chance(&mut seed) < 0.4 {
                         let turned = !*facing_left.peek();
                         facing_left.set(turned);
@@ -559,6 +670,8 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
             window.set_outer_position(PhysicalPosition::new(if to_left { at.x - grow } else { at.x }, at.y - up));
             facing_left.set(to_left);
             act.set(Act::Chat);
+            // Hello.
+            flourish.set(Some(("wave", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("wave")))));
         }
     };
     let close_chat = {
@@ -595,7 +708,10 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
 
     let current = act();
     let chatting = current == Act::Chat;
-    let shown_pose = pose(current, &mood());
+    let shown_pose = match flourish() {
+        Some((p, until)) if std::time::Instant::now() < until && !matches!(current, Act::Carried(..) | Act::Fall(_) | Act::Leap(..) | Act::Pounce(..)) => p,
+        _ => pose(current, &mood(), doing().as_deref()),
+    };
     let flip = if facing_left() { "transform: scaleX(-1)" } else { "" };
     let name = pet.name.clone();
     let drag_window = desktop.clone();
@@ -775,15 +891,15 @@ mod tests {
 
     #[test]
     fn a_pet_does_what_its_bot_does() {
-        assert_eq!(pose(Act::Walk, "idle"), "walk");
-        assert_eq!(pose(Act::Idle, "working"), "working");
-        assert_eq!(pose(Act::Chat, "waiting"), "waiting");
-        assert_eq!(pose(Act::Carried(0, 0, 0.0), "working"), "drag");
+        assert_eq!(pose(Act::Walk, "idle", None), "walk");
+        assert_eq!(pose(Act::Idle, "working", None), "working");
+        assert_eq!(pose(Act::Chat, "waiting", None), "waiting");
+        assert_eq!(pose(Act::Carried(0, 0, 0.0), "working", None), "drag");
         let mut seed = 7;
         let rolls: Vec<f64> = (0..100).map(|_| chance(&mut seed)).collect();
         assert!(rolls.iter().all(|r| (0.0..1.0).contains(r)));
         assert!(rolls.iter().any(|r| *r < 0.2) && rolls.iter().any(|r| *r > 0.8), "spread out");
-        assert_eq!(pose(Act::Leap((0, 0), (1, 1), 0.5), "idle"), "jump");
+        assert_eq!(pose(Act::Leap((0, 0), (1, 1), 0.5), "idle", None), "jump");
         // A leap starts and ends where it should and rises in between.
         assert_eq!(arc((0, 500), (200, 300), 0.0, 70.0), (0, 500));
         assert_eq!(arc((0, 500), (200, 300), 1.0, 70.0), (200, 300));
@@ -798,9 +914,15 @@ mod tests {
         let (land, onto) = leap_to(&tops, 150, 700, 420, 50, 0.0).unwrap();
         assert_eq!((onto.id.as_str(), land), ("a", 150));
         assert_eq!(leap_to(&tops, 2000, 700, 420, 50, 0.0), None, "too far");
-        assert_eq!(pose(Act::Fall(0.0), "idle"), "air");
+        assert_eq!(pose(Act::Fall(0.0), "idle", None), "air");
+        // At work, at what its bot is doing; ready to pounce, crouched (stage 29.8).
+        assert_eq!(pose(Act::Idle, "working", Some("coding")), "coding");
+        assert_eq!(pose(Act::Chat, "working", Some("researching")), "researching");
+        assert_eq!(pose(Act::Idle, "idle", Some("coding")), "idle");
+        assert_eq!(pose(Act::Crouch(1.0, 0), "idle", None), "crouch");
         // The robot cat's sheets: every pose has something to play, and one-shots lead on.
-        for p in ["idle", "walk", "sit", "sleep", "working", "waiting", "jump", "air", "land", "drag"] {
+        for p in ["idle", "walk", "sit", "sleep", "working", "waiting", "jump", "air", "land", "drag",
+                  "happy", "stretch", "groom", "yawn", "wave", "crouch", "coding", "designing", "researching"] {
             assert!(anim(&first_of(p)).is_some(), "{p}");
         }
         assert_eq!(first_of("sit"), "sit_down");

@@ -133,12 +133,29 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
             app.set_channel_busy(&thread_id, true);
         }
         app.turns.finish(&thread_id);
+        app.doing.lock().expect("doing lock").remove(&thread_id);
         app.announce_bot(&bot.id);
         if let Some(reply) = reply.filter(|_| !next.is_empty()) {
             super::handoffs::after_reply(&app, &bot, &thread_id, request_id, &reply, next).await;
         }
     });
     Ok(turn_id)
+}
+
+/// What a tool says a bot is doing: writing code, designing, or looking things up. None
+/// leaves what it was doing as it was.
+pub fn doing_of(tool: &str) -> Option<&'static str> {
+    let t = tool.to_lowercase();
+    let has = |words: &[&str]| words.iter().any(|w| t.contains(w));
+    if has(&["blender", "comfy", "image", "picture", "draw", "design", "figma", "svg", "canvas", "render", "sketch"]) {
+        Some("designing")
+    } else if has(&["bash", "edit", "write", "patch", "command", "shell", "notebook", "terminal", "exec", "filechange"]) {
+        Some("coding")
+    } else if has(&["read", "grep", "glob", "search", "fetch", "web", "browse", "list", "find", "view"]) || t == "ls" {
+        Some("researching")
+    } else {
+        None
+    }
 }
 
 /// Runs a turn to its end, for bots answering one after another (a channel's, or a chain of
@@ -149,6 +166,7 @@ pub async fn run_through(app: &Arc<App>, bot: &Bot, conversation: Conversation, 
     let thread_id = conversation.id.clone();
     let reply = run(app, bot, conversation, request_id, text, &turn_id, cancel, guest).await;
     app.turns.finish(&thread_id);
+    app.doing.lock().expect("doing lock").remove(&thread_id);
     Ok(reply)
 }
 
@@ -455,6 +473,13 @@ async fn drive(
                 gap = true;
             }
             Event::ToolStarted { id, name, input } => {
+                // What the bot is at, for its desktop pet (stage 29.8).
+                if let Some(kind) = doing_of(&name) {
+                    let before = app.doing.lock().expect("doing lock").insert(thread.to_string(), kind);
+                    if before != Some(kind) {
+                        app.announce_bot(&bot.id);
+                    }
+                }
                 let detail = summarize(&input);
                 emit(json!({ "type": "item.started", "itemType": "tool", "itemId": id, "title": name, "summary": detail, "input": detail }));
                 tools.insert(id, result.steps.len());
@@ -755,4 +780,20 @@ pub fn save_and_send(app: &App, thread: &str, role: Role, body: &str, detail: Op
         super::inbox::changed(app);
     }
     Some(wire)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::doing_of;
+
+    #[test]
+    fn a_tool_says_what_the_bot_is_at() {
+        assert_eq!(doing_of("Bash"), Some("coding"));
+        assert_eq!(doing_of("Edit"), Some("coding"));
+        assert_eq!(doing_of("mcp__blender__run_script"), Some("designing"));
+        assert_eq!(doing_of("WebSearch"), Some("researching"));
+        assert_eq!(doing_of("Read"), Some("researching"));
+        assert_eq!(doing_of("ls"), Some("researching"));
+        assert_eq!(doing_of("mcp__catbot__send_mail"), None);
+    }
 }

@@ -127,6 +127,9 @@ pub struct App {
     pub plan_usage: std::sync::Mutex<Option<(std::time::Instant, Value)>>,
     /// Channels whose bots are answering a message, one after another (`channels.rs`).
     pub channels_busy: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// What a bot at work is doing, by chat (stage 29.8, for its desktop pet): "coding",
+    /// "designing" or "researching", from the last tool its turn used.
+    pub doing: std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
     /// AIs that turned a turn away for their usage limit, and until when (`backups.rs`).
     pub limited_until: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
     /// AIs that stopped working, by engine id: what went wrong and its fix (`health.rs`).
@@ -172,6 +175,7 @@ impl App {
             plan_usage: std::sync::Mutex::new(None),
             limited_until: std::sync::Mutex::new(std::collections::HashMap::new()),
             channels_busy: std::sync::Mutex::new(std::collections::HashSet::new()),
+            doing: std::sync::Mutex::new(std::collections::HashMap::new()),
             troubles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             updates: updates::Updates::default(),
             local: std::sync::OnceLock::new(),
@@ -218,6 +222,9 @@ impl App {
         let mut wire = wire::bot(store, bot, &self.activity(), messages)?;
         // Whether this computer has a Codex vault at all: without one, there's no switch for it.
         wire["codexHere"] = json!(self.codex.is_dir());
+        // What it's at, while it works (its pet shows it at a desk, a drafting table or a book).
+        let doing = wire["threadId"].as_str().and_then(|t| self.doing.lock().expect("doing lock").get(t).copied());
+        wire["doing"] = json!(doing);
         // What it may do without asking, besides its approval level (allowed.rs).
         wire["allowed"] = allowed::wire(&allowed::rules_in(store, &bot.id));
         Ok(wire)

@@ -38,6 +38,29 @@ pub struct Frame {
 /// The latest frames, and the width of the screen they're measured on (0: the pet's own).
 static FRAMES: Mutex<Option<(Vec<Frame>, f64)>> = Mutex::new(None);
 
+/// The mouse pointer (stage 29.8, for pouncing): where it is, the width of the screen that's
+/// measured on (0: the pet's own), and when it last moved.
+static CURSOR: Mutex<Option<(i32, i32, f64, std::time::Instant)>> = Mutex::new(None);
+
+fn keep_cursor(x: i32, y: i32, width: f64) {
+    let mut now = CURSOR.lock().unwrap_or_else(|e| e.into_inner());
+    let moved = match *now {
+        Some((ox, oy, _, at)) if (ox - x).abs() + (oy - y).abs() <= 2 => at,
+        _ => std::time::Instant::now(),
+    };
+    *now = Some((x, y, width, moved));
+}
+
+/// Where the mouse pointer is on a screen `screen_width` pixels wide (the pet program's), and
+/// how long it has stood still; None where the desktop can't say.
+pub fn cursor(screen_width: f64) -> Option<(i32, i32, std::time::Duration)> {
+    #[cfg(windows)]
+    windows::cursor();
+    let (x, y, width, moved) = (*CURSOR.lock().unwrap_or_else(|e| e.into_inner()))?;
+    let scale = if width > 0.0 && screen_width > 0.0 { screen_width / width } else { 1.0 };
+    Some(((x as f64 * scale) as i32, (y as f64 * scale) as i32, moved.elapsed()))
+}
+
 fn keep(frames: Vec<Frame>, width: f64) {
     *FRAMES.lock().unwrap_or_else(|e| e.into_inner()) = Some((frames, width));
 }
@@ -106,7 +129,7 @@ pub fn start() {
 
 #[cfg(target_os = "linux")]
 mod kde {
-    use super::{Frame, keep};
+    use super::{Frame, keep, keep_cursor};
 
     /// The KWin script: sends the windows' frames to the pet program on every change.
     const SCRIPT: &str = r#"
@@ -141,6 +164,15 @@ for (let i = 0; i < first.length; i++) watch(first[i]);
 (workspace.windowActivated || workspace.clientActivated).connect(send);
 workspace.currentDesktopChanged.connect(send);
 send();
+// The pointer, for pouncing: at most every tenth of a second.
+let lastCursor = 0;
+if (workspace.cursorPosChanged) workspace.cursorPosChanged.connect(function () {
+    const now = Date.now();
+    if (now - lastCursor < 100) return;
+    lastCursor = now;
+    const c = workspace.cursorPos;
+    callDBus(SERVICE, "/", "org.catbot.Pets", "Cursor", JSON.stringify({ width: workspace.workspaceWidth, x: Math.round(c.x), y: Math.round(c.y) }));
+});
 "#;
 
     /// The plugin name the script is loaded under (one at a time).
@@ -154,6 +186,14 @@ send();
         fn windows(&self, report: String) {
             if let Some((frames, width)) = read(&report) {
                 keep(frames, width);
+            }
+        }
+
+        /// Where the pointer is: `{ width, x, y }`.
+        fn cursor(&self, report: String) {
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&report) else { return };
+            if let (Some(x), Some(y)) = (value["x"].as_i64(), value["y"].as_i64()) {
+                keep_cursor(x as i32, y as i32, value["width"].as_f64().unwrap_or(0.0));
             }
         }
     }
@@ -214,7 +254,15 @@ send();
 
 #[cfg(windows)]
 mod windows {
-    use super::{Frame, keep};
+    use super::{Frame, keep, keep_cursor};
+
+    /// Where the pointer is now.
+    pub fn cursor() {
+        let mut at = windows_sys::Win32::Foundation::POINT { x: 0, y: 0 };
+        if unsafe { windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut at) } != 0 {
+            keep_cursor(at.x, at.y, 0.0);
+        }
+    }
     use windows_sys::Win32::Foundation::{HWND, LPARAM, RECT};
     use windows_sys::core::BOOL;
     use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAKED, DwmGetWindowAttribute};
@@ -288,6 +336,18 @@ mod tests {
         let (frames, width) = kde::read(r#"{"width": 1920, "windows": [{"id": "{a}", "x": 10, "y": 200, "w": 600, "h": 400, "max": 0}, {"id": "{b}", "x": 0, "y": 0, "w": 1920, "h": 1040, "max": 1}]}"#).unwrap();
         assert_eq!((frames.len(), width), (1, 1920.0));
         assert_eq!(frames[0], frame("{a}", 10, 200, 600, 400));
+    }
+
+    #[test]
+    fn the_pointer_is_scaled_and_its_stillness_kept() {
+        keep_cursor(500, 400, 1000.0);
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        keep_cursor(501, 400, 1000.0);
+        let (x, y, still) = cursor(2000.0).unwrap();
+        assert_eq!((x, y), (1002, 800));
+        assert!(still >= std::time::Duration::from_millis(25), "a pixel's nudge isn't a move");
+        keep_cursor(700, 400, 1000.0);
+        assert!(cursor(2000.0).unwrap().2 < std::time::Duration::from_millis(25));
     }
 
     #[test]
