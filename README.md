@@ -48,8 +48,7 @@ Runtime data (database, transcripts, keys) lives outside this repo, never in it.
 
 ## Catbot's own interface
 
-Being rewritten in Rust with [Dioxus](https://dioxuslabs.com) 0.7 (`crates/catbot-ui`), keeping
-OpenMausBot's look: its stylesheet and fonts are reused with credit (see `NOTICE`). It follows the
+Being written in Rust with [Dioxus](https://dioxuslabs.com) 0.7 (`crates/catbot-ui`), It follows the
 system's light or dark setting. Built in slices; so far it's the frame of the app.
 
 ```sh
@@ -173,28 +172,6 @@ Run the install from your normal terminal: the service takes that terminal's `PA
 Run it again after moving or reinstalling Claude Code, or to change one of those; running it
 again also restarts Catbot on the new build. Stop any Catbot you started by hand
 first, since only one can use port 8788.
-
-## Running OpenMausBot's interface on Catbot
-
-```sh
-# tab 1: the reference server (still answers everything Catbot doesn't yet)
-cd ~/Projects/openmausbot-ref && pnpm dev:server
-
-# tab 2: Catbot, in front of it
-cd ~/Projects/Catbot && cargo run -- serve
-
-# tab 3: the interface, pointed at Catbot instead of the reference server
-cd ~/Projects/openmausbot-ref && OMB_PORT=8788 pnpm dev
-```
-
-Then open http://127.0.0.1:5199. The two servers run side by side, split by bot:
-
-- **Catbot bots** (made with `catbot bot new`, or with **+** in the interface) are answered by
-  Catbot: chat, streaming replies, approval cards (Allow once / Deny), Stop, rename, approval
-  level, model, delete, and history.
-- **The reference server's bots** (MausBot and any it makes) and everything else (settings,
-  routines, inbox…) pass through to the reference server unchanged.
-- The bot list and the live updates are merged, so the interface shows one team.
 
 Things a Catbot bot can't do yet answer with a clear error, and Catbot prints a line saying
 which route was asked for: that's the to-do list. Catbot listens on 127.0.0.1 only, with no
