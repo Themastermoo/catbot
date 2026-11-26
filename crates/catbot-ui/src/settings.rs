@@ -50,9 +50,50 @@ const ICON_BUTTON: &str = "flex size-10 items-center justify-center rounded-md t
 
 /// Saves a change and takes the bot the server sends back.
 pub(crate) async fn save(mut state: Signal<State>, bot_id: &str, change: Value) -> Result<(), String> {
-    let answer = api::call("PATCH", &format!("/api/bots/{bot_id}"), Some(&change)).await?;
-    state.write().apply(&json!({ "kind": "bot", "bot": answer["bot"] }));
-    Ok(())
+    // The simple choices (picture, colour, permission level, Codex) show at once, before Catbot
+    // answers; a slow answer (a busy computer) used to read as a click that hadn't registered.
+    // Only the newest save's answer is taken, so quick clicks don't jump back and forth.
+    static LATEST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let mine = LATEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    let before = state.peek().bots.iter().find(|b| b.id == bot_id).cloned();
+    if let Some(bot) = state.write().bots.iter_mut().find(|b| b.id == bot_id) {
+        show_now(bot, &change);
+    }
+    let latest = || LATEST.load(std::sync::atomic::Ordering::Relaxed) == mine;
+    match api::call("PATCH", &format!("/api/bots/{bot_id}"), Some(&change)).await {
+        Ok(answer) => {
+            if latest() {
+                state.write().apply(&json!({ "kind": "bot", "bot": answer["bot"] }));
+            }
+            Ok(())
+        }
+        Err(err) => {
+            // Back as it was.
+            if latest()
+                && let Some(before) = before
+                && let Some(bot) = state.write().bots.iter_mut().find(|b| b.id == bot_id)
+            {
+                *bot = before;
+            }
+            Err(err)
+        }
+    }
+}
+
+/// A change Catbot is sure to take, shown on the bot before it answers.
+fn show_now(bot: &mut Bot, change: &Value) {
+    if let Some(level) = change["approvalMode"].as_str() {
+        bot.approval_mode = level.to_string();
+    }
+    if let Some(mark) = change["mark"].as_str() {
+        bot.mark = mark.to_string();
+    }
+    if let Some(color) = change["color"].as_str() {
+        bot.color = color.to_string();
+    }
+    if let Some(codex) = change["codex"].as_bool() {
+        bot.codex = codex;
+    }
 }
 
 /// A channel's settings, in the panel on the right (a bot's are in its panel, `panel.rs`).
@@ -169,7 +210,6 @@ pub fn BotSettings(bot: Bot) -> Element {
                                     "aria-checked": "{bot.mark == mark}",
                                     "aria-label": "{label}",
                                     title: "{label}",
-                                    disabled: saving(),
                                     class: if bot.mark == mark { "flex items-center justify-center rounded-xl bg-raised p-2 ring-2 ring-accent" } else { "flex items-center justify-center rounded-xl p-2 hover:bg-raised" },
                                     "data-cat-follow": true,
                                     onclick: move |_| change(json!({ "mark": mark })),
@@ -186,7 +226,6 @@ pub fn BotSettings(bot: Bot) -> Element {
                                     "aria-checked": "{bot.color == color}",
                                     "aria-label": "{color}",
                                     title: "{color}",
-                                    disabled: saving(),
                                     class: if bot.color == color { "size-7 rounded-full ring-2 ring-accent ring-offset-2 ring-offset-card" } else { "size-7 rounded-full hover:scale-110 transition-transform" },
                                     background: "var(--identity-{color})",
                                     onclick: move |_| change(json!({ "color": color })),
@@ -254,7 +293,6 @@ pub fn BotSettings(bot: Bot) -> Element {
                                     r#type: "button",
                                     role: "radio",
                                     "aria-checked": "{bot.approval_mode == level}",
-                                    disabled: saving(),
                                     class: if bot.approval_mode == level { "flex w-full items-start gap-2.5 rounded-lg bg-raised px-3 py-2 text-start" } else { "flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-start hover:bg-raised/50" },
                                     onclick: move |_| change(json!({ "approvalMode": level })),
                                     span { class: if bot.approval_mode == level { "mt-1 size-3.5 shrink-0 rounded-full border-4 border-accent" } else { "mt-1 size-3.5 shrink-0 rounded-full border border-hairline" } }
@@ -281,7 +319,7 @@ pub fn BotSettings(bot: Bot) -> Element {
                                 if bot.codex { "{bot.name} can read and write your Codex notes." } else { "{bot.name} works only in its own folder." }
                             }
                         }
-                        Switch { checked: bot.codex, disabled: saving(), label: "Codex vault access", on_toggle: move |_| change(json!({ "codex": !bot.codex })) }
+                        Switch { checked: bot.codex, disabled: false, label: "Codex vault access", on_toggle: move |_| change(json!({ "codex": !bot.codex })) }
                     }
                     // What changed, and Undo (stage 23.4).
                     if !channel {
