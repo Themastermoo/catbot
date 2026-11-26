@@ -13,6 +13,13 @@
 //!   (the list shows how far it's got); `POST /api/engines/:id/sign-in` gives the link to its
 //!   sign-in page, `POST /api/engines/:id/sign-in/callback { url }` passes on the address a
 //!   browser on another device ended at, and `DELETE /api/engines/:id/sign-in` gives up. At home.
+//! - Quick sign-on (stage 29.7): the same two routes for every program Catbot can install and
+//!   sign in by itself (`quickInstall`, `quickSignIn` in the list). Install runs the maker's own
+//!   install line (`{ thenSignIn: true }` goes straight on to the sign-in); the sign-in runs the
+//!   program's login command, opens its page in the browser and shows the code it gives.
+//! - OpenRouter's log-in (stage 29.7): `POST /api/engines/openrouter/log-in` opens OpenRouter's
+//!   page (OAuth with PKCE); the browser comes back to `GET /api/engines/openrouter/logged-in`,
+//!   where Catbot trades the code for a key and keeps it as if pasted. At home only.
 
 use std::sync::Arc;
 
@@ -76,10 +83,15 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
         }
         (&Method::POST, [id, "install"]) if at_home => {
             let engine = find(id)?;
-            if engine.download.is_none() || engines::asset(engine).is_none() {
-                return Err(bad(format!("{} can't be installed from here", engine.name)));
-            }
             if work(app, engine.id)["installing"] == true {
+                return Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })));
+            }
+            let then_sign_in = json_body(req).await.ok().is_some_and(|b: Value| b["thenSignIn"] == true);
+            if engine.download.is_none() || engines::asset(engine).is_none() {
+                // The maker's own install line, run here (stage 29.7).
+                let line = install_line(engine).ok_or_else(|| bad(format!("{} can't be installed from here", engine.name)))?;
+                start_install(app, engine, &line, then_sign_in).map_err(bad)?;
+                app.hub.send(json!({ "kind": "engines" }));
                 return Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })));
             }
             set_work(app, engine.id, json!({ "installing": true, "got": 0 }), None);
@@ -101,37 +113,24 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
                 eprintln!("catbot: {} {}", engine.name, if done.is_ok() { "installed" } else { "didn't install" });
                 app2.agent_work.lock().expect("agent work lock").insert(engine.id.to_string(), (state, None));
                 app2.hub.send(json!({ "kind": "engines" }));
+                if done.is_ok() && then_sign_in {
+                    signed_in_after(&app2, engine).await;
+                }
+                let _ = then_sign_in;
             });
             set_work(app, engine.id, json!({ "installing": true, "got": 0 }), Some(task));
             Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })))
         }
+        (&Method::POST, [id, "sign-in"]) if at_home && engines::find(id).is_some_and(|e| engines::agent_sign_in(e).is_none()) => {
+            // The program's own login command (stage 29.7).
+            let engine = find(id)?;
+            start_cli_sign_in(app, engine).await.map_err(bad)?;
+            app.hub.send(json!({ "kind": "engines" }));
+            Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })))
+        }
         (&Method::POST, [id, "sign-in"]) if at_home => {
             let engine = find(id)?;
-            let method = engines::agent_sign_in(engine).ok_or_else(|| bad(format!("{} signs in on its own: {}", engine.name, engine.sign_in)))?;
-            let program = engines::agent_program(engine).ok_or_else(|| bad(format!("Install {} first.", engine.name)))?;
-            let env = engines::agent_env(engine, &program);
-            let folder = engines::agents_dir().map(|d| d.join(engine.id)).ok_or_else(|| fail("no folder"))?;
-            let done = app.clone();
-            let (shown, task) = crate::acp::sign_in(engine, program, env, folder, method, move |outcome| {
-                let state = match outcome {
-                    Ok(()) => {
-                        engines::note_signed_in(engine);
-                        Value::Null
-                    }
-                    Err(problem) => json!({ "problem": format!("The sign-in didn't finish: {problem}") }),
-                };
-                done.agent_work.lock().expect("agent work lock").insert(engine.id.to_string(), (state, None));
-                done.hub.send(json!({ "kind": "engines" }));
-            })
-            .await
-            .map_err(bad)?;
-            match shown {
-                Some((url, code)) => set_work(app, engine.id, json!({ "signingIn": true, "url": url, "code": code }), Some(task)),
-                None => {
-                    engines::note_signed_in(engine);
-                    set_work(app, engine.id, Value::Null, None)
-                }
-            }
+            start_acp_sign_in(app, engine).await.map_err(bad)?;
             app.hub.send(json!({ "kind": "engines" }));
             Ok((StatusCode::OK, json!({ "engine": describe(app, engine) })))
         }
@@ -194,6 +193,17 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
                 Ok(_) => Ok((StatusCode::OK, json!({ "models": fallback, "live": false }))),
                 Err(problem) => Ok((StatusCode::OK, json!({ "models": fallback, "live": false, "problem": problem }))),
             }
+        }
+        (&Method::POST, ["openrouter", "log-in"]) if at_home => {
+            let url = openrouter_log_in(app).map_err(bad)?;
+            app.hub.send(json!({ "kind": "engines" }));
+            Ok((StatusCode::OK, json!({ "url": url, "engine": describe(app, find("openrouter")?) })))
+        }
+        (&Method::DELETE, ["openrouter", "log-in"]) if at_home => {
+            OPENROUTER_ASK.lock().expect("openrouter lock").take();
+            set_work(app, "openrouter", Value::Null, None);
+            app.hub.send(json!({ "kind": "engines" }));
+            Ok((StatusCode::OK, json!({ "engine": describe(app, find("openrouter")?) })))
         }
         (&Method::PUT, [id, "key"]) if at_home => {
             let engine = find(id)?;
@@ -287,6 +297,240 @@ pub fn effort_label(id: &str) -> String {
     }
 }
 
+/// The install line Catbot runs for an engine: `CATBOT_INSTALL_<ID>` when set (the person's own,
+/// or a test's stand-in), else the maker's.
+fn install_line(engine: &Engine) -> Option<String> {
+    let variable = format!("CATBOT_INSTALL_{}", engine.id.to_uppercase().replace('-', "_"));
+    std::env::var(variable).ok().filter(|l| !l.trim().is_empty()).or_else(|| engines::quick_install(engine))
+}
+
+/// Runs an install line, the list showing it under way and its last line; then, if asked, the sign-in.
+fn start_install(app: &Arc<App>, engine: &'static Engine, line: &str, then_sign_in: bool) -> Result<(), String> {
+    set_work(app, engine.id, json!({ "installing": true, "step": "Starting the installer" }), None);
+    let (shown, ended) = (app.clone(), app.clone());
+    let task = crate::login::install(
+        line,
+        move |said| {
+            let said: String = said.trim().chars().take(120).collect();
+            if said.is_empty() {
+                return;
+            }
+            if let Some((state, _)) = shown.agent_work.lock().expect("agent work lock").get_mut(engine.id) {
+                *state = json!({ "installing": true, "step": said });
+            }
+            shown.hub.send(json!({ "kind": "engines" }));
+        },
+        move |done| {
+            eprintln!("catbot: {} {}", engine.name, if done.is_ok() { "installed" } else { "didn't install" });
+            // The program it put somewhere new is looked for again.
+            let found = done.is_ok() && program_of(&ended, engine).is_some();
+            let state = match done {
+                Ok(()) if found => Value::Null,
+                Ok(()) => json!({ "problem": format!("The installer finished, but Catbot can't find {}. Point Catbot to its program below.", engine.name) }),
+                Err(problem) => json!({ "problem": format!("{} didn't install: {problem}", engine.name) }),
+            };
+            ended.agent_work.lock().expect("agent work lock").insert(engine.id.to_string(), (state, None));
+            ended.hub.send(json!({ "kind": "engines" }));
+            if found && then_sign_in {
+                let app = ended.clone();
+                tokio::spawn(async move { signed_in_after(&app, engine).await });
+            }
+        },
+    )?;
+    if let Some((_, slot)) = app.agent_work.lock().expect("agent work lock").get_mut(engine.id) {
+        *slot = Some(task);
+    }
+    Ok(())
+}
+
+/// Signs an agent in through ACP's `authenticate` (Antigravity, Gemini CLI, Muse Code): the page
+/// it gives, or none when it was signed in already.
+async fn start_acp_sign_in(app: &Arc<App>, engine: &'static Engine) -> Result<(), String> {
+    let method = engines::agent_sign_in(engine).ok_or_else(|| format!("{} signs in on its own: {}", engine.name, engine.sign_in))?;
+    let program = engines::agent_program(engine).ok_or_else(|| format!("Install {} first.", engine.name))?;
+    let env = engines::agent_env(engine, &program);
+    let folder = engines::agents_dir().map(|d| d.join(engine.id)).ok_or("no folder")?;
+    let done = app.clone();
+    let (shown, task) = crate::acp::sign_in(engine, program, env, folder, method, move |outcome| {
+        let state = match outcome {
+            Ok(()) => {
+                engines::note_signed_in(engine);
+                Value::Null
+            }
+            Err(problem) => json!({ "problem": format!("The sign-in didn't finish: {problem}") }),
+        };
+        done.agent_work.lock().expect("agent work lock").insert(engine.id.to_string(), (state, None));
+        done.hub.send(json!({ "kind": "engines" }));
+    })
+    .await?;
+    match shown {
+        Some((url, code)) => {
+            // Opened for the person, as the program's own login does (stage 29.7).
+            crate::login::open_in_browser(&url);
+            set_work(app, engine.id, json!({ "signingIn": true, "url": url, "code": code }), Some(task))
+        }
+        None => {
+            engines::note_signed_in(engine);
+            set_work(app, engine.id, Value::Null, None)
+        }
+    }
+    Ok(())
+}
+
+/// Goes on to the sign-in after an install, when the program has one Catbot can run.
+async fn signed_in_after(app: &Arc<App>, engine: &'static Engine) {
+    let started = if engines::cli_sign_in(engine).is_some() {
+        start_cli_sign_in(app, engine).await
+    } else if engines::agent_sign_in(engine).is_some() {
+        start_acp_sign_in(app, engine).await
+    } else {
+        Ok(())
+    };
+    if let Err(problem) = started {
+        set_work(app, engine.id, json!({ "problem": problem }), None);
+    }
+    app.hub.send(json!({ "kind": "engines" }));
+}
+
+/// The program to run an engine's login with: Claude Code's command, or the agent's program.
+fn program_of(app: &App, engine: &Engine) -> Option<(std::path::PathBuf, Vec<String>)> {
+    if engine.kind == Kind::Claude {
+        let (first, rest) = app.cli.split_first()?;
+        let program = engines::find_program(first)?;
+        return Some((program, rest.to_vec()));
+    }
+    engines::agent_program(engine).map(|p| (p, Vec::new()))
+}
+
+/// Starts the program's own login: its page is opened in the browser, and the list shows the
+/// page and any code until it says it's done.
+async fn start_cli_sign_in(app: &Arc<App>, engine: &'static Engine) -> Result<(), String> {
+    let login = engines::cli_sign_in(engine).ok_or_else(|| format!("{} signs in on its own: {}", engine.name, engine.sign_in))?;
+    let (program, mut args) = program_of(app, engine).ok_or_else(|| format!("Install {} first.", engine.name))?;
+    args.extend(login.iter().map(|a| a.to_string()));
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let env = if engine.kind == Kind::Agent { engines::agent_env(engine, &program) } else { Vec::new() };
+    let done = app.clone();
+    // Set, under the work lock, once it has ended: "under way" is never shown after that.
+    let ended = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let ending = ended.clone();
+    let (shown, task) = crate::login::sign_in(&program, &args, env, !engines::opens_its_own_page(engine), move |outcome| {
+        let state = match outcome {
+            Ok(()) => {
+                engines::note_signed_in(engine);
+                Value::Null
+            }
+            Err(problem) => json!({ "problem": format!("The sign-in didn't finish: {problem}. Try “Open sign-in in Terminal”.") }),
+        };
+        let mut all = done.agent_work.lock().expect("agent work lock");
+        ending.store(true, std::sync::atomic::Ordering::SeqCst);
+        all.insert(engine.id.to_string(), (state, None));
+        drop(all);
+        done.hub.send(json!({ "kind": "engines" }));
+    })
+    .await?;
+    let mut all = app.agent_work.lock().expect("agent work lock");
+    if !ended.load(std::sync::atomic::Ordering::SeqCst) {
+        let state = json!({ "signingIn": true, "url": shown.url, "code": shown.code });
+        if let Some((_, Some(old))) = all.insert(engine.id.to_string(), (state, Some(task))) {
+            old.abort();
+        }
+    }
+    Ok(())
+}
+
+/// OpenRouter's log-in under way: what it was asked with, to check what comes back.
+struct OpenRouterAsk {
+    state: String,
+    verifier: String,
+}
+
+static OPENROUTER_ASK: std::sync::Mutex<Option<OpenRouterAsk>> = std::sync::Mutex::new(None);
+
+/// OpenRouter's address (`CATBOT_OPENROUTER_AUTH` for a test's stand-in).
+fn openrouter_base() -> String {
+    std::env::var("CATBOT_OPENROUTER_AUTH").ok().filter(|b| !b.is_empty()).unwrap_or_else(|| "https://openrouter.ai".into())
+}
+
+/// Starts OpenRouter's log-in: its page, opened in the browser, asking for a key for Catbot.
+fn openrouter_log_in(app: &Arc<App>) -> Result<String, String> {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    let port = app.local.get().map(|a| a.port()).ok_or("Catbot isn't listening yet")?;
+    let verifier = format!("{}{}", uuid::Uuid::new_v4().simple(), uuid::Uuid::new_v4().simple());
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+    let state = uuid::Uuid::new_v4().simple().to_string();
+    let back = format!("http://localhost:{port}/api/engines/openrouter/logged-in");
+    let mut page = reqwest::Url::parse(&format!("{}/auth", openrouter_base())).map_err(|e| e.to_string())?;
+    page.query_pairs_mut()
+        .append_pair("callback_url", &back)
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &state)
+        .append_pair("key_label", "Catbot");
+    *OPENROUTER_ASK.lock().expect("openrouter lock") = Some(OpenRouterAsk { state, verifier });
+    let page = page.to_string();
+    crate::login::open_in_browser(&page);
+    set_work(app, "openrouter", json!({ "signingIn": true, "url": page }), None);
+    Ok(page)
+}
+
+/// The browser back from OpenRouter: the code is traded for a key, kept like a pasted one, and
+/// the tab says so.
+pub async fn openrouter_back(app: &Arc<App>, query: &std::collections::HashMap<String, String>) -> axum::response::Response {
+    use axum::response::{Html, IntoResponse};
+    let page = |status: StatusCode, said: &str| {
+        let html = format!(
+            "<!doctype html><meta charset=utf-8><title>Catbot</title><body style=\"font:16px system-ui;margin:4em auto;max-width:32em;text-align:center\"><h1>Catbot</h1><p>{said}</p></body>"
+        );
+        (status, Html(html)).into_response()
+    };
+    let asked = OPENROUTER_ASK.lock().expect("openrouter lock").take();
+    let (Some(asked), Some(code)) = (asked, query.get("code").filter(|c| !c.is_empty())) else {
+        return page(StatusCode::BAD_REQUEST, "No OpenRouter log-in is under way. Start it again from Catbot.");
+    };
+    if query.get("state").map(String::as_str) != Some(asked.state.as_str()) {
+        set_work(app, "openrouter", json!({ "problem": "The log-in came back from somewhere else, so Catbot ignored it. Try again." }), None);
+        app.hub.send(json!({ "kind": "engines" }));
+        return page(StatusCode::BAD_REQUEST, "This doesn't match the log-in Catbot started. Try again from Catbot.");
+    }
+    let traded = async {
+        let answer = reqwest::Client::new()
+            .post(format!("{}/api/v1/auth/keys", openrouter_base()))
+            .json(&json!({ "code": code, "code_verifier": asked.verifier, "code_challenge_method": "S256" }))
+            .timeout(std::time::Duration::from_secs(30))
+            .send()
+            .await
+            .map_err(|e| format!("couldn't reach OpenRouter: {e}"))?;
+        let status = answer.status();
+        let body: Value = answer.json().await.unwrap_or(Value::Null);
+        match body["key"].as_str() {
+            Some(key) if status.is_success() => engines::check_key(key),
+            _ => Err(format!("OpenRouter said no ({status})")),
+        }
+    };
+    match traded.await {
+        Ok(key) => {
+            let saved = app.with_store(|store| store.set_engine_key("openrouter", &key, None));
+            if saved.is_none() {
+                set_work(app, "openrouter", json!({ "problem": "Catbot couldn't keep the key." }), None);
+                app.hub.send(json!({ "kind": "engines" }));
+                return page(StatusCode::INTERNAL_SERVER_ERROR, "Catbot got a key but couldn't keep it.");
+            }
+            super::health::works(app, "openrouter");
+            set_work(app, "openrouter", Value::Null, None);
+            eprintln!("catbot: logged in to OpenRouter");
+            app.hub.send(json!({ "kind": "engines" }));
+            page(StatusCode::OK, "Catbot is connected to OpenRouter. You can close this tab.")
+        }
+        Err(problem) => {
+            set_work(app, "openrouter", json!({ "problem": format!("The OpenRouter log-in didn't finish: {problem}") }), None);
+            app.hub.send(json!({ "kind": "engines" }));
+            page(StatusCode::BAD_GATEWAY, "The log-in didn't finish. Go back to Catbot and try again.")
+        }
+    }
+}
+
 fn work(app: &App, id: &str) -> Value {
     app.agent_work.lock().expect("agent work lock").get(id).map(|(state, _)| state.clone()).unwrap_or(Value::Null)
 }
@@ -347,7 +591,10 @@ fn describe(app: &App, engine: &Engine) -> Value {
         "installed": installed,
         "signedIn": signed_in,
         "download": engine.download.filter(|_| engines::asset(engine).is_some()).map(|d| json!({ "version": d.version, "size": d.size })),
-        "signsInHere": engines::agent_sign_in(engine).is_some(),
+        "signsInHere": engines::agent_sign_in(engine).is_some() || engines::cli_sign_in(engine).is_some(),
+        // Catbot can install it (the maker's line) and sign it in itself (stage 29.7).
+        "quickInstall": engine.download.is_none() && install_line(engine).is_some(),
+        "quickSignIn": engines::agent_sign_in(engine).is_some() || engines::cli_sign_in(engine).is_some() || engine.id == "openrouter",
         "signInWith": engines::sign_in_with(engine),
         "work": work(app, engine.id),
         "install": engine.install,

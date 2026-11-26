@@ -63,6 +63,9 @@ async fn listen(router: Router) -> SocketAddr {
 }
 
 async fn setup() -> Setup {
+    // Nothing a test does opens a real browser: sign-in pages go to a program that does nothing.
+    // SAFETY: every test sets the same value.
+    unsafe { std::env::set_var("CATBOT_OPEN_WITH", "true") };
     let reference = listen(reference_server()).await;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("home")).unwrap();
@@ -944,6 +947,135 @@ async fn a_bot_on_a_chat_api_uses_its_tools_with_approval() {
     assert_eq!(s.away(Some(&key), "PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-other" }))).await.0, 404);
     let (_, forgot) = s.call("DELETE", "/api/engines/openai/key", None).await;
     assert_eq!(forgot["engine"]["ready"], false);
+}
+
+#[tokio::test]
+async fn an_ai_program_is_installed_and_signed_in_with_one_button() {
+    // Kimi Code, as a stand-in: the "installer" writes a program whose login prints a page and a
+    // code, and finishes once the browser side (here, a file) says yes.
+    let bin = tempfile::tempdir().unwrap();
+    let program = bin.path().join("kimi");
+    let approved = bin.path().join("approved");
+    let fake = format!(
+        "#!/bin/sh\nif [ \"$1\" = login ]; then echo 'Visit https://auth.kimi.example/device to sign in' >&2; echo 'and enter code: KMQ4-7XRT' >&2; while [ ! -f {approved} ]; do sleep 0.1; done; echo 'Logged in.'; exit 0; fi\nexit 1\n",
+        approved = approved.display()
+    );
+    let script = bin.path().join("fake-kimi");
+    std::fs::write(&script, fake).unwrap();
+    let install = format!("echo Downloading kimi; cp {} {} && chmod +x {}", script.display(), program.display(), program.display());
+    // SAFETY: only this test reads these variables.
+    unsafe {
+        std::env::set_var("CATBOT_AGENT_KIMI", &program);
+        std::env::set_var("CATBOT_INSTALL_KIMI", &install);
+    }
+
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let kimi = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "kimi").unwrap().clone();
+    let (_, list) = s.call("GET", "/api/engines", None).await;
+    let before = kimi(&list);
+    assert_eq!((before["installed"].as_bool(), before["quickInstall"].as_bool(), before["quickSignIn"].as_bool()), (Some(false), Some(true), Some(true)));
+    assert_eq!(before["signInWith"], "Kimi");
+
+    let (status, _) = s.call("POST", "/api/engines/kimi/install", Some(json!({ "thenSignIn": true }))).await;
+    assert_eq!(status, 200);
+    // Installed, then straight on to the sign-in: the page and the code are shown.
+    let signing = loop {
+        until(&mut events, "engines", |f| f["kind"] == "engines").await;
+        let (_, list) = s.call("GET", "/api/engines", None).await;
+        let now = kimi(&list);
+        assert!(now["work"]["problem"].is_null(), "{}", now["work"]);
+        if now["work"]["signingIn"] == true {
+            break now;
+        }
+    };
+    assert_eq!(signing["installed"], true);
+    assert_eq!(signing["work"]["url"], "https://auth.kimi.example/device");
+    assert_eq!(signing["work"]["code"], "KMQ4-7XRT");
+
+    // Signed in at the page: the program finishes, and Catbot notes it.
+    std::fs::write(&approved, "yes").unwrap();
+    let done = loop {
+        until(&mut events, "engines", |f| f["kind"] == "engines").await;
+        let (_, list) = s.call("GET", "/api/engines", None).await;
+        let now = kimi(&list);
+        if now["work"].is_null() {
+            break now;
+        }
+    };
+    assert_eq!((done["signedIn"].as_bool(), done["ready"].as_bool()), (Some(true), Some(true)));
+
+    // A login that fails says why, and points to the terminal.
+    std::fs::write(&program, "#!/bin/sh\necho 'login refused: network down' >&2; exit 3\n").unwrap();
+    s.call("POST", "/api/engines/kimi/sign-in", None).await;
+    let failed = loop {
+        let (_, list) = s.call("GET", "/api/engines", None).await;
+        let now = kimi(&list);
+        if !now["work"]["problem"].is_null() {
+            break now;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    };
+    let problem = failed["work"]["problem"].as_str().unwrap();
+    assert!(problem.contains("network down") && problem.contains("Terminal"), "{problem}");
+}
+
+#[tokio::test]
+async fn openrouter_logs_in_through_its_page_and_keeps_the_key() {
+    use base64::Engine as _;
+    use sha2::Digest as _;
+    // OpenRouter, as a stand-in: it hands out a key for the code only with the right verifier.
+    let challenge = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let expected = challenge.clone();
+    let fake = Router::new().route(
+        "/api/v1/auth/keys",
+        post(move |axum::Json(body): axum::Json<Value>| {
+            let expected = expected.clone();
+            async move {
+                let verifier = body["code_verifier"].as_str().unwrap_or_default();
+                let made = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(verifier.as_bytes()));
+                if body["code"] == "the-code" && made == *expected.lock().unwrap() && body["code_challenge_method"] == "S256" {
+                    (axum::http::StatusCode::OK, axum::Json(json!({ "key": "sk-or-v1-fromthelogin1234" })))
+                } else {
+                    (axum::http::StatusCode::FORBIDDEN, axum::Json(json!({ "error": "no" })))
+                }
+            }
+        }),
+    );
+    let at = listen(fake).await;
+    // SAFETY: only this test reads this variable.
+    unsafe { std::env::set_var("CATBOT_OPENROUTER_AUTH", format!("http://{at}")) };
+
+    let s = setup().await;
+    let (status, started) = s.call("POST", "/api/engines/openrouter/log-in", None).await;
+    assert_eq!(status, 200);
+    assert_eq!(started["engine"]["work"]["signingIn"], true);
+    let page = reqwest::Url::parse(started["url"].as_str().unwrap()).unwrap();
+    let ask: std::collections::HashMap<String, String> = page.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    assert_eq!(page.path(), "/auth");
+    assert_eq!((ask["code_challenge_method"].as_str(), ask["key_label"].as_str()), ("S256", "Catbot"));
+    let back = reqwest::Url::parse(&ask["callback_url"]).unwrap();
+    assert_eq!((back.host_str(), back.path()), (Some("localhost"), "/api/engines/openrouter/logged-in"));
+    *challenge.lock().unwrap() = ask["code_challenge"].clone();
+
+    // Something else coming back with a code is turned away.
+    let (status, _) = s.call("GET", "/api/engines/openrouter/logged-in?code=the-code&state=not-ours", None).await;
+    assert_eq!(status, 400);
+    // The browser, back from OpenRouter (after starting again): the key is kept.
+    let (_, started) = s.call("POST", "/api/engines/openrouter/log-in", None).await;
+    let page = reqwest::Url::parse(started["url"].as_str().unwrap()).unwrap();
+    let ask: std::collections::HashMap<String, String> = page.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    *challenge.lock().unwrap() = ask["code_challenge"].clone();
+    let (status, _) = s.call("GET", &format!("/api/engines/openrouter/logged-in?code=the-code&state={}", ask["state"]), None).await;
+    assert_eq!(status, 200);
+    let (_, list) = s.call("GET", "/api/engines", None).await;
+    let openrouter = list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "openrouter").unwrap().clone();
+    assert_eq!((openrouter["ready"].as_bool(), openrouter["keyHint"].as_str()), (Some(true), Some("…1234")));
+    assert!(openrouter["work"].is_null());
+    // Used once: the same answer again finds no log-in under way.
+    let (status, _) = s.call("GET", &format!("/api/engines/openrouter/logged-in?code=the-code&state={}", ask["state"]), None).await;
+    assert_eq!(status, 400);
 }
 
 #[tokio::test]

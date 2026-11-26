@@ -670,6 +670,12 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
             Ok(body) => respond(handoffs::route(&app, Some(body))),
             Err(err) => respond(Err(err)),
         },
+        // The browser back from OpenRouter's log-in (stage 29.7): a page, not JSON.
+        ["api", "engines", "openrouter", "logged-in"] if method == Method::GET => {
+            let query: std::collections::HashMap<String, String> =
+                ["code", "state"].into_iter().filter_map(|name| Some((name.to_string(), urlencoding_decode(query_param(&req, name)?)))).collect();
+            engines::openrouter_back(&app, &query).await
+        }
         ["api", "engines", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
             let rest: Vec<&str> = rest.iter().map(String::as_str).collect();

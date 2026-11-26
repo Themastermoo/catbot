@@ -13,6 +13,7 @@ pub mod claude;
 pub mod codex;
 pub mod console;
 pub mod engines;
+pub mod login;
 pub mod memory;
 pub mod pi;
 pub mod proxy;

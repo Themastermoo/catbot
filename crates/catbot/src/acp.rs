@@ -601,7 +601,10 @@ pub async fn sign_in(
     let watcher = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            if let Some(url) = line.trim().strip_prefix(LINK_PREFIX).map(str::trim).filter(|u| u.starts_with("https://"))
+            // Antigravity's line; Gemini CLI prints Google's page among its own words (stage 29.7).
+            let printed = line.trim().strip_prefix(LINK_PREFIX).map(|u| u.trim().to_string()).filter(|u| u.starts_with("https://"));
+            let google = || (engine.id == "gemini").then(|| crate::login::link_in(&line)).flatten().filter(|u| u.starts_with("https://accounts.google.com/"));
+            if let Some(url) = printed.or_else(google)
                 && let Some(tx) = link_tx.lock().expect("link lock").take()
             {
                 let _ = tx.send((url.to_string(), None));

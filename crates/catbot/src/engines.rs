@@ -129,7 +129,8 @@ pub const MUSE_DOWNLOAD: Download = Download {
 /// Google's page, Muse Code with a code typed at Meta's.
 pub fn agent_sign_in(engine: &Engine) -> Option<&'static str> {
     match engine.id {
-        "antigravity" => Some("oauth-personal"),
+        // Gemini CLI signs in with Google the way Antigravity (built on it) does (stage 29.7).
+        "antigravity" | "gemini" => Some("oauth-personal"),
         MUSE => Some("muse-login"),
         _ => None,
     }
@@ -138,20 +139,54 @@ pub fn agent_sign_in(engine: &Engine) -> Option<&'static str> {
 /// Whose account an engine that signs in through Catbot signs in with, for its button.
 pub fn sign_in_with(engine: &Engine) -> Option<&'static str> {
     match engine.id {
-        "antigravity" => Some("Google"),
+        "antigravity" | "gemini" => Some("Google"),
         MUSE => Some("Meta"),
+        CLAUDE => Some("Claude"),
+        "kimi" => Some("Kimi"),
+        "grok-cli" => Some("xAI"),
+        "copilot" => Some("GitHub"),
+        "cursor" => Some("Cursor"),
+        "kiro" => Some("Kiro"),
         _ => None,
     }
 }
 
-/// Notes that Catbot signed an engine in (Muse may keep its sign-in in the system's keychain,
-/// where Catbot can't look).
+/// The program's own login command, for the programs that sign in by themselves without a
+/// terminal: they print the page to open (and a code), or open it, and finish once it's done
+/// (stage 29.7, `login.rs`).
+pub fn cli_sign_in(engine: &Engine) -> Option<&'static [&'static str]> {
+    match engine.id {
+        CLAUDE => Some(&["auth", "login"]),
+        "kimi" | "grok-cli" | "copilot" | "cursor" | "kiro" => Some(&["login"]),
+        _ => None,
+    }
+}
+
+/// Whether its login opens the browser itself (so Catbot doesn't open the page twice).
+pub fn opens_its_own_page(engine: &Engine) -> bool {
+    engine.id == CLAUDE
+}
+
+/// The maker's install line, when Catbot can run it here itself (stage 29.7): an npm, curl or
+/// PowerShell line, for a program Catbot doesn't download on its own.
+pub fn quick_install(engine: &Engine) -> Option<String> {
+    if engine.download.is_some() || !matches!(engine.kind, Kind::Agent | Kind::Claude | Kind::Codex | Kind::Pi) {
+        return None;
+    }
+    let line = terminal_command(engine.install).filter(|c| runs_here(c))?;
+    let known = line.starts_with("npm install -g ") || line.starts_with("curl ") || line.starts_with("powershell ");
+    known.then_some(line)
+}
+
+/// Notes that Catbot signed an engine in, for programs whose own sign-in Catbot can't see (Muse
+/// may keep it in the system's keychain; most keep it in their own way).
 pub fn note_signed_in(engine: &Engine) {
-    if engine.id == MUSE
-        && let Some(dir) = agents_dir().map(|d| d.join(MUSE))
+    if engine.id != CLAUDE
+        && engine.id != CODEX
+        && let Some(dir) = agents_dir().map(|d| d.join(engine.id))
     {
         let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(dir.join("signed-in"), "Catbot signed Muse Code in here.\n");
+        let _ = std::fs::write(dir.join("signed-in"), format!("Catbot signed {} in here.\n", engine.name));
     }
 }
 
@@ -599,7 +634,8 @@ pub fn agent_signed_in(engine: &Engine) -> Option<bool> {
             let noted = agents_dir().is_some_and(|d| d.join(MUSE).join("signed-in").is_file());
             (keyed || noted || config.join("muse/auth.json").is_file()).then_some(true)
         }
-        _ => None,
+        // A program Catbot signed in itself (stage 29.7); else Catbot can't tell.
+        _ => agents_dir().is_some_and(|d| d.join(engine.id).join("signed-in").is_file()).then_some(true),
     }
 }
 
@@ -626,12 +662,9 @@ pub fn find_program(program: &str) -> Option<std::path::PathBuf> {
     if given.is_absolute() {
         return given.is_file().then(|| given.to_path_buf());
     }
-    let home = crate::store::user_home();
     let mut dirs: Vec<std::path::PathBuf> = std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default();
-    dirs.extend([home.join(".local/bin"), home.join(".npm-global/bin"), home.join("bin"), home.join(".bun/bin"), home.join(".cargo/bin")]);
-    if let Some(appdata) = std::env::var_os("APPDATA") {
-        dirs.push(std::path::PathBuf::from(appdata).join("npm"));
-    }
+    // The installers' folders (nvm's newest Node too, stage 29.7).
+    dirs.extend(crate::login::tool_dirs());
     let names: Vec<String> = if cfg!(windows) {
         ["exe", "cmd", "bat"].iter().map(|ext| format!("{program}.{ext}")).collect()
     } else {
