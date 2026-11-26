@@ -1,5 +1,6 @@
-//! The Windows app's own Catbot: `catbot-server.exe`, beside the app, started when the app
-//! opens (unless one is already answering) and stopped when it closes.
+//! The app's own Catbot: `catbot-server(.exe)`, beside the app (the Windows app, and the Linux
+//! packages since stage 29.2), started when the app opens (unless one is already answering) and
+//! stopped when the app quits. Closing the window only hides it to the tray (`tray.rs`).
 //!
 //! The server is started with `--stop-with-input` and its input piped from here: when the app
 //! ends, for any reason, the pipe closes and the server stops. Its messages go to
@@ -91,7 +92,7 @@ fn answering() -> bool {
 }
 
 /// `catbot-server(.exe)` in the app's own folder.
-fn server_program() -> Option<PathBuf> {
+pub fn server_program() -> Option<PathBuf> {
     let dir = std::env::current_exe().ok()?.parent()?.to_path_buf();
     let name = if cfg!(windows) { "catbot-server.exe" } else { "catbot-server" };
     let program = dir.join(name);
@@ -119,8 +120,15 @@ fn spawn(program: &PathBuf) -> std::io::Result<Child> {
 }
 
 fn log_file() -> std::io::Result<std::fs::File> {
-    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("Catbot");
+    // Catbot's data folder (the server's `store::default_home`).
+    let dir = if let Some(home) = std::env::var_os("CATBOT_HOME") {
+        PathBuf::from(home)
+    } else if let Some(local) = std::env::var_os("LOCALAPPDATA").filter(|d| !d.is_empty()) {
+        PathBuf::from(local).join("Catbot")
+    } else {
+        let data = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()).map(PathBuf::from);
+        data.unwrap_or_else(|| std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join(".local").join("share")).join("catbot")
+    };
     std::fs::create_dir_all(&dir)?;
     std::fs::OpenOptions::new().create(true).append(true).open(dir.join("server.log"))
 }

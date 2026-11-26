@@ -60,6 +60,8 @@ mod pets;
 mod pet_tops;
 #[cfg(feature = "desktop")]
 mod pet_window;
+#[cfg(feature = "desktop")]
+mod tray;
 
 use dioxus::prelude::*;
 
@@ -84,18 +86,34 @@ fn main() {
             pet_window::launch();
             return;
         }
+        // The app that runs its own Catbot keeps to the tray (stage 29.2): one at a time, so
+        // opening it again shows the one already running.
+        let tray = tray::wanted();
+        if tray && tray::hand_to_running() {
+            return;
+        }
         // Opening Catbot sends any pets home.
         pet_window::bring_home();
-        use dioxus::desktop::{Config, LogicalSize, WindowBuilder};
-        let window = WindowBuilder::new().with_title("Catbot").with_inner_size(LogicalSize::new(1280.0, 840.0)).with_min_inner_size(LogicalSize::new(720.0, 480.0));
+        use dioxus::desktop::{Config, LogicalSize, WindowBuilder, WindowCloseBehaviour};
+        let window = WindowBuilder::new()
+            .with_title("Catbot")
+            .with_inner_size(LogicalSize::new(1280.0, 840.0))
+            .with_min_inner_size(LogicalSize::new(720.0, 480.0))
+            // Started at login: in the tray until opened.
+            .with_visible(!(tray && tray::hidden_start()));
         let mut config = Config::new().with_window(window).with_menu(None);
+        if tray {
+            tray::listen();
+            config = config.with_close_behaviour(WindowCloseBehaviour::WindowHides);
+        }
         // The window's icon, built into the program. (Under Wayland the taskbar takes its icon from
         // the app's menu entry instead, which stage 7.4 installs.)
         match dioxus::desktop::icon_from_memory(include_bytes!("../assets/icon/catbot-256.png")) {
             Ok(icon) => config = config.with_icon(icon),
             Err(err) => eprintln!("catbot: couldn't load the window icon: {err}"),
         }
-        // The Windows app starts its own Catbot, which stops when the app closes.
+        // The Windows app and the Linux packages start their own Catbot, which stops when the
+        // app quits (from the tray).
         local::start();
         dioxus::LaunchBuilder::desktop().with_cfg(config).launch(Root);
     }
@@ -121,6 +139,10 @@ const NEW_CHAT_KEY: &str = r#"
 
 #[component]
 fn Root() -> Element {
+    #[cfg(feature = "desktop")]
+    if tray::wanted() {
+        tray::use_tray();
+    }
     let looks = use_context_provider(|| Signal::new(looks::load()));
     use_hook(move || {
         looks::apply_skin(&looks.peek().skin);

@@ -117,16 +117,19 @@ fn when(at: &str) -> String {
         .unwrap_or_else(|_| at.to_string())
 }
 
-/// Starts the current version until it closes for good; returns the exit code.
-pub fn run(dir: &Path, home: &Path, ask: &mut impl Ask) -> i32 {
-    for _ in 0..10 {
+/// Starts the current version until it closes for good; returns the exit code. `args` go to the
+/// first start only (`--hidden` from starting at login, stage 29.2); a restart into another
+/// version opens its window.
+pub fn run(dir: &Path, home: &Path, args: &[String], ask: &mut impl Ask) -> i32 {
+    for attempt in 0..10 {
         let kept = read_json(&dir.join("versions.json")).unwrap_or_else(|| json!({}));
         let Some(version) = current(dir, &kept) else {
             ask.tell(&format!("Catbot isn't installed properly: there's no version to start in {}.\n\nInstall it again from the zip (Install.cmd).", dir.join("versions").display()));
             return 1;
         };
         let program = dir.join("versions").join(&version).join("Catbot.exe");
-        let started = Command::new(&program).current_dir(program.parent().unwrap_or(dir)).env("CATBOT_INSTALL_DIR", dir).status();
+        let first: &[String] = if attempt == 0 { args } else { &[] };
+        let started = Command::new(&program).args(first).current_dir(program.parent().unwrap_or(dir)).env("CATBOT_INSTALL_DIR", dir).status();
         let (code, err) = match &started {
             Ok(status) => (status.code(), None),
             Err(err) => (None, Some(err)),
@@ -259,7 +262,8 @@ mod dialogs {
 
 fn main() {
     let dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."));
-    let code = run(&dir, &home(), &mut dialogs::Boxes);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let code = run(&dir, &home(), &args, &mut dialogs::Boxes);
     std::process::exit(code);
 }
 
@@ -318,7 +322,7 @@ mod tests {
         let switch = dir.path().join("versions/0.2.0/Catbot.exe");
         let script = std::fs::read_to_string(&switch).unwrap().replace("exit ", "printf '{\"current\":\"0.3.0\"}' > \"$CATBOT_INSTALL_DIR/versions.json\"\nexit ");
         std::fs::write(&switch, script).unwrap();
-        assert_eq!(run(dir.path(), home.path(), &mut ask), 0);
+        assert_eq!(run(dir.path(), home.path(), &[], &mut ask), 0);
         assert_eq!(ran(dir.path()), ["0.2.0", "0.3.0"]);
         assert!(ask.asked.is_empty());
     }
@@ -329,7 +333,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         version(dir.path(), "0.2.0", &[3]);
         let mut ask = Script { answers: vec![], asked: vec![] };
-        assert_eq!(run(dir.path(), home.path(), &mut ask), 3, "no versions.json: the newest folder runs");
+        assert_eq!(run(dir.path(), home.path(), &[], &mut ask), 3, "no versions.json: the newest folder runs");
         assert!(ask.asked.is_empty(), "nothing being tried, nothing to ask");
     }
 
@@ -344,7 +348,7 @@ mod tests {
 
         // Try again, then close: nothing changes.
         let mut ask = Script { answers: vec![Answer::TryAgain, Answer::Close], asked: vec![] };
-        assert_eq!(run(dir.path(), home.path(), &mut ask), 1);
+        assert_eq!(run(dir.path(), home.path(), &[], &mut ask), 1);
         assert_eq!(ran(dir.path()), ["0.3.0", "0.3.0"]);
         assert!(ask.asked[0].contains("Catbot 0.3.0 didn't start: it closed with code 1"), "{}", ask.asked[0]);
         assert!(ask.asked[0].contains("Your chats stay as they are."), "same storage format");
@@ -353,7 +357,7 @@ mod tests {
         // Go back: 0.2.0 is current, and the failure is noted for Settings.
         std::fs::write(dir.path().join("versions/0.3.0/codes"), "1\n").unwrap();
         let mut ask = Script { answers: vec![Answer::GoBack], asked: vec![] };
-        assert_eq!(run(dir.path(), home.path(), &mut ask), 0);
+        assert_eq!(run(dir.path(), home.path(), &[], &mut ask), 0);
         assert_eq!(ran(dir.path())[2..], ["0.3.0", "0.2.0"]);
         let now = kept(dir.path());
         assert_eq!((now["current"].as_str(), now["previous"].as_str(), now["trying"].is_null()), (Some("0.2.0"), Some("0.3.0"), true), "{now}");
@@ -377,7 +381,7 @@ mod tests {
         std::fs::write(copies.join("a.db"), "before").unwrap();
         write_json(&copies.join("a.json"), &json!({ "file": copies.join("a.db"), "store": 12, "at": "2026-11-25T21:10:00Z" })).unwrap();
         let mut ask = Script { answers: vec![Answer::GoBack], asked: vec![] };
-        assert_eq!(run(dir.path(), home.path(), &mut ask), 0);
+        assert_eq!(run(dir.path(), home.path(), &[], &mut ask), 0);
         assert!(ask.asked[0].contains("set aside, not deleted"), "{}", ask.asked[0]);
         let restore = read_json(&home.path().join("updates/restore.json")).expect("asked for the copy");
         assert_eq!(restore["file"], json!(copies.join("a.db")));

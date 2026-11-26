@@ -38,13 +38,34 @@ fn file() -> Option<std::path::PathBuf> {
     return Some(std::path::PathBuf::from("/data/data/com.moo.catbot/files/catbot-link.json"));
     #[cfg(windows)]
     return std::env::var_os("LOCALAPPDATA").map(|dir| std::path::PathBuf::from(dir).join("Catbot").join("home-link.json"));
+    // The Linux packages (stage 29.2) run their own Catbot like the Windows app.
     #[cfg(not(any(target_os = "android", windows)))]
-    return None;
+    return has_own().then(|| {
+        let data = std::env::var_os("XDG_DATA_HOME").filter(|d| !d.is_empty()).map(std::path::PathBuf::from);
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_default();
+        data.unwrap_or_else(|| home.join(".local").join("share")).join("catbot").join("home-link.json")
+    });
 }
 
-/// Whether this app runs its own Catbot beside the link to home (the Windows app).
+/// Whether this app runs its own Catbot beside the link to home: the Windows app, the phone,
+/// and the Linux packages (which carry `catbot-server` beside the app, stage 29.2). The app built
+/// in a repo connects to the Catbot already running there instead.
 pub fn has_own() -> bool {
-    cfg!(all(windows, not(target_arch = "wasm32"))) || cfg!(target_os = "android") || std::env::var_os("CATBOT_PLACES").is_some_and(|v| v == "1")
+    cfg!(all(windows, not(target_arch = "wasm32")))
+        || cfg!(target_os = "android")
+        || std::env::var_os("CATBOT_PLACES").is_some_and(|v| v == "1")
+        || packaged_linux()
+}
+
+#[cfg(all(target_os = "linux", not(target_arch = "wasm32")))]
+fn packaged_linux() -> bool {
+    static PACKAGED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PACKAGED.get_or_init(|| crate::local::server_program().is_some())
+}
+
+#[cfg(not(all(target_os = "linux", not(target_arch = "wasm32"))))]
+fn packaged_linux() -> bool {
+    false
 }
 
 /// The phone app (stage 26): its own Catbot runs inside it, with only the chat APIs, and "Home"
