@@ -23,6 +23,7 @@ use crate::claude::PermissionMode;
 pub const CLAUDE: &str = "claude";
 /// Codex on a ChatGPT plan.
 pub const CODEX: &str = "codex";
+pub const CHATGPT: &str = "chatgpt";
 pub const PI: &str = "pi";
 pub const MUSE: &str = "muse-code";
 
@@ -39,6 +40,8 @@ pub enum Kind {
     Codex,
     /// Pi, over its own RPC mode, with Catbot's extension asking for approvals.
     Pi,
+    /// A ChatGPT plan Catbot signs in to itself ("Continue with ChatGPT", stage 29.10), run on Codex.
+    Plan,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -170,7 +173,7 @@ pub fn opens_its_own_page(engine: &Engine) -> bool {
 /// The maker's install line, when Catbot can run it here itself (stage 29.7): an npm, curl or
 /// PowerShell line, for a program Catbot doesn't download on its own.
 pub fn quick_install(engine: &Engine) -> Option<String> {
-    if engine.download.is_some() || !matches!(engine.kind, Kind::Agent | Kind::Claude | Kind::Codex | Kind::Pi) {
+    if engine.download.is_some() || !matches!(engine.kind, Kind::Agent | Kind::Claude | Kind::Codex | Kind::Pi | Kind::Plan) {
         return None;
     }
     let line = terminal_command(engine.install).filter(|c| runs_here(c))?;
@@ -360,6 +363,19 @@ pub const ALL: &[Engine] = &[
         program: "codex",
         install: "npm install -g @openai/codex",
         sign_in: "codex login",
+        ..BLANK
+    },
+    // Stage 29.10: the person's ChatGPT plan through Catbot's own sign-in, as OpenMausBot does;
+    // Codex runs the turns, pointed at the plan.
+    Engine {
+        id: CHATGPT,
+        name: "ChatGPT (plan)",
+        kind: Kind::Plan,
+        key_page: "https://chatgpt.com",
+        models: &[("", "Default")],
+        program: "codex",
+        install: "npm install -g @openai/codex",
+        sign_in: "Continue with ChatGPT in Settings › AI",
         ..BLANK
     },
     Engine {

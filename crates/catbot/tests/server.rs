@@ -1078,6 +1078,122 @@ async fn openrouter_logs_in_through_its_page_and_keeps_the_key() {
     assert_eq!(status, 400);
 }
 
+/// A P-256 key for the stand-in OpenAI's identity tokens (made for this test; it signs nothing else).
+const TEST_EC_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQg2vDe0oSrCtzjAswG
+3q3hgJGyTY8A5iMsjcgGNvHB1myhRANCAAR2ILH3UJeDTNAh3f87a0tc0VtR21VZ
+oI9nPny6ZBCZFTh+qEW4S5gu1tuiW+RUsPPF2aDt0m+a8ToOt6TRzuwF
+-----END PRIVATE KEY-----
+";
+
+#[tokio::test]
+async fn continue_with_chatgpt_signs_in_lists_the_plan_s_models_and_signs_out() {
+    // OpenAI's sign-in, as a stand-in: it registers Catbot as client-123, trades the code for
+    // tokens with an identity token it signs, lists models and takes the token back.
+    let nonce = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let revoked = std::sync::Arc::new(std::sync::Mutex::new(false));
+    let fake_at = {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        listener.local_addr().unwrap()
+    };
+    let base = format!("http://{fake_at}");
+    let (n2, r2, b2, b3) = (nonce.clone(), revoked.clone(), base.clone(), base.clone());
+    let fake = Router::new()
+        .route("/.well-known/jwks.json", get(|| async {
+            axum::Json(json!({ "keys": [{ "kty": "EC", "crv": "P-256", "kid": "k1", "alg": "ES256", "use": "sig",
+                "x": "diCx91CXg0zQId3_O2tLXNFbUdtVWaCPZz58umQQmRU", "y": "OH6oRbhLmC7W26Jb5FSw88XZoO3Sb5rxOg63pNHO7AU" }] }))
+        }))
+        .route("/.well-known/openid-configuration", get(move || { let b = b3.clone(); async move { axum::Json(json!({ "issuer": b, "revocation_endpoint": format!("{b}/revoke") })) } }))
+        .route("/revoke", post(move || { let r = r2.clone(); async move { *r.lock().unwrap() = true; "" } }))
+        .route("/api/accounts/oauth/token", post(move |body: String| {
+            let (nonce, base) = (n2.clone(), b2.clone());
+            async move {
+                let form: std::collections::HashMap<String, String> = body.split('&').filter_map(|kv| kv.split_once('=')).map(|(k, v)| (k.to_string(), urlencoding_decode(v))).collect();
+                if form.get("code").map(String::as_str) != Some("the-code") || form.get("client_id").map(String::as_str) != Some("client-123") || form.get("code_verifier").is_none_or(|v| v.len() < 40) {
+                    return (axum::http::StatusCode::BAD_REQUEST, axum::Json(json!({ "error": "invalid_grant" })));
+                }
+                let now = chrono::Utc::now().timestamp();
+                let claims = json!({ "iss": base, "aud": "client-123", "sub": "user-1", "email": "moo@example.com", "nonce": *nonce.lock().unwrap(), "iat": now, "exp": now + 600 });
+                let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+                header.kid = Some("k1".into());
+                let id = jsonwebtoken::encode(&header, &claims, &jsonwebtoken::EncodingKey::from_ec_pem(TEST_EC_KEY.as_bytes()).unwrap()).unwrap();
+                (axum::http::StatusCode::OK, axum::Json(json!({ "access_token": "at-1", "token_type": "Bearer", "expires_in": 3600, "id_token": id,
+                    "scope": "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct", "refresh_token": "rt-1" })))
+            }
+        }))
+        .route("/v1/models", get(|headers: axum::http::HeaderMap| async move {
+            if headers.get("authorization").and_then(|v| v.to_str().ok()) != Some("Bearer at-1") {
+                return (axum::http::StatusCode::UNAUTHORIZED, axum::Json(json!({})));
+            }
+            (axum::http::StatusCode::OK, axum::Json(json!({ "models": [{ "slug": "gpt-6", "display_name": "GPT-6", "visibility": "list" }, { "slug": "secret", "display_name": "Hidden", "visibility": "hide" }] })))
+        }));
+    let listener = tokio::net::TcpListener::bind(fake_at).await.unwrap();
+    tokio::spawn(async move { axum::serve(listener, fake).await.unwrap() });
+    // SAFETY: only this test reads this variable.
+    unsafe { std::env::set_var("CATBOT_CHATGPT_AUTH", &base) };
+
+    let s = setup().await;
+    let (_, account) = s.call("GET", "/api/engines/chatgpt/account", None).await;
+    assert_eq!(account["signedIn"], false);
+    let (status, started) = s.call("POST", "/api/engines/chatgpt/sign-in", None).await;
+    assert_eq!(status, 200, "{started}");
+    let page = reqwest::Url::parse(started["url"].as_str().unwrap()).unwrap();
+    let ask: std::collections::HashMap<String, String> = page.query_pairs().map(|(k, v)| (k.into_owned(), v.into_owned())).collect();
+    assert_eq!(page.path(), "/api/accounts/authorize");
+    assert_eq!((ask["client_id"].as_str(), ask["agent_name_hint"].as_str(), ask["code_challenge_method"].as_str()), ("dynamic_agent_client", "catbot", "S256"));
+    assert!(ask["scope"].contains("chatgpt.tokens.use.direct") && ask["ext_agent_host_id"].starts_with("urn:uuid:"));
+    *nonce.lock().unwrap() = ask["nonce"].clone();
+    let back = ask["redirect_uri"].clone();
+    assert!(back.starts_with("http://127.0.0.1:") && back.ends_with("/auth/callback"));
+
+    // A stray visit with the wrong state is turned away; the browser's own finishes the sign-in.
+    let client = reqwest::Client::new();
+    assert_eq!(client.get(format!("{back}?code=the-code&state=wrong&client_id=client-123")).send().await.unwrap().status(), 400);
+    assert_eq!(client.get(format!("{back}?code=the-code&state={}&client_id=client-123", urlencode(&ask["state"]))).send().await.unwrap().status(), 200);
+    let signed = loop {
+        let (_, account) = s.call("GET", "/api/engines/chatgpt/account", None).await;
+        if account["signedIn"] == true || account["signIn"]["phase"] == "failed" {
+            break account;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    };
+    assert_eq!((signed["signedIn"].as_bool(), signed["email"].as_str()), (Some(true), Some("moo@example.com")), "{signed}");
+    let (_, models) = s.call("GET", "/api/engines/chatgpt/models", None).await;
+    assert_eq!(models["models"], json!(["gpt-6"]));
+    // Nothing secret reaches the interface.
+    let (_, list) = s.call("GET", "/api/engines", None).await;
+    let shown = list.to_string();
+    assert!(!shown.contains("at-1") && !shown.contains("rt-1"));
+    let plan = list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "chatgpt").unwrap().clone();
+    assert_eq!((plan["kind"].as_str(), plan["account"]["signedIn"].as_bool()), (Some("plan"), Some(true)));
+
+    let (_, out) = s.call("POST", "/api/engines/chatgpt/sign-out", None).await;
+    assert_eq!(out["signedIn"], false);
+    assert!(out["warning"].is_null() && *revoked.lock().unwrap(), "OpenAI was told");
+}
+
+fn urlencode(text: &str) -> String {
+    text.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+fn urlencoding_decode(text: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len()
+            && let Ok(v) = u8::from_str_radix(&text[i + 1..i + 3], 16)
+        {
+            out.push(v);
+            i += 3;
+            continue;
+        }
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[tokio::test]
 async fn a_bot_on_an_agent_program_streams_asks_and_resumes() {
     // The stand-in agent, as Grok CLI.

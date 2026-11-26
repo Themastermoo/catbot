@@ -167,6 +167,7 @@ pub fn EngineSetup(engine: Value) -> Element {
         Some("api") => rsx! { KeyBox { engine } },
         Some("agent") => rsx! { AgentBox { engine } },
         Some("codex") => rsx! { CodexBox { engine } },
+        Some("plan") => rsx! { PlanBox { engine } },
         Some("pi") => rsx! { PiBox { engine, listed: None } },
         // Claude Code (stage 29.7): installed and signed in by Catbot, unless it's ready.
         Some("claude") if engine["ready"] != true && engine["quickSignIn"] == true && crate::link::active().is_none() => rsx! { ManagedAgentBox { engine } },
@@ -543,6 +544,93 @@ fn ManagedAgentBox(engine: Value) -> Element {
             }
             if engine["kind"] != "claude" && engine["download"].is_null() {
                 ProgramPath { engine: engine.clone() }
+            }
+        }
+    }
+}
+
+/// The ChatGPT plan (stage 29.10), as OpenMausBot does it: Continue with ChatGPT opens OpenAI's
+/// page in the browser, where the person allows Catbot to use their plan; ChatGPT then lists
+/// "catbot" among the agents connected to it. Codex runs the turns, so it must be installed.
+#[component]
+fn PlanBox(engine: Value) -> Element {
+    let mut busy = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let mut warning = use_signal(|| None::<String>);
+    let account = engine["account"].clone();
+    let installed = engine["installed"] == true;
+    let signed_in = account["signedIn"] == true;
+    let flow = account["signIn"].clone();
+    let waiting = flow["phase"] == "waiting";
+    let at_home = crate::link::active().is_none();
+    let act = use_callback(move |(method, path): (&'static str, &'static str)| {
+        busy.set(true);
+        problem.set(None);
+        spawn(async move {
+            match api::call(method, path, None).await {
+                Ok(answer) => warning.set(answer["warning"].as_str().map(str::to_string)),
+                Err(err) => problem.set(Some(err)),
+            }
+            busy.set(false);
+        });
+    });
+    let reason = account["reason"].as_str().map(str::to_string).filter(|_| !signed_in && !waiting);
+    let ended = flow["message"].as_str().map(str::to_string).filter(|_| !waiting && flow["phase"] != "succeeded");
+    rsx! {
+        div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-agent": "chatgpt",
+            if !installed {
+                p { "Bots on your ChatGPT plan run on Codex, which isn't installed on this computer yet." }
+                if engine["quickInstall"] == true && at_home {
+                    button {
+                        r#type: "button",
+                        disabled: busy() || engine["work"]["installing"] == true,
+                        class: "mt-2 rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-50",
+                        onclick: move |_| act.call(("POST", "/api/engines/chatgpt/install")),
+                        if engine["work"]["installing"] == true { "Installing Codex…" } else { "Install Codex" }
+                    }
+                } else {
+                    Command { engine: engine.clone(), what: "install", text: str_of(&engine, "install") }
+                }
+            }
+            if signed_in {
+                p { "data-plan-signed-in": true,
+                    "Signed in to ChatGPT"
+                    if let Some(email) = account["email"].as_str() { " as " span { class: "font-medium", "{email}" } }
+                    ". Bots on it use your plan."
+                }
+                if at_home {
+                    button { r#type: "button", class: "{SMALL_BUTTON} mt-2", disabled: busy(), onclick: move |_| act.call(("POST", "/api/engines/chatgpt/sign-out")), "Sign out" }
+                }
+            } else if waiting {
+                p { "Allow Catbot on OpenAI's page in your browser, signed in with your ChatGPT account. Catbot finishes on its own." }
+                if let Some(url) = flow["url"].as_str() {
+                    a { href: "{url}", target: "_blank", rel: "noreferrer", class: "mt-1 block text-accent underline", "Open the page again" }
+                }
+                div { class: "mt-2 flex items-center gap-2",
+                    span { class: "flex-1 text-[12px] text-ink-tertiary", "Waiting for ChatGPT…" }
+                    button { r#type: "button", class: SMALL_BUTTON, onclick: move |_| act.call(("DELETE", "/api/engines/chatgpt/sign-in")), "Cancel" }
+                }
+            } else if at_home {
+                p { "Use your ChatGPT plan for bots: sign in once with your ChatGPT account. ChatGPT will list Catbot among the agents connected to it, where you can disconnect it any time." }
+                button {
+                    r#type: "button",
+                    "data-continue-chatgpt": true,
+                    disabled: busy(),
+                    class: "mt-2 rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-50",
+                    onclick: move |_| act.call(("POST", "/api/engines/chatgpt/sign-in")),
+                    if busy() { "Opening…" } else { "Continue with ChatGPT" }
+                }
+            } else {
+                p { class: "text-ink-secondary", "Sign in to ChatGPT from Catbot on the computer at home." }
+            }
+            if let Some(why) = ended.or(reason).filter(|r| !r.starts_with("Continue with ChatGPT in Settings")) {
+                p { class: "mt-1.5 text-[12px] text-ink-secondary", "{why}" }
+            }
+            if let Some(w) = warning() {
+                p { role: "status", class: "mt-1.5 text-[12px] text-warning", "{w}" }
+            }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "mt-1 text-[12px] text-danger", "{err}" }
             }
         }
     }

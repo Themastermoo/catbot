@@ -32,6 +32,40 @@ use crate::engines::{self, Engine, Kind};
 pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request, at_home: bool) -> Answer {
     match (method, rest) {
         (&Method::GET, []) => Ok((StatusCode::OK, json!({ "engines": list(app) }))),
+        // The ChatGPT plan (stage 29.10): who's signed in, Continue with ChatGPT, its models.
+        (&Method::GET, ["chatgpt", "account"]) => Ok((StatusCode::OK, app.chatgpt.snapshot())),
+        (&Method::POST, ["chatgpt", "sign-in"]) if at_home => {
+            let told = app.clone();
+            let url = app
+                .chatgpt
+                .start(move || {
+                    told.hub.send(json!({ "kind": "engines" }));
+                })
+                .await
+                .map_err(bad)?;
+            crate::login::open_in_browser(&url);
+            app.hub.send(json!({ "kind": "engines" }));
+            Ok((StatusCode::OK, json!({ "url": url, "account": app.chatgpt.snapshot() })))
+        }
+        (&Method::DELETE, ["chatgpt", "sign-in"]) if at_home => {
+            app.chatgpt.cancel();
+            app.hub.send(json!({ "kind": "engines" }));
+            Ok((StatusCode::OK, app.chatgpt.snapshot()))
+        }
+        (&Method::POST, ["chatgpt", "sign-out"]) if at_home => {
+            let confirmed = app.chatgpt.sign_out().await.map_err(bad)?;
+            app.hub.send(json!({ "kind": "engines" }));
+            let mut answer = app.chatgpt.snapshot();
+            if !confirmed {
+                answer["warning"] = json!("Signed out here, but OpenAI didn't confirm it. To end it there too, disconnect catbot in ChatGPT's settings (Sign in with ChatGPT).");
+            }
+            Ok((StatusCode::OK, answer))
+        }
+        (&Method::GET, ["chatgpt", "models"]) => match app.chatgpt.models().await {
+            Ok(models) if !models.is_empty() => Ok((StatusCode::OK, json!({ "models": models.iter().map(|m| m["id"].clone()).collect::<Vec<_>>(), "labels": models, "live": true }))),
+            Ok(_) => Ok((StatusCode::OK, json!({ "models": [], "live": false }))),
+            Err(problem) => Ok((StatusCode::OK, json!({ "models": [], "live": false, "problem": problem }))),
+        },
         (&Method::GET, ["codex", "account"]) => {
             let state = app.codex_sign_in.state.lock().expect("sign-in lock").clone();
             let Some(program) = engines::find(engines::CODEX).and_then(engines::agent_program) else {
@@ -261,6 +295,8 @@ async fn efforts(app: &Arc<App>, engine: &'static Engine, model: &str) -> Value 
                 Err(problem) => json!({ "levels": [], "problem": problem }),
             }
         }
+        // The plan through Codex: the Responses API's levels.
+        Kind::Plan => json!({ "levels": words(["low", "medium", "high"].map(str::to_string).to_vec()), "source": "catbot" }),
         Kind::Pi => {
             let thinks = match engines::agent_program(engine) {
                 Some(program) if !model.is_empty() => crate::pi::models(&program).await.ok().and_then(|all| all.into_iter().find(|(id, _, _)| id == model)).map(|(_, _, thinks)| thinks),
@@ -556,13 +592,14 @@ fn describe(app: &App, engine: &Engine) -> Value {
     let saved = app.with_store(|store| store.engine_key(engine.id)).flatten();
     let access = engines::access(engine, saved.as_ref());
     let installed = match engine.kind {
-        Kind::Agent | Kind::Codex | Kind::Pi => Some(engines::agent_program(engine).is_some()),
+        Kind::Agent | Kind::Codex | Kind::Pi | Kind::Plan => Some(engines::agent_program(engine).is_some()),
         // Claude Code (stage 29.3): told apart, so a new computer's first run can say what's missing.
         Kind::Claude => Some(crate::claude::installed(&app.cli)),
         Kind::Api => None,
     };
     let signed_in = match engine.kind {
         Kind::Codex => Some(crate::codex::signed_in()),
+        Kind::Plan => Some(app.chatgpt.signed_in()),
         Kind::Pi => crate::pi::signed_in(),
         Kind::Claude => engines::claude_signed_in(),
         _ => engines::agent_signed_in(engine),
@@ -573,7 +610,7 @@ fn describe(app: &App, engine: &Engine) -> Value {
         Kind::Api if !engine.needs_key => super::local_ai::is_added(app, engine.id),
         Kind::Api => access.is_some(),
         Kind::Agent => installed == Some(true) && signed_in != Some(false),
-        Kind::Codex => installed == Some(true) && signed_in == Some(true),
+        Kind::Codex | Kind::Plan => installed == Some(true) && signed_in == Some(true),
         Kind::Pi => installed == Some(true),
     };
     json!({
@@ -592,6 +629,8 @@ fn describe(app: &App, engine: &Engine) -> Value {
         "signedIn": signed_in,
         "download": engine.download.filter(|_| engines::asset(engine).is_some()).map(|d| json!({ "version": d.version, "size": d.size })),
         "signsInHere": engines::agent_sign_in(engine).is_some() || engines::cli_sign_in(engine).is_some(),
+        // The ChatGPT plan's own sign-in, as the interface may see it (stage 29.10).
+        "account": (engine.kind == Kind::Plan).then(|| app.chatgpt.snapshot()),
         // Catbot can install it (the maker's line) and sign it in itself (stage 29.7).
         "quickInstall": engine.download.is_none() && install_line(engine).is_some(),
         "quickSignIn": engines::agent_sign_in(engine).is_some() || engines::cli_sign_in(engine).is_some() || engine.id == "openrouter",
@@ -600,8 +639,8 @@ fn describe(app: &App, engine: &Engine) -> Value {
         "install": engine.install,
         "signIn": engine.sign_in,
         // Where its program is (stage 19.7.2): in use, found by name, and chosen by the person.
-        "program": matches!(engine.kind, Kind::Agent | Kind::Codex | Kind::Pi).then(|| engines::agent_program(engine)).flatten(),
-        "foundProgram": matches!(engine.kind, Kind::Agent | Kind::Codex | Kind::Pi).then(|| engines::found_program(engine)).flatten(),
+        "program": matches!(engine.kind, Kind::Agent | Kind::Codex | Kind::Pi | Kind::Plan).then(|| engines::agent_program(engine)).flatten(),
+        "foundProgram": matches!(engine.kind, Kind::Agent | Kind::Codex | Kind::Pi | Kind::Plan).then(|| engines::found_program(engine)).flatten(),
         "chosenProgram": engines::chosen_path(engine.id),
         "terminalInstall": engines::terminal_command(engine.install).filter(|c| engines::runs_here(c)),
         "terminalSignIn": engines::terminal_command(engine.sign_in).filter(|c| engines::runs_here(c)),

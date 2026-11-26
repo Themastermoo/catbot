@@ -59,6 +59,7 @@ pub fn ready(app: &App, engine: &str) -> bool {
         Kind::Agent => engines::agent_program(engine).is_some() && engines::agent_signed_in(engine) != Some(false),
         Kind::Codex => engines::agent_program(engine).is_some() && crate::codex::signed_in(),
         Kind::Pi => engines::agent_program(engine).is_some(),
+        Kind::Plan => engines::agent_program(engine).is_some() && app.chatgpt.signed_in(),
     }
 }
 

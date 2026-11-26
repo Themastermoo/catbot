@@ -161,7 +161,13 @@ impl Link {
 }
 
 fn spawn(program: &Path, home: &Path, cwd: &Path) -> std::io::Result<Child> {
+    spawn_with(program, home, cwd, &[], &[])
+}
+
+/// Codex's app-server with settings (`-c …`) and environment of its own.
+fn spawn_with(program: &Path, home: &Path, cwd: &Path, settings: &[String], env: &[(&str, &str)]) -> std::io::Result<Child> {
     let mut command = Command::new(program);
+    command.args(settings).envs(env.iter().copied()).env_remove("OPENAI_API_KEY");
     command
         .arg("app-server")
         .env("CODEX_HOME", home)
@@ -201,14 +207,27 @@ pub struct CodexTurn {
     pub workspace: Workspace,
     /// Catbot's own tools as an MCP server: `{ name, command, args, env: [{ name, value }] }`.
     pub mcp: Option<Value>,
+    /// On the ChatGPT plan (stage 29.10): its token and API address, in place of Codex's sign-in.
+    pub plan: Option<(String, String)>,
 }
 
 /// Starts Codex and the turn; its events arrive on the returned `Running`.
 pub fn start(turn: CodexTurn) -> Result<Running, String> {
-    if !link_sign_in(&turn.home).map_err(|e| format!("couldn't link Codex's sign-in: {e}"))? {
-        return Err(format!("Codex isn't signed in. {SIGN_IN}"));
+    let child = match &turn.plan {
+        Some((token, resource)) => {
+            std::fs::create_dir_all(&turn.home).map_err(|e| e.to_string())?;
+            // Never Codex's own sign-in here: the plan's token is the only one.
+            let _ = std::fs::remove_file(turn.home.join("auth.json"));
+            spawn_with(&turn.program, &turn.home, &turn.workspace.folder, &crate::chatgpt::codex_args(resource), &[("CATBOT_CHATGPT_TOKEN", token.as_str())])
+        }
+        None => {
+            if !link_sign_in(&turn.home).map_err(|e| format!("couldn't link Codex's sign-in: {e}"))? {
+                return Err(format!("Codex isn't signed in. {SIGN_IN}"));
+            }
+            spawn(&turn.program, &turn.home, &turn.workspace.folder)
+        }
     }
-    let child = spawn(&turn.program, &turn.home, &turn.workspace.folder).map_err(|e| e.to_string())?;
+    .map_err(|e| e.to_string())?;
     let (tx, events) = mpsc::channel(256);
     let answers = Answerer::local();
     let task = tokio::spawn(run(turn, child, tx, answers.clone()));
@@ -803,6 +822,7 @@ mod tests {
             workspace: Workspace { folder: PathBuf::from("/tmp/b"), roots: vec![PathBuf::from("/tmp/b"), PathBuf::from("/tmp/vault")], mode: PermissionMode::Default, catbot: None },
             mcp: Some(json!({ "name": "catbot", "command": "/bin/catbot", "args": ["approval-mcp", "-"], "env": [{ "name": "K", "value": "v" }] })),
             effort: None,
+            plan: None,
         };
         let prompt = first_prompt(&turn);
         assert!(prompt.starts_with("<conversation_so_far>\nPerson: Plant carrots?") && prompt.ends_with("And beans?"));

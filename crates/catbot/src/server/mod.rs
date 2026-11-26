@@ -130,6 +130,8 @@ pub struct App {
     /// What a bot at work is doing, by chat (stage 29.8, for its desktop pet): "coding",
     /// "designing" or "researching", from the last tool its turn used.
     pub doing: std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
+    /// The ChatGPT plan's sign-in (stage 29.10), kept in Catbot's own folder.
+    pub chatgpt: Arc<crate::chatgpt::Plan>,
     /// AIs that turned a turn away for their usage limit, and until when (`backups.rs`).
     pub limited_until: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
     /// AIs that stopped working, by engine id: what went wrong and its fix (`health.rs`).
@@ -159,6 +161,7 @@ impl App {
         ui: Option<PathBuf>,
     ) -> Arc<Self> {
         crate::engines::set_agents_dir(store.home().join("agents"));
+        let chatgpt = Arc::new(crate::chatgpt::Plan::new(store.home().join("providers").join("chatgpt").join("account")));
         Arc::new(Self {
             store: Mutex::new(store),
             hub: hub::Hub::default(),
@@ -176,6 +179,7 @@ impl App {
             limited_until: std::sync::Mutex::new(std::collections::HashMap::new()),
             channels_busy: std::sync::Mutex::new(std::collections::HashSet::new()),
             doing: std::sync::Mutex::new(std::collections::HashMap::new()),
+            chatgpt,
             troubles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             updates: updates::Updates::default(),
             local: std::sync::OnceLock::new(),

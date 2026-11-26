@@ -33,6 +33,11 @@ OpenMausBot contributors, licensed under the Apache License, Version 2.0
   it, merging split exports, refusing credential-looking fields, and finding
   exports in Downloads. Rewritten in Rust; Catbot makes bots, skills, triggers
   and memory notes of its own from it.
+- Continue with ChatGPT (crates/catbot/src/chatgpt.rs) follows OpenMausBot's
+  server/drivers/chatgpt-plan-auth.ts and codex-plan-token.ts: the agent sign-in
+  at auth.openai.com (its parameters, scopes and checks), keeping and renewing
+  the tokens, and the Codex settings that point a turn at the plan. Rewritten
+  in Rust.
 
 Moving a Grok Bot also adapts, through OpenMausBot, the export message, reader
 repairs and credential refusal of the agent-importers plugin in

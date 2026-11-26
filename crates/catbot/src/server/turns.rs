@@ -420,7 +420,19 @@ async fn drive(
     } else if engines::find(&bot.engine).is_some_and(|e| e.kind == engines::Kind::Agent) {
         start_agent(app, bot, thread, session, codex, tools)
     } else if bot.engine == engines::CODEX {
-        start_codex(app, bot, thread, session, codex, tools)
+        start_codex(app, bot, thread, session, codex, tools, None)
+    } else if bot.engine == engines::CHATGPT {
+        // The ChatGPT plan (stage 29.10): a fresh token, and a model the plan offers.
+        match app.chatgpt.access_token().await {
+            Ok(token) => {
+                let mut bot = bot.clone();
+                if bot.model.as_deref().is_none_or(str::is_empty) {
+                    bot.model = app.chatgpt.models().await.ok().and_then(|m| m.first().and_then(|f| f["id"].as_str().map(str::to_string)));
+                }
+                start_codex(app, &bot, thread, session, codex, tools, Some((token, app.chatgpt.resource().to_string())))
+            }
+            Err(problem) => Err(problem),
+        }
     } else if bot.engine == engines::PI {
         start_pi(app, bot, thread, session, codex, tools)
     } else {
@@ -604,8 +616,16 @@ fn start_agent(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
 
 /// Starts a turn on Codex: the program, Catbot's Codex home with the person's sign-in linked in,
 /// the thread to carry on, and what a new thread needs to know.
-fn start_codex(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex: Option<std::path::PathBuf>, tools: Option<&super::bot_tools::Open>) -> Result<Running, String> {
-    let engine = engines::find(engines::CODEX).ok_or("no Codex")?;
+fn start_codex(
+    app: &Arc<App>,
+    bot: &Bot,
+    thread: &str,
+    session: &Session,
+    codex: Option<std::path::PathBuf>,
+    tools: Option<&super::bot_tools::Open>,
+    plan: Option<(String, String)>,
+) -> Result<Running, String> {
+    let engine = engines::find(if plan.is_some() { engines::CHATGPT } else { engines::CODEX }).ok_or("no Codex")?;
     let program = engines::agent_program(engine)
         .ok_or_else(|| format!("Codex isn't installed on this computer. Install it with `{}`, then sign in from this bot's settings.", engine.install))?;
     let messages = app.with_store(|store| store.messages(thread, 60)).unwrap_or_default();
@@ -622,11 +642,14 @@ fn start_codex(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex
         Session::Resume(id) => Some(id.clone()),
         Session::New(_) => None,
     };
-    let home = app.with_store(|store| Ok(crate::codex::bots_home(store.home()))).ok_or("no Catbot home")?;
+    // The plan's turns have a Codex home of their own, with no Codex sign-in in it.
+    let home = app
+        .with_store(|store| Ok(if plan.is_some() { store.home().join("providers").join("chatgpt").join("codex") } else { crate::codex::bots_home(store.home()) }))
+        .ok_or("no Catbot home")?;
     let model = bot.model.clone().unwrap_or_default();
     let mcp = tools.and_then(|t| super::bot_tools::acp_server(app, t));
     let effort = bot.effort.clone();
-    crate::codex::start(crate::codex::CodexTurn { program, home, model, session, instructions, earlier: history, text, pictures, workspace, mcp, effort })
+    crate::codex::start(crate::codex::CodexTurn { program, home, model, session, instructions, earlier: history, text, pictures, workspace, mcp, effort, plan })
 }
 
 /// Starts a turn on Pi: the program, Catbot's folder for this bot's Pi sessions, the session (a new

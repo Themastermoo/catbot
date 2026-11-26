@@ -359,7 +359,7 @@ fn AiPage(apis: bool) -> Element {
             engines.set(Some(api::get("/api/engines").await.map(|e| e["engines"].as_array().cloned().unwrap_or_default())));
         });
     });
-    const LEAD_PROGRAMS: [&str; 9] = ["claude", "codex", "grok-cli", "antigravity", "gemini", "kimi", "cursor", "muse-code", "pi"];
+    const LEAD_PROGRAMS: [&str; 10] = ["claude", "codex", "chatgpt", "grok-cli", "antigravity", "gemini", "kimi", "cursor", "muse-code", "pi"];
     const LEAD_APIS: [&str; 5] = ["openai", "anthropic", "google", "xai", "openrouter"];
     let lead: &[&str] = if apis { &LEAD_APIS } else { &LEAD_PROGRAMS };
     let all = match engines() {

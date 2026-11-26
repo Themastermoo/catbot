@@ -8,6 +8,7 @@ pub mod ask;
 pub mod bots;
 pub mod catbot_tools;
 pub mod chat;
+pub mod chatgpt;
 pub mod checkpoints;
 pub mod claude;
 pub mod codex;

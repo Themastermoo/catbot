@@ -170,6 +170,10 @@ async fn check(app: &App, engine: &Engine) -> Result<(), String> {
             }
             if engines::claude_signed_in() == Some(false) { Err("Claude Code isn't signed in yet".into()) } else { Ok(()) }
         }
+        Kind::Plan => {
+            engines::agent_program(engine).ok_or("Codex isn't installed")?;
+            if app.chatgpt.signed_in() { Ok(()) } else { Err("ChatGPT isn't signed in".into()) }
+        }
         Kind::Codex => {
             engines::agent_program(engine).ok_or("Codex isn't installed")?;
             if crate::codex::signed_in() { Ok(()) } else { Err("Codex isn't signed in".into()) }
