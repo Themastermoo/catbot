@@ -168,6 +168,8 @@ pub fn EngineSetup(engine: Value) -> Element {
         Some("agent") => rsx! { AgentBox { engine } },
         Some("codex") => rsx! { CodexBox { engine } },
         Some("pi") => rsx! { PiBox { engine, listed: None } },
+        // Claude Code (stage 29.7): installed and signed in by Catbot, unless it's ready.
+        Some("claude") if engine["ready"] != true && engine["quickSignIn"] == true && crate::link::active().is_none() => rsx! { ManagedAgentBox { engine } },
         _ => {
             let (install, sign_in) = (str_of(&engine, "install"), str_of(&engine, "signIn"));
             rsx! {
@@ -361,7 +363,7 @@ fn PiBox(engine: Value, listed: Option<usize>) -> Element {
 /// downloads itself (Antigravity) and signs in through their own page.
 #[component]
 fn AgentBox(engine: Value) -> Element {
-    if !engine["download"].is_null() || engine["signsInHere"] == true {
+    if !engine["download"].is_null() || engine["signsInHere"] == true || engine["quickInstall"] == true {
         return rsx! { ManagedAgentBox { engine } };
     }
     let name = str_of(&engine, "name");
@@ -422,13 +424,37 @@ fn ManagedAgentBox(engine: Value) -> Element {
         });
     });
     let mb = |bytes: &Value| bytes.as_u64().map(|b| format!("{} MB", b / 1_000_000)).unwrap_or_default();
-    let (i1, i2, i3, i4, i5) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+    let (i1, i2, i3, i4, i5, i6, i7) = (id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone(), id.clone());
+    let engine_quick = engine["quickSignIn"] == true;
+    let url = work["url"].as_str().map(str::to_string);
+    // Only a sign-in that comes back to the program's own address can take a pasted one.
+    let pastable = url.as_deref().is_some_and(|u| u.contains("redirect_uri"));
+    let problem_now = work["problem"].as_str().map(str::to_string).or(problem());
     rsx! {
         div { class: "mt-3 rounded-lg bg-inset/60 px-3 py-2.5 text-[13px] leading-[19px] text-ink", "data-agent": "{id}",
-            if work["installing"] == true {
+            if work["installing"] == true && !work["step"].is_null() {
+                // The maker's own installer, run by Catbot (stage 29.7): its latest line.
+                p { "data-agent-installing": true, "Installing {name}…" }
+                p { class: "mt-0.5 truncate font-mono text-[11px] text-ink-tertiary", "{work[\"step\"].as_str().unwrap_or_default()}" }
+            } else if work["installing"] == true {
                 p { "data-agent-installing": true,
                     "Downloading {name}… {mb(&work[\"got\"])}"
                     if !work["total"].is_null() { " of {mb(&work[\"total\"])}" }
+                }
+            } else if !installed && engine["download"].is_null() {
+                if engine["quickInstall"] == true && at_home {
+                    p { "{name} isn't installed. One click installs it with its maker's own installer, then opens the sign-in page in your browser, where you log in with your {with} account." }
+                    button {
+                        r#type: "button",
+                        "data-agent-install": true,
+                        disabled: busy(),
+                        class: "mt-2 rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-50",
+                        onclick: move |_| act.call(("POST", format!("/api/engines/{i6}/install"), Some(json!({ "thenSignIn": engine_quick })))),
+                        if engine_quick { "Install and sign in" } else { "Install {name}" }
+                    }
+                } else {
+                    p { "{name} isn't installed on this computer. Install it in a terminal:" }
+                    Command { engine: engine.clone(), what: "install", text: str_of(&engine, "install") }
                 }
             } else if !installed {
                 p { "{name} isn't installed. Catbot can download it ({size}, version {version}) and keep it in its own folder." }
@@ -454,6 +480,16 @@ fn ManagedAgentBox(engine: Value) -> Element {
                 div { class: "mt-2 flex items-center gap-2",
                     span { class: "flex-1 text-[12px] text-ink-tertiary", "Waiting for the sign-in…" }
                     button { r#type: "button", class: SMALL_BUTTON, onclick: move |_| act.call(("DELETE", format!("/api/engines/{i5}/sign-in"), None)), "Cancel" }
+                }
+            } else if work["signingIn"] == true && !pastable {
+                // The program's own login (stage 29.7): the page is open in the browser already.
+                p { "Log in on the page that opened in your browser, with your {with} account. Catbot finishes on its own." }
+                if let Some(url) = url.clone() {
+                    a { href: "{url}", target: "_blank", rel: "noreferrer", class: "mt-1 block text-accent underline", "data-agent-sign-in-link": true, "Open the page again" }
+                }
+                div { class: "mt-2 flex items-center gap-2",
+                    span { class: "flex-1 text-[12px] text-ink-tertiary", "Waiting for the sign-in…" }
+                    button { r#type: "button", class: SMALL_BUTTON, onclick: move |_| act.call(("DELETE", format!("/api/engines/{i7}/sign-in"), None)), "Cancel" }
                 }
             } else if work["signingIn"] == true {
                 p { "Sign in on the page this opens, then come back:" }
@@ -498,8 +534,15 @@ fn ManagedAgentBox(engine: Value) -> Element {
             if id == "antigravity" {
                 p { class: "mt-1.5 text-[12px] text-ink-tertiary", "Catbot gets Antigravity's Gemini models: this release offers its others only to editors Google lists." }
             }
-            if let Some(err) = work["problem"].as_str().map(str::to_string).or(problem()) {
+            if let Some(err) = problem_now.clone() {
                 p { role: "alert", class: "mt-1 text-[12px] text-danger", "{err}" }
+                // The terminal, when Catbot's own way didn't work.
+                if installed && !engine["terminalSignIn"].is_null() {
+                    Command { engine: engine.clone(), what: "signIn", text: str_of(&engine, "signIn") }
+                }
+            }
+            if engine["kind"] != "claude" && engine["download"].is_null() {
+                ProgramPath { engine: engine.clone() }
             }
         }
     }
@@ -623,6 +666,20 @@ fn KeyBox(engine: Value) -> Element {
     let key_page = str_of(&engine, "keyPage");
     // Keys are kept at home; away from it the box only says how things stand.
     let at_home = crate::link::active().is_none();
+    // OpenRouter logs in through its own page and hands Catbot a key (stage 29.7).
+    let logs_in = id == "openrouter";
+    let logging_in = engine["work"]["signingIn"] == true;
+    let work_problem = engine["work"]["problem"].as_str().map(str::to_string);
+    let log_in = use_callback(move |method: &'static str| {
+        busy.set(true);
+        problem.set(None);
+        spawn(async move {
+            if let Err(err) = api::call(method, "/api/engines/openrouter/log-in", None).await {
+                problem.set(Some(err));
+            }
+            busy.set(false);
+        });
+    });
 
     let save = {
         let id = id.clone();
@@ -688,7 +745,37 @@ fn KeyBox(engine: Value) -> Element {
             } else if !at_home {
                 p { class: "text-[13px] text-ink-secondary", "{name} needs a key. Keys are added on the computer at home." }
             }
-            if asking {
+            if asking && logs_in && logging_in {
+                p { class: "text-[13px] text-ink", "Log in on OpenRouter's page in your browser and allow Catbot. Catbot keeps the key it's given." }
+                div { class: "mt-2 flex items-center gap-2",
+                    span { class: "flex-1 text-[12px] text-ink-tertiary", "Waiting for OpenRouter…" }
+                    button { r#type: "button", class: SMALL_BUTTON, onclick: move |_| log_in.call("DELETE"), "Cancel" }
+                }
+            } else if asking && logs_in {
+                button {
+                    r#type: "button",
+                    "data-log-in": "openrouter",
+                    disabled: busy(),
+                    class: "mb-2 rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white hover:opacity-90 disabled:opacity-50",
+                    onclick: move |_| log_in.call("POST"),
+                    "Log in with OpenRouter"
+                }
+                p { class: "mb-2 text-[12px] text-ink-tertiary", "Opens OpenRouter in your browser; no key to copy. Or paste one:" }
+            } else if asking && needs_key && !key_page.is_empty() {
+                // The maker's key page, in the browser; the key comes back here (stage 29.7).
+                div { class: "mb-2 flex flex-wrap items-center gap-2",
+                    a {
+                        href: "{key_page}",
+                        target: "_blank",
+                        rel: "noreferrer",
+                        "data-get-key": "{id}",
+                        class: "rounded-full bg-accent px-3 py-1 text-[12px] font-semibold text-white hover:opacity-90",
+                        "Get a key"
+                    }
+                    span { class: "text-[12px] text-ink-tertiary", "Opens {name}'s key page in your browser. Make a key there, then paste it below." }
+                }
+            }
+            if asking && !(logs_in && logging_in) {
                 if needs_key {
                     label { class: LABEL, "{name} API key"
                         input {
@@ -723,7 +810,7 @@ fn KeyBox(engine: Value) -> Element {
                     }
                 }
             }
-            if let Some(err) = problem() {
+            if let Some(err) = problem().or(work_problem) {
                 p { role: "alert", class: "mt-1 text-[12px] text-danger", "{err}" }
             }
         }
