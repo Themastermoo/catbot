@@ -130,6 +130,9 @@ pub struct App {
     /// What a bot at work is doing, by chat (stage 29.8, for its desktop pet): "coding",
     /// "designing" or "researching", from the last tool its turn used.
     pub doing: std::sync::Mutex<std::collections::HashMap<String, &'static str>>,
+    /// Messages the person sent while their bot was busy, by chat (stage 29.11): already in the
+    /// chat, read by the bot as soon as its turn ends. (request id, what the bot is told)
+    pub held: std::sync::Mutex<std::collections::HashMap<String, Vec<(i64, String)>>>,
     /// The ChatGPT plan's sign-in (stage 29.10), kept in Catbot's own folder.
     pub chatgpt: Arc<crate::chatgpt::Plan>,
     /// AIs that turned a turn away for their usage limit, and until when (`backups.rs`).
@@ -180,6 +183,7 @@ impl App {
             channels_busy: std::sync::Mutex::new(std::collections::HashSet::new()),
             doing: std::sync::Mutex::new(std::collections::HashMap::new()),
             chatgpt,
+            held: std::sync::Mutex::new(std::collections::HashMap::new()),
             troubles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             updates: updates::Updates::default(),
             local: std::sync::OnceLock::new(),
@@ -1112,6 +1116,35 @@ pub fn repair_guest_sessions(store: &Store) {
     }
 }
 
+/// The messages held while a chat's bot was busy go to it as one, once it's free: the chat's
+/// own bot (or its backup at a limit) answers them all.
+pub fn release_held(app: &Arc<App>, thread: &str) {
+    if app.turns.busy(thread) || app.channel_busy(thread) {
+        return;
+    }
+    let Some(held) = app.held.lock().expect("held lock").remove(thread).filter(|h| !h.is_empty()) else { return };
+    let request_id = held.last().map(|(id, _)| *id).unwrap_or_default();
+    let said = held.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("\n\n");
+    let Some(conversation) = app.with_store(|store| store.conversation(thread)).flatten() else { return };
+    let Some(mut bot) = app.with_store(|store| store.bot_by_id(&conversation.bot_id)).flatten() else { return };
+    bot.instructions.push_str(&handoffs::roster_note(app, &bot));
+    let bot = match backups::choose(app, &bot) {
+        Ok(Some((stand_in, why))) => {
+            turns::save_and_send(app, thread, Role::Note, &why, None);
+            app.with_store(|store| store.clear_session(thread));
+            stand_in
+        }
+        Ok(None) => bot,
+        Err(why) => {
+            turns::save_and_send(app, thread, Role::Note, &format!("{} can't answer yet: {why}", bot.name), None);
+            return;
+        }
+    };
+    if let Err(err) = turns::start(app.clone(), bot, conversation, request_id, said) {
+        eprintln!("catbot: a held message couldn't go: {err}");
+    }
+}
+
 /// `POST /api/bots/:id/messages`: keep the person's message, show it everywhere, start the turn.
 fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     if profiles::is_archived(app, &bot.id) {
@@ -1131,15 +1164,14 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
             }
         })
         .map_err(fail)?;
-    if app.turns.busy(&conversation.id) || app.channel_busy(&conversation.id) {
-        return Err((StatusCode::CONFLICT, "this bot is still working on the last message".into()));
-    }
+    // Busy: the message goes in the chat now, and the bot reads it when its turn ends (stage 29.11).
+    let busy = app.turns.busy(&conversation.id) || app.channel_busy(&conversation.id);
     // A Claude plan's windows, read again in the background when they're getting old.
     if bot.engine == crate::engines::CLAUDE && usage::billing(&bot.engine) == "plan" {
         usage::refresh_soon(app);
     }
-    // At a limit: a backup AI takes the turn, or none can.
-    let switched = backups::choose(app, &bot).map_err(|why| (StatusCode::TOO_MANY_REQUESTS, why))?;
+    // At a limit: a backup AI takes the turn, or none can. (A held message is checked when it goes.)
+    let switched = if busy { None } else { backups::choose(app, &bot).map_err(|why| (StatusCode::TOO_MANY_REQUESTS, why))? };
     let mut detail = json!({});
     if let Some(id) = body["sendId"].as_str() {
         detail["sendId"] = json!(id);
@@ -1174,6 +1206,12 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     // `/skill-name …` runs one of the bot's skills: the bot reads which, and where its instructions are.
     let asked = skills::command(app, &bot, &text).unwrap_or_else(|| text.clone());
     let said = format!("{asked}{}{reacted}{told}{}", attachments::note(&described), scheduled::late_note(&body));
+    if busy {
+        app.held.lock().expect("held lock").entry(thread.clone()).or_default().push((request_id, said.trim().to_string()));
+        // It might have ended while this was saved: then it goes at once.
+        release_held(app, &thread);
+        return Ok((StatusCode::ACCEPTED, json!({ "ok": true, "threadId": thread, "message": message, "held": true })));
+    }
     let mut bot = bot;
     bot.instructions.push_str(&handoffs::roster_note(app, &bot));
     let bot = match switched {

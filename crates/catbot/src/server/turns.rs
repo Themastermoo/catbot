@@ -138,6 +138,8 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
         if let Some(reply) = reply.filter(|_| !next.is_empty()) {
             super::handoffs::after_reply(&app, &bot, &thread_id, request_id, &reply, next).await;
         }
+        // What the person said meanwhile (stage 29.11).
+        super::release_held(&app, &thread_id);
     });
     Ok(turn_id)
 }

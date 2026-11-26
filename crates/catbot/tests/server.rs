@@ -264,7 +264,6 @@ async fn a_turn_streams_asks_and_is_kept() {
     assert_eq!(card["message"]["card"]["options"], json!(["Allow", "Always allow", "Deny"]));
     assert_eq!(card["message"]["card"]["always"], "Always allow `echo`");
     until(&mut events, "waiting bot", |f| f["kind"] == "bot" && f["bot"]["activity"] == "waiting-on-you").await;
-    assert_eq!(s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "x" }))).await.0, 409);
 
     let (status, _) = s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
     assert_eq!(status, 200);
@@ -352,6 +351,32 @@ async fn always_allow_and_full_access_stop_the_asking_even_mid_chain() {
     // A command with another hidden inside can't be always allowed.
     let (status, _) = s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": "nope", "behavior": "always" }))).await;
     assert_eq!(status, 400);
+}
+
+#[tokio::test]
+async fn a_message_sent_while_the_bot_works_shows_at_once_and_is_read_when_it_s_free() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Palette" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "approve", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+
+    // Two messages while it waits: both in the chat now, neither turned away.
+    for words in ["one more thing", "and another"] {
+        let (status, sent) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": words, "threadId": thread }))).await;
+        assert_eq!((status, sent["held"].as_bool()), (202, Some(true)), "{sent}");
+        until(&mut events, "shown", |f| f["kind"] == "message" && f["message"]["role"] == "user" && f["message"]["text"] == words).await;
+    }
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    until(&mut events, "first reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["text"] == "Hello, approve").await;
+    // Then, by itself, one turn for both.
+    let next = until(&mut events, "the held reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text" && f["message"]["text"] != "Hello, approve").await;
+    let said = next["message"]["text"].as_str().unwrap();
+    assert!(said.contains("one more thing") && said.contains("and another"), "{said}");
 }
 
 #[tokio::test]

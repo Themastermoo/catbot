@@ -444,7 +444,6 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
     let drafts = use_context::<Signal<crate::drafts::Drafts>>();
     let draft = use_hook(|| drafts.peek().get(&bot.thread_id).cloned().unwrap_or_default());
     let mut text = use_signal(|| draft.text.clone());
-    let mut queued = use_signal(|| None::<(String, Vec<Attached>)>);
     let mut problem = use_signal(|| None::<String>);
     // Files picked for the next message, uploading or ready.
     let mut tray = use_signal(|| {
@@ -515,13 +514,6 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         });
     });
 
-    // A message that waited goes once the bot is free.
-    use_effect(use_reactive!(|working| {
-        if !working && let Some(waiting) = queued.take() {
-            send(waiting);
-        }
-    }));
-
     // (A signal, so the submit stays copyable.)
     let image_target = use_signal(|| (bot.id.clone(), bot.thread_id.clone()));
     let mut submit = move || {
@@ -561,18 +553,9 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         tray.set(Vec::new());
         set_box("");
         on_send.call(());
-        if working {
-            let mut q = queued.write();
-            *q = Some(match q.take() {
-                Some((earlier, mut earlier_files)) => {
-                    earlier_files.extend(files);
-                    (format!("{earlier}\n\n{words}").trim().to_string(), earlier_files)
-                }
-                None => (words, files),
-            });
-        } else {
-            send((words, files));
-        }
+        // Busy or not, it goes in the chat now; a busy bot reads it as soon as its turn ends
+        // (the server holds it, stage 29.11).
+        send((words, files));
     };
 
     // The clock beside Send: these words, at a time chosen (stage 21).
@@ -620,7 +603,6 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
     let stop_bot = bot.clone();
     let stop = use_callback(move |_: ()| {
         let bot = stop_bot.clone();
-        queued.set(None);
         spawn(async move {
             let body = serde_json::json!({ "threadId": bot.thread_id });
             if let Err(err) = api::post(&format!("/api/bots/{}/interrupt", bot.id), &body).await {
@@ -688,15 +670,6 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                     ApprovalPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len(), on_cancel_turn: move |_| stop(()) }
                 }
                 crate::scheduled::List { bot_id: bot.id.clone(), thread_id: bot.thread_id.clone() }
-                if let Some((words, files)) = queued() {
-                    div { class: "mb-2 flex items-center gap-2 rounded-lg border border-hairline/40 bg-panel px-3 py-2 text-[13px] text-ink-secondary",
-                        span { class: "min-w-0 flex-1 truncate",
-                            "Waiting to send: {words}"
-                            if !files.is_empty() { " (+{files.len()} file(s))" }
-                        }
-                        button { r#type: "button", class: "shrink-0 rounded px-2 py-1 font-medium hover:bg-raised", onclick: move |_| queued.set(None), "Cancel" }
-                    }
-                }
                 div { class: "relative",
                     div { "aria-hidden": "true", class: "pointer-events-none absolute -left-5 -right-5 -bottom-3 top-1/2 bg-app" }
                     div {
