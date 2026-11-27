@@ -365,7 +365,7 @@ fn TeamChatRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Ele
     let weight = if bot.unread { "font-semibold" } else { "font-medium" };
     rsx! {
         div { class: "pb-0.5",
-            button { r#type: "button", "data-sidebar-team-chat": true, "aria-current": if selected { "true" } else { "false" }, title: "{bot.name}'s team chat: its bots, together",
+            button { r#type: "button", "data-sidebar-team-chat": true, "aria-current": if selected { "true" } else { "false" }, title: "Team chat for {bot.name}: its bots, together",
                 class: "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left outline-none hover:bg-raised/60 focus-visible:ring-2 focus-visible:ring-accent/60",
                 onclick: move |_| {
                     let (mut map, mut board) = (ui.map, ui.board);

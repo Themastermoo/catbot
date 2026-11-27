@@ -1016,6 +1016,9 @@ async fn a_bot_on_a_chat_api_uses_its_tools_with_approval() {
 
 #[tokio::test]
 async fn an_ai_program_is_installed_and_signed_in_with_one_button() {
+    // Where Catbot notes a sign-in is process-wide: this test takes its turn and pins its own
+    // (another test starting meanwhile used to move it between the note and the check).
+    let _turn = AGENTS_TURN.lock().await;
     // Kimi Code, as a stand-in: the "installer" writes a program whose login prints a page and a
     // code, and finishes once the browser side (here, a file) says yes.
     let bin = tempfile::tempdir().unwrap();
@@ -1035,6 +1038,10 @@ async fn an_ai_program_is_installed_and_signed_in_with_one_button() {
     }
 
     let s = setup().await;
+    // SAFETY: the tests that set it take turns (AGENTS_TURN).
+    unsafe {
+        std::env::set_var("CATBOT_AGENTS_DIR", s._dir.path().join("home/agents"));
+    }
     let mut events = s.events().await;
     until(&mut events, "hello", |f| f["kind"] == "hello").await;
     let kimi = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "kimi").unwrap().clone();
