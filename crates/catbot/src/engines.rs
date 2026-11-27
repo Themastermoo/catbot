@@ -344,7 +344,8 @@ pub const ALL: &[Engine] = &[
         key_env: "",
         needs_key: false,
         key_page: "https://claude.com/product/claude-code",
-        models: &[("", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")],
+        // Fable is Claude Code's name for the Mythos-tier model it offers (Moo's ask, 2026-11-27).
+        models: &[("", "Default"), ("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")],
         // Claude Code's own installers (stage 29.3, for a new computer's first run).
         install: if cfg!(windows) {
             "powershell -NoProfile -ExecutionPolicy Bypass -Command \"irm https://claude.ai/install.ps1 | iex\""
