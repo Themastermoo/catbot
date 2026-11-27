@@ -480,6 +480,11 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
             let mut looked = 0.0;
             // Seconds since it last pounced (it starts ready, after a little while).
             let mut pounced_ago = POUNCE_EVERY - 8.0;
+            // Where the desktop actually put the window when it last landed, for the floor it
+            // was asked to stand on: KWin can hold a window a few pixels off where it's asked
+            // (by the panel, or rounding a scaled screen), and the pet then "fell" and landed
+            // again every second (Moo's screen recording, 2026-11-27).
+            let mut placed: Option<(i32, i32)> = None;
             // Seconds with nothing to do (towards the long nap), and how much longer a swing
             // shows after the hand last moved.
             let mut quiet = 0.0f64;
@@ -594,6 +599,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         continue;
                     }
                     Act::Land(left) => {
+                        placed = Some((top, at.y));
                         act.set(if left - dt <= 0.0 { Act::Idle } else { Act::Land(left - dt) });
                         continue;
                     }
@@ -618,8 +624,13 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                 if playing {
                     continue;
                 }
-                // Not where it should stand (the screen changed, say): down it goes.
-                if (at.y - top).abs() > 2 {
+                // Not where it should stand (the screen changed, say): down it goes. Where it
+                // last landed on this same floor counts as standing on it.
+                let floor_y = match placed {
+                    Some((asked, got)) if asked == top => got,
+                    _ => top,
+                };
+                if (at.y - top).abs() > 2 && (at.y - floor_y).abs() > 2 {
                     perch = None;
                     act.set(Act::Fall(0.0));
                     continue;
@@ -668,7 +679,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         x = hi - w;
                         facing_left.set(true);
                     }
-                    window.set_outer_position(PhysicalPosition::new(x, top));
+                    window.set_outer_position(PhysicalPosition::new(x, floor_y));
                 }
                 // Its bot has started work, or it has slept enough: up from the long nap.
                 if now == Act::Nap && (busy || left_for <= 0.0) {
@@ -821,9 +832,11 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
         document::Stylesheet { href: PET_STYLES }
         div { class: "flex h-screen w-screen flex-col justify-end", "data-pet-window": "{pet.bot_id}",
             if chatting {
-                div { class: if facing_left() { "mx-2 mb-1 flex flex-1 flex-col justify-end items-end" } else { "mx-2 mb-1 flex flex-1 flex-col justify-end items-start" },
-                    div { class: "flex max-h-full w-[300px] flex-col overflow-hidden rounded-2xl bg-panel text-ink shadow-xl ring-1 ring-ink/10", "data-pet-chat": true,
-                        div { class: "flex items-center gap-2 px-3 pt-2.5",
+                // min-h-0 (here and on the card): a long reply scrolls inside the card instead of
+                // growing it past the top of the window, where it was cut off (Moo, 2026-11-27).
+                div { class: if facing_left() { "mx-2 mb-1 mt-2 flex min-h-0 flex-1 flex-col justify-end items-end" } else { "mx-2 mb-1 mt-2 flex min-h-0 flex-1 flex-col justify-end items-start" },
+                    div { class: "flex max-h-full min-h-0 w-[300px] flex-col overflow-hidden rounded-2xl bg-panel text-ink shadow-xl ring-1 ring-ink/10", "data-pet-chat": true,
+                        div { class: "flex shrink-0 items-center gap-2 px-3 pt-2.5",
                             span { class: "min-w-0 flex-1 truncate text-[13px] font-semibold", "{name}" }
                             span { class: "text-[12px] text-ink-tertiary",
                                 match mood().as_str() { "working" => "Working…", "waiting" => "Needs you", _ => "" }
@@ -837,12 +850,12 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                             }
                         }
                         if menu() {
-                            div { class: "border-t border-hairline/50 p-1",
+                            div { class: "shrink-0 border-t border-hairline/50 p-1",
                                 button { r#type: "button", class: "flex w-full rounded-lg px-2.5 py-1.5 text-left text-[13px] hover:bg-ink/[0.05]", onclick: move |_| open_catbot(), "Open Catbot" }
                                 button { r#type: "button", "data-pet-home": true, class: "flex w-full rounded-lg px-2.5 py-1.5 text-left text-[13px] hover:bg-ink/[0.05]", onclick: move |_| dioxus::desktop::window().close(), "Send {name} home" }
                             }
                         }
-                        div { class: "flex items-center gap-1.5 border-t border-hairline/50 p-2",
+                        div { class: "flex shrink-0 items-center gap-1.5 border-t border-hairline/50 p-2",
                             input {
                                 class: "min-w-0 flex-1 rounded-full bg-ink/[0.05] px-3 py-1.5 text-[13px] text-ink placeholder:text-ink-tertiary focus:outline-none",
                                 placeholder: "Message {name}",
