@@ -140,6 +140,8 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
         }
         // What the person said meanwhile (stage 29.11).
         super::release_held(&app, &thread_id);
+        // Board work that waited for this bot (stage 30.3).
+        super::board::tick(&app);
     });
     Ok(turn_id)
 }
@@ -222,6 +224,8 @@ async fn run(
     let mut dressed = bot.clone();
     if let Some(chief) = super::chief::chief(app).filter(|c| c.id == bot.id) {
         dressed.instructions.push_str(&super::chief::note(app, &chief));
+        // And the task board (stage 30.3).
+        dressed.instructions.push_str(&super::board::chief_note(app));
     }
     // Its role and description (stage 23).
     dressed.instructions.push_str(&super::profiles::note(app, bot));
@@ -346,10 +350,22 @@ async fn run(
     // The Chief of Staff's proposed team changes come out too, each a card asking the person.
     let chief = super::chief::chief(app).filter(|c| c.id == bot.id);
     let mut proposed = Vec::new();
+    let mut board_added = Vec::new();
     if chief.is_some() {
         let (reply, found) = super::team::take(&result.reply);
         result.reply = reply;
         proposed = found;
+        // Work it puts on the task board (stage 30.3).
+        let (reply, found) = super::board::take_added(&result.reply);
+        result.reply = reply;
+        board_added = found;
+    }
+    // In a task board item's chat, how the turn settles it.
+    let mut settled = None;
+    if super::board::is_item_thread(app, thread) {
+        let (reply, found) = super::board::take(&result.reply);
+        result.reply = reply;
+        settled = found;
     }
     // Skills any bot offers come out the same way.
     let (reply, offered) = super::skills::take(&result.reply);
@@ -379,6 +395,9 @@ async fn run(
     }
     if let Some(chief) = &chief {
         super::team::propose(app, thread, chief, proposed);
+        if !board_added.is_empty() {
+            super::board::add_from_chief(app, thread, chief, board_added);
+        }
     }
     super::skills::propose(app, thread, bot, offered);
     if let Some(text) = &notes {
@@ -411,6 +430,7 @@ async fn run(
     record.finish(app, bot, thread, turn_id, how, &model, tools, result.errors.len(), outcome.cost_usd);
     // News for the Team Chat: a turn that failed, or took a while (stage 30.2).
     super::team_chat::after_turn(app, bot, thread, how, began.elapsed(), result.errors.first().map(String::as_str));
+    super::board::turn_ended(app, bot, thread, how, if result.stopped { "" } else { &result.reply }, settled);
     (!result.stopped && !result.reply.trim().is_empty()).then_some(result.reply)
 }
 

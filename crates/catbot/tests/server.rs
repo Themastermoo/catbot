@@ -1829,6 +1829,81 @@ async fn the_team_chat_hears_of_hand_offs_and_bots_waiting_elsewhere() {
 }
 
 #[tokio::test]
+async fn board_items_run_in_their_own_chats_in_order_and_ask_when_they_need_to() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let mut ids = Vec::new();
+    for name in ["Scout", "Kiwi"] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name }))).await;
+        ids.push(made["bot"]["id"].as_str().unwrap().to_string());
+    }
+    let board = || async {
+        let (_, all) = s.call("GET", "/api/board", None).await;
+        all["items"].as_array().unwrap().clone()
+    };
+    let state = |items: &[Value], title: &str| items.iter().find(|i| i["title"] == title).map(|i| i["state"].as_str().unwrap().to_string()).unwrap();
+
+    // Seeds (paused for now), then Beds for Scout after it.
+    let (status, seeds) = s.call("POST", "/api/board", Some(json!({ "title": "Seeds", "text": "Count the seeds.", "botId": ids[1], "paused": true }))).await;
+    assert_eq!(status, 201, "{seeds}");
+    let seeds = seeds["item"]["id"].as_str().unwrap().to_string();
+    let (_, beds) = s.call("POST", "/api/board", Some(json!({ "title": "Beds", "text": "Dig the beds.", "botId": ids[0], "after": [seeds] }))).await;
+    let beds = beds["item"]["id"].as_str().unwrap().to_string();
+    assert_eq!(state(&board().await, "Beds"), "waiting");
+    assert_eq!(s.call("POST", "/api/board", Some(json!({ "title": "", "botId": ids[0] }))).await.0, 400);
+    assert_eq!(s.call("PATCH", &format!("/api/board/{seeds}"), Some(json!({ "after": [beds] }))).await.0, 400, "no loops");
+
+    // Going: Kiwi does Seeds in a chat of its own; then Scout does Beds, told what Seeds came to.
+    s.call("PATCH", &format!("/api/board/{seeds}"), Some(json!({ "state": "ready" }))).await;
+    let scout_reply = until(&mut events, "beds done", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text" && f["message"]["text"].as_str().is_some_and(|t| t.contains("Dig the beds."))).await;
+    let said = scout_reply["message"]["text"].as_str().unwrap();
+    assert!(said.contains("“Seeds”: Hello,") && said.contains("Count the seeds."), "{said}");
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
+    let items = board().await;
+    assert_eq!((state(&items, "Seeds"), state(&items, "Beds")), ("done".to_string(), "done".to_string()));
+    let seed_chat = items.iter().find(|i| i["title"] == "Seeds").unwrap()["thread"].as_str().unwrap().to_string();
+    let (_, kiwi) = s.call("GET", &format!("/api/bots/{}", ids[1]), None).await;
+    let chat = kiwi["bot"]["tasks"].as_array().unwrap().iter().find(|t| t["threadId"] == seed_chat.as_str()).cloned().expect("its own chat");
+    assert_eq!(chat["title"], "Seeds");
+
+    // An item whose bot asks: the person answers in its chat, and that settles it.
+    let (_, shed) = s.call("POST", "/api/board", Some(json!({ "title": "Shed", "text": "Paint it.\n\n<board-update>ask: which colour?</board-update>", "botId": ids[1] }))).await;
+    let shed = shed["item"]["id"].as_str().unwrap().to_string();
+    until(&mut events, "asks", |f| f["kind"] == "board").await;
+    let asking = loop {
+        let items = board().await;
+        let it = items.iter().find(|i| i["id"] == shed.as_str()).unwrap().clone();
+        if it["state"] == "asking" { break it; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(asking["result"], "which colour?");
+    let thread = asking["thread"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{}/messages", ids[1]), Some(json!({ "text": "Green.", "threadId": thread }))).await;
+    let done = loop {
+        let items = board().await;
+        let it = items.iter().find(|i| i["id"] == shed.as_str()).unwrap().clone();
+        if it["state"] == "done" { break it; }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(done["result"].as_str().unwrap().contains("Green."), "{done}");
+
+    // The Chief puts work on the board.
+    s.call("PUT", "/api/chief", Some(json!({ "botId": ids[0] }))).await;
+    s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "<board-add>{\"title\":\"Water\",\"text\":\"Water the beds.\",\"bot\":\"kiwi\",\"after\":[\"Beds\"]}</board-add>" }))).await;
+    let note = until(&mut events, "added", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|n| n.contains("task board"))).await;
+    assert_eq!(note["message"]["tool"]["name"], "notice: Scout put “Water” on the task board for Kiwi.");
+    let water = board().await.into_iter().find(|i| i["title"] == "Water").unwrap();
+    assert_eq!((water["by"].as_str(), water["botId"].as_str()), (Some("Scout"), Some(ids[1].as_str())));
+    // And the Team Chat heard how items went.
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    let room = list["bots"].as_array().unwrap().iter().find(|b| b["channel"]["teamChat"] == true).unwrap()["threadId"].as_str().unwrap().to_string();
+    let (_, page) = s.call("GET", &format!("/api/threads/{room}/messages?limit=50"), None).await;
+    let lines: Vec<&str> = page["messages"].as_array().unwrap().iter().filter_map(|m| m["tool"]["name"].as_str()).collect();
+    assert!(lines.contains(&"notice: Kiwi finished the board item “Seeds”.") && lines.iter().any(|l| l.starts_with("notice: Kiwi asks you about the board item “Shed”")), "{lines:?}");
+}
+
+#[tokio::test]
 async fn a_channel_holds_what_s_sent_while_it_answers() {
     let s = setup().await;
     let mut events = s.events().await;

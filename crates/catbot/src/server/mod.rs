@@ -13,6 +13,7 @@ pub mod backups;
 pub mod bot_tools;
 pub mod changes;
 pub mod blender;
+pub mod board;
 pub mod boat;
 pub mod comfy_graph;
 pub mod comfyui;
@@ -366,6 +367,8 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
     tokio::spawn(tidy(app.clone(), archive_after_days()));
     tokio::spawn(chief::keep_watch(app.clone()));
     tokio::spawn(triggers::keep_time(app.clone()));
+    // The task board starts work as bots come free (stage 30.3).
+    tokio::spawn(board::keep_going(app.clone()));
     tokio::spawn(triggers::watch_mail(app.clone()));
     tokio::spawn(computers::keep_tidy(app.clone()));
     // Scheduled messages, those missed while Catbot was off first (stage 21).
@@ -661,6 +664,19 @@ async fn dispatch(State(app): State<Arc<App>>, req: Request) -> Response {
                 None
             };
             respond(apps::route(&app, &method, &rest, body).await)
+        }
+        ["api", "board", rest @ ..] => {
+            let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();
+            let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+            let body = if method == Method::POST || method == Method::PATCH {
+                match json_body(req).await {
+                    Ok(body) => Some(body),
+                    Err(err) => return respond(Err(err)),
+                }
+            } else {
+                None
+            };
+            respond(board::route(&app, &method, &rest, body).await)
         }
         ["api", "triggers", rest @ ..] => {
             let rest: Vec<String> = rest.iter().map(|s| s.to_string()).collect();

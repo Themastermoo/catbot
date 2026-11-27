@@ -186,7 +186,7 @@ fn place(app: &App, thread: &str, bot: &Bot) -> String {
 }
 
 /// Puts one line in the Team Chat about `bot`, opening `thread`.
-fn post(app: &App, bot: &Bot, kind: &str, thread: &str, text: &str) {
+pub fn post(app: &App, bot: &Bot, kind: &str, thread: &str, text: &str) {
     let Some(room) = room_for(app, thread) else { return };
     let owner = app.with_store(|store| store.conversation(thread)).flatten().map(|c| match c.channel_id {
         Some(channel) => channel,
