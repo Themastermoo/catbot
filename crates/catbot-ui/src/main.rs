@@ -21,6 +21,7 @@ mod changes;
 mod channels;
 mod skills;
 mod team;
+mod burst;
 mod teams;
 mod grok;
 mod triggers;

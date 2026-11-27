@@ -78,6 +78,8 @@ pub enum Body {
     /// A picture being asked for and drawn (`pictures.rs`).
     Picture(Box<crate::pictures::Card>),
     TeamChange(Box<crate::team::Change>),
+    /// A burst's card (stage 32.16).
+    Burst(Box<crate::burst::Burst>),
     /// What a bot did to one of its triggers (`triggers.rs`).
     Trigger(Box<Value>),
     /// Something Catbot wrote for the Chief of Staff: a problem to look at, or a check-in.
@@ -167,6 +169,7 @@ impl Msg {
             }
             ("image", _) => Body::Picture(Box::new(crate::pictures::Card::from_wire(&wire["image"]))),
             ("team-change", _) => Body::TeamChange(Box::new(crate::team::Change::from_wire(&wire["teamChange"]))),
+            ("burst", _) => Body::Burst(Box::new(crate::burst::Burst::from_wire(&wire["burst"]))),
             ("trigger", _) => Body::Trigger(Box::new(wire["trigger"].clone())),
             ("changes", _) => {
                 let changes = &wire["changes"];
@@ -1528,6 +1531,9 @@ fn Row(
         },
         Body::Picture(card) => rsx! {
             crate::pictures::PictureCard { thread: thread.clone(), message: message.id.clone(), card: (**card).clone() }
+        },
+        Body::Burst(burst) => rsx! {
+            crate::burst::BurstCard { thread: thread.clone(), message: message.id.clone(), burst: (**burst).clone() }
         },
         Body::TeamChange(change) => rsx! {
             crate::team::TeamChangeCard { thread: thread.clone(), message: message.id.clone(), change: (**change).clone() }

@@ -283,6 +283,22 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                 "attachment": detail["attachment"],
             },
         }),
+        // A burst's card (stage 32.16): the task, its parts and where each stands.
+        Role::Step if detail["kind"] == "burst" => json!({
+            "role": "bot",
+            "kind": "burst",
+            "burst": {
+                "task": detail["task"],
+                "botId": detail["botId"],
+                "botName": detail["botName"],
+                "ai": detail["ai"],
+                "state": detail["state"],
+                "note": detail["note"],
+                "parallel": detail["parallel"],
+                "estimateMinutes": detail["estimateMinutes"],
+                "parts": detail["parts"].as_array().map(|parts| parts.iter().map(|p| json!({ "seq": p["seq"], "title": p["title"], "item": p["item"], "state": p["state"], "thread": p["thread"], "error": p["error"] })).collect::<Vec<_>>()),
+            },
+        }),
         Role::Step if detail["kind"] == "team-change" => json!({
             "role": "bot",
             "kind": "team-change",

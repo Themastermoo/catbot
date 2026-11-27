@@ -5826,3 +5826,59 @@ async fn the_deb_is_handed_to_the_installer() {
     until(&mut events, "restart", |f| f["kind"] == "update" && f["restart"] == true).await;
     assert_eq!(std::fs::read_to_string(&installed).unwrap(), "the new deb");
 }
+
+#[tokio::test]
+async fn a_burst_runs_its_parts_in_their_own_chats_and_merges_them() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout", "soul": "" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let is_burst = |f: &Value, thread: &str, state: &str| {
+        matches!(f["kind"].as_str(), Some("message" | "message.patch")) && f["threadId"] == thread && f["message"]["kind"] == "burst" && f["message"]["burst"]["state"] == state
+    };
+
+    // Three parts start by themselves (stage 32.15); one breaks; the bot merges what came back.
+    let (_, sent) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "burst: North, South, fail East" }))).await;
+    let thread = sent["threadId"].as_str().unwrap().to_string();
+    let done = until(&mut events, "finished", |f| is_burst(f, &thread, "finished")).await;
+    let card = &done["message"]["burst"];
+    assert_eq!((card["task"].as_str(), card["botName"].as_str()), (Some("Check the beds"), Some("Scout")), "{card}");
+    let states: Vec<&str> = card["parts"].as_array().unwrap().iter().filter_map(|p| p["state"].as_str()).collect();
+    assert_eq!(states, ["done", "done", "failed"], "{card}");
+    let (_, talk) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=40"), None).await;
+    let texts: Vec<&str> = talk["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").filter_map(|m| m["text"].as_str()).collect();
+    assert!(texts.contains(&"Splitting it."), "the tag came out of the reply: {texts:?}");
+    assert!(texts.iter().any(|t| t.starts_with("Merged: North, South; some failed")), "{texts:?}");
+    // Each part had a chat of its own, archived once merged.
+    let part = card["parts"][0]["thread"].as_str().unwrap();
+    let (_, its) = s.call("GET", &format!("/api/threads/{part}/messages?limit=10"), None).await;
+    assert!(its.to_string().contains("Checked North."), "{its}");
+    // Retry: only the part that failed runs again (and fails again).
+    let id = done["message"]["id"].as_str().unwrap().to_string();
+    let (status, _) = s.call("POST", &format!("/api/threads/{thread}/burst/{id}"), Some(json!({ "action": "retry" }))).await;
+    assert_eq!(status, 200);
+    until(&mut events, "running again", |f| is_burst(f, &thread, "running")).await;
+    until(&mut events, "finished again", |f| is_burst(f, &thread, "finished")).await;
+
+    // Six parts wait for Run; Run with an edited list runs just those.
+    let (_, sent) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "burst: a, b, c, d, e, f", "threadId": thread }))).await;
+    assert_eq!(sent["threadId"], thread.as_str());
+    let proposed = until(&mut events, "proposed", |f| is_burst(f, &thread, "proposed")).await;
+    assert_eq!(proposed["message"]["burst"]["parts"].as_array().unwrap().len(), 6);
+    let big = proposed["message"]["id"].as_str().unwrap().to_string();
+    let (status, _) = s.call("POST", &format!("/api/threads/{thread}/burst/{big}"), Some(json!({ "action": "run", "items": ["Roses", "Herbs"] }))).await;
+    assert_eq!(status, 200);
+    let done = until(&mut events, "edited run", |f| is_burst(f, &thread, "finished") && f["message"]["id"] == big.as_str()).await;
+    let titles: Vec<&str> = done["message"]["burst"]["parts"].as_array().unwrap().iter().filter_map(|p| p["title"].as_str()).collect();
+    assert_eq!(titles, ["Roses", "Herbs"]);
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/burst/{big}"), Some(json!({ "action": "run" }))).await.0, 409, "once");
+
+    // Cancel a proposal: nothing runs.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "burst: a, b, c, d, e, f", "threadId": thread }))).await;
+    let proposed = until(&mut events, "proposed again", |f| is_burst(f, &thread, "proposed")).await;
+    let id = proposed["message"]["id"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/threads/{thread}/burst/{id}"), Some(json!({ "action": "cancel" }))).await;
+    let gone = until(&mut events, "cancelled", |f| is_burst(f, &thread, "cancelled")).await;
+    assert!(gone["message"]["burst"]["parts"].as_array().unwrap().iter().all(|p| p["thread"].is_null()), "{gone}");
+}

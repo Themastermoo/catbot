@@ -414,6 +414,15 @@ async fn run(
     // Skills any bot offers come out the same way.
     let (reply, offered) = super::skills::take(&result.reply);
     result.reply = reply;
+    // A burst it proposes, in its own chat (not in a burst's part, a channel or as a guest).
+    let mut burst = None;
+    let own_chat = !guest
+        && app.with_store(|store| store.conversation(thread)).flatten().is_some_and(|c| c.channel_id.is_none() && c.bot_id == bot.id && !c.title.as_deref().is_some_and(|t| t.starts_with("Burst · ")));
+    if own_chat {
+        let (reply, found) = super::burst::take(&result.reply);
+        result.reply = reply;
+        burst = found;
+    }
     // In the Team Chat, new pinned notes a bot proposes (stage 30.1).
     let mut notes = None;
     if super::team_chat::is_thread(app, thread) {
@@ -444,6 +453,9 @@ async fn run(
         }
     }
     super::skills::propose(app, thread, bot, offered);
+    if let Some(raw) = &burst {
+        super::burst::propose(app, thread, bot, raw);
+    }
     if let Some(text) = &notes {
         super::team_chat::propose(app, thread, bot, text);
     }

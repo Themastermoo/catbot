@@ -107,6 +107,11 @@ if prompt.startswith("limit"):
     out({"type": "result", "is_error": True, "result": "Claude AI usage limit reached|4102444800", "session_id": session})
     sys.exit(1)
 
+# A burst part (stage 32.15) whose item says "fail" breaks, as a CLI that fell over would.
+if last_line.startswith("This part: ") and "fail" in last_line:
+    print("Error: this part broke", file=sys.stderr)
+    sys.exit(1)
+
 if prompt == "crash":
     print("Error: something broke inside the CLI", file=sys.stderr)
     sys.exit(1)
@@ -180,6 +185,17 @@ if first_line.startswith("team: "):
 # "offer a skill" (the first line) offers one, as a bot that worked out a way would.
 if first_line == "offer a skill":
     reply = "This will come up again.\n<save-skill>---\nname: weed-check\ndescription: Check the beds for weeds.\n---\n\nWalk each bed.\n</save-skill>"
+# "burst: a, b, c" (the first line) proposes a burst of those parts; a part says what it checked;
+# the merge turn lists the parts it was given (stage 32.15).
+if first_line.startswith("burst: "):
+    items = [i.strip() for i in first_line[len("burst: "):].split(",") if i.strip()]
+    proposal = {"task": "Check the beds", "instructions": "Look for weeds.", "items": items}
+    reply = f"Splitting it.\n<burst>{json.dumps(proposal)}</burst>"
+if last_line.startswith("This part: "):
+    reply = f"Checked {last_line[len('This part: '):]}."
+if prompt.startswith("[The burst you ran"):
+    heads = [line[3:] for line in prompt.splitlines() if line.startswith("## ")]
+    reply = "Merged: " + ", ".join(heads) + ("; some failed" if "Parts that failed" in prompt else "")
 # "catbot-tool: name {json}" (the first line) calls one of Catbot's own tools and replies with what it said.
 if first_line.startswith("catbot-tool: "):
     name, _, arguments = first_line[len("catbot-tool: "):].partition(" ")

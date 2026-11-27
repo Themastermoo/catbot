@@ -1516,6 +1516,17 @@ impl Store {
         Ok(rows)
     }
 
+    /// Burst cards that were running or merging (stage 32.15): their chat and message.
+    pub fn burst_cards(&self) -> Result<Vec<(String, i64)>, BoxError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT conversation_id, id FROM messages
+             WHERE detail IS NOT NULL AND json_valid(detail) AND json_extract(detail, '$.kind') = 'burst'
+               AND json_extract(detail, '$.state') IN ('running', 'merging')",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?.collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
     /// How many conversations a bot has had.
     pub fn conversation_count(&self, bot_id: &str) -> Result<usize, BoxError> {
         let n: i64 = self.conn.query_row("SELECT COUNT(*) FROM conversations WHERE bot_id = ?1 AND channel_id IS NULL", [bot_id], |r| r.get(0))?;

@@ -50,6 +50,7 @@ pub mod events;
 pub mod folders;
 pub mod history;
 pub mod health;
+mod burst;
 mod review;
 pub mod hooks;
 pub mod hub;
@@ -390,6 +391,8 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
     scheduled::start(app.clone());
     // Messages that were waiting for a turn when Catbot stopped (stage 32, Moo, 2026-11-27).
     resume_held(&app);
+    // Bursts cut off by the stop say so, and go on with Continue (stage 32.15).
+    burst::after_restart(&app);
     // Messages a signed-out AI stopped go again once it's signed in (stage 32.6).
     tokio::spawn(health::keep_watch(app.clone()));
     axum::serve(listener, router(app)).await?;
@@ -1374,7 +1377,7 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     // What bots brought into this chat said, which the bot's own session didn't see.
     let told = format!("{}{}", handoffs::untold_note(app, &conversation.id, &bot.id), team::untold_note(app, &conversation.id));
     // `/skill-name …` runs one of the bot's skills: the bot reads which, and where its instructions are.
-    let asked = skills::command(app, &bot, &text).unwrap_or_else(|| text.clone());
+    let asked = burst::command(&text).or_else(|| skills::command(app, &bot, &text)).unwrap_or_else(|| text.clone());
     let said = format!("{asked}{}{reacted}{told}{}", attachments::note(&described), scheduled::late_note(&body));
     if busy {
         app.held.lock().expect("held lock").entry(thread.clone()).or_default().push((request_id, said.trim().to_string()));
@@ -1384,6 +1387,8 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     }
     let mut bot = bot;
     bot.instructions.push_str(&handoffs::roster_note(app, &bot));
+    // How to run a burst (stage 32.15).
+    bot.instructions.push_str(burst::NOTE);
     let bot = match switched {
         Some((stand_in, why)) => {
             turns::save_and_send(app, &conversation.id, Role::Note, &why, None);
@@ -1577,6 +1582,10 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
         (Method::POST, ["images", message]) => {
             let body = json_body(req).await?;
             images::answer(app, thread, &urlencoding_decode(message), &body).await
+        }
+        (Method::POST, ["burst", message]) => {
+            let body = json_body(req).await?;
+            burst::answer(app, thread, &urlencoding_decode(message), &body)
         }
         (Method::POST, ["team", message]) => {
             let body = json_body(req).await?;
