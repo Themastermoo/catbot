@@ -108,7 +108,9 @@ pub fn BotPanel(bot: Bot) -> Element {
                                     role: "tab",
                                     "aria-selected": "{tab() == id}",
                                     "data-panel-tab": "{label.to_lowercase()}",
-                                    class: if tab() == id { "h-[26px] min-w-0 shrink truncate rounded-full bg-ink/[0.1] px-3 text-[13px] font-medium leading-[18px] text-ink" } else { "h-[26px] min-w-0 shrink truncate rounded-full px-3 text-[13px] leading-[18px] text-ink-secondary transition-colors hover:text-ink" },
+                                    // Five names fit the panel's width at this padding (three fit at px-3).
+                                    title: "{label}",
+                                    class: if tab() == id { "h-[26px] min-w-0 shrink truncate rounded-full bg-ink/[0.1] px-2 text-[13px] font-medium leading-[18px] text-ink" } else { "h-[26px] min-w-0 shrink truncate rounded-full px-2 text-[13px] leading-[18px] text-ink-secondary transition-colors hover:text-ink" },
                                     onclick: move |_| tab.set(id),
                                     "{label}"
                                 }
