@@ -44,7 +44,7 @@ the three views, the key frames four to a row, then the key frames at real size 
 under each) tinted purple, orange and silver, the last on a light background. `preview.json`
 lists the order.
 
-Full mode renders 284 frames in three passes (852 renders at 192 x 160).
+Full mode renders 636 frames in three passes (1,908 renders at 192 x 160).
 
 ## The app icon
 

@@ -165,7 +165,6 @@ impl App {
         helper: Option<Vec<String>>,
         ui: Option<PathBuf>,
     ) -> Arc<Self> {
-        crate::engines::set_agents_dir(store.home().join("agents"));
         let chatgpt = Arc::new(crate::chatgpt::Plan::new(store.home().join("providers").join("chatgpt").join("account")));
         Arc::new(Self {
             store: Mutex::new(store),
@@ -321,6 +320,9 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
             false
         }
     });
+    // Where agent programs live and their sign-ins are noted: one place for the whole process, so
+    // set here, once, rather than by every App (each test's App used to move it under the others).
+    crate::engines::set_agents_dir(store.home().join("agents"));
     let app = App::new(store, proxy, options.codex, memory, options.cli, helper, ui.clone());
     app.with_store(|store| {
         repair_guest_sessions(store);

@@ -1473,13 +1473,44 @@ def anim_dangle(t):
     return p, face(blink_shape(t, 0.72, base="wide"), lx=int(round(sw)), ly=1), lights(0.45, 0.45)
 
 
-def _chase_pose(u, steps):
-    """The tail chase's running pose, `u` 0..1 through the spin: the spine bent in a C towards
-    the near side, head round after the tail, the tail curled just out of reach, and the paws
-    pattering in diagonal pairs, `steps` each."""
-    p = P(hz=-0.30, hp=4, hy=16, wy=-24, cy=-28, ny=-46, np=14, kp=10, ky=-96, kr=8,
+def _chase_head(theta):
+    """Where the head turns (its yaw in the cat's own frame) when the cat has spun `theta`
+    degrees of a turn, 0..360: after the tail on the near side to begin with; then, as the body
+    comes round, held three-quarters on to the viewer (the body turns under it); one quick whip
+    round the far side while the rear passes; and back onto the tail. So the face shows in all
+    but a frame or two of each turn."""
+    theta %= 360.0
+    if theta < 54:
+        return -96.0
+    if theta < 214:
+        return -150.0 + theta
+    if theta < 254:
+        return lerp(-150.0 + theta, theta - 390.0, smooth((theta - 214) / 40.0))
+    return lerp(theta - 390.0, -96.0, smooth((theta - 254) / 70.0))
+
+
+def _chase_turns():
+    """How far round the cat is (degrees, 0..720) for each of 721 even steps of time through
+    the spin: slow away from standing and back to it, and three times as quick while its rear
+    is to the viewer (270 degrees into each turn), so that view takes a frame or two."""
+    theta = np.linspace(0.0, 720.0, 2881)
+    off = np.abs((theta - 270.0 + 180.0) % 360.0 - 180.0)            # degrees from the rear view
+    quick = 1.0 + 2.6 * np.clip(1 - off / 75.0, 0, 1) ** 1.5
+    ease = 0.35 + 0.65 * np.sin(np.pi * np.clip(theta / 720.0, 0.0, 1.0)) ** 0.7   # slow ends
+    spent = np.concatenate([[0.0], np.cumsum(1.0 / (quick[:-1] * ease[:-1] + 1e-6))])
+    return np.interp(np.linspace(0.0, spent[-1], 721), spent, theta)
+
+
+CHASE_TURNS = _chase_turns()
+
+
+def _chase_pose(theta, patter):
+    """The tail chase's running pose, `theta` degrees round: the spine bent in a C towards the
+    near side, the tail curled round just ahead of the nose, the head by `_chase_head`, and the
+    paws pattering in diagonal pairs (`patter` -1..1)."""
+    ky = _chase_head(theta)
+    p = P(hz=-0.30, hp=4, hy=16, wy=-24, cy=-28, ny=0.48 * ky, np=14, kp=10, ky=ky, kr=8,
           en_p=12, ef_p=12, tail=[6, 10, 14, 18, 22, 26], tail_h=[30, 62, 92, 118, 138, 150])
-    patter = wave(u, steps)
     for leg, dx, dy, side in (("fn", 0.10, -0.52, 1), ("ff", 0.22, -0.40, -1),
                               ("hn", 0.20, 0.12, -1), ("hf", 0.10, 0.20, 1)):
         hang_leg(p, leg, dx, -2.0, dy=dy)
@@ -1488,22 +1519,23 @@ def _chase_pose(u, steps):
         p[leg + "_pp"] = 20 * lift
         if leg in LEGS_HIND:
             p[leg + "_mp"] = 10 * lift
-    p["te" + TIP] += 16 * wave(u, steps, 0.2)
-    p["th" + TIP] += 14 * wave(u, steps, 0.45)
-    p["hz"] += 0.05 * wave(u, steps * 2)
     return p
 
 
 def anim_tail_chase(t):
-    """It notices its tail, and goes after it: twice round on the spot, paws pattering, then a
-    stop, a dizzy wobble of the head and back to standing."""
+    """It notices its tail, and goes after it: twice round on the spot, paws pattering, the
+    face kept to the viewer but for a quick whip of the head each turn, the rear view over in a
+    frame or two; then a stop, a dizzy wobble of the head and back to standing."""
     stand = anim_idle(0.0)[0]
     into = smooth(t / 0.16)
     out = 1 - smooth((t - 0.84) / 0.16)
     u = min(1.0, max(0.0, (t - 0.12) / 0.72))
-    p = mix(stand, _chase_pose(u, 6), min(into, out))
-    turn = u * u * (3 - 2 * u)
-    p["spin"] = -720.0 * turn
+    theta = float(np.interp(u * 720.0, np.arange(721.0), CHASE_TURNS))
+    p = mix(stand, _chase_pose(theta, wave(theta / 720.0, 6)), min(into, out))
+    p["te" + TIP] += 16 * wave(u, 6, 0.2) * min(into, out)
+    p["th" + TIP] += 14 * wave(u, 6, 0.45) * min(into, out)
+    p["hz"] += 0.05 * wave(u, 12) * min(into, out)
+    p["spin"] = -theta
     dizzy = bump(t, 0.92, 0.09)
     p["kr"] += 12 * dizzy * wave(t, 8)
     p["ky"] += 8 * dizzy * wave(t, 8, 0.25)

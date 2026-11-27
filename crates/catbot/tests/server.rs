@@ -1038,10 +1038,7 @@ async fn an_ai_program_is_installed_and_signed_in_with_one_button() {
     }
 
     let s = setup().await;
-    // SAFETY: the tests that set it take turns (AGENTS_TURN).
-    unsafe {
-        std::env::set_var("CATBOT_AGENTS_DIR", s._dir.path().join("home/agents"));
-    }
+    let _pinned = PinnedAgents::at(&s._dir.path().join("home/agents"));
     let mut events = s.events().await;
     until(&mut events, "hello", |f| f["kind"] == "hello").await;
     let kimi = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "kimi").unwrap().clone();
@@ -4333,6 +4330,25 @@ async fn a_bot_on_pi_lists_models_asks_on_cards_and_carries_on() {
 /// The tests that set `CATBOT_AGENTS_DIR` (process-wide) take turns.
 static AGENTS_TURN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Pins where agent programs live for one test (hold `AGENTS_TURN` first); let go when it ends,
+/// pass or fail, so no later test finds a folder that's gone.
+struct PinnedAgents;
+
+impl PinnedAgents {
+    fn at(dir: &std::path::Path) -> Self {
+        // SAFETY: only the tests holding AGENTS_TURN set or read it.
+        unsafe { std::env::set_var("CATBOT_AGENTS_DIR", dir) };
+        PinnedAgents
+    }
+}
+
+impl Drop for PinnedAgents {
+    fn drop(&mut self) {
+        // SAFETY: as above.
+        unsafe { std::env::remove_var("CATBOT_AGENTS_DIR") };
+    }
+}
+
 /// Stage 12.4.3: Antigravity, downloaded by Catbot, signed in with Google, and answering.
 #[tokio::test]
 async fn antigravity_installs_signs_in_with_google_and_answers() {
@@ -4361,8 +4377,8 @@ async fn antigravity_installs_signs_in_with_google_and_answers() {
     // SAFETY: only this test reads these.
     unsafe {
         std::env::set_var("CATBOT_DOWNLOAD_ANTIGRAVITY", format!("http://{addr}/agy.zip {sha}"));
-        std::env::set_var("CATBOT_AGENTS_DIR", &agents);
     }
+    let _pinned = PinnedAgents::at(&agents);
     let mut events = s.events().await;
     until(&mut events, "hello", |f| f["kind"] == "hello").await;
     let agy = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "antigravity").unwrap().clone();
@@ -4444,10 +4460,10 @@ async fn muse_code_installs_signs_in_with_a_code_and_answers() {
     // SAFETY: only the tests holding AGENTS_TURN read these.
     unsafe {
         std::env::set_var("CATBOT_DOWNLOAD_MUSE_CODE", format!("http://{addr}/muse {sha}"));
-        std::env::set_var("CATBOT_AGENTS_DIR", &agents);
         std::env::set_var("XDG_CONFIG_HOME", bin.path().join("config"));
         std::env::remove_var("META_API_KEY");
     }
+    let _pinned = PinnedAgents::at(&agents);
     let mut events = s.events().await;
     until(&mut events, "hello", |f| f["kind"] == "hello").await;
     let muse = |list: &Value| list["engines"].as_array().unwrap().iter().find(|e| e["id"] == "muse-code").unwrap().clone();

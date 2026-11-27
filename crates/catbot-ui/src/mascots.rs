@@ -245,12 +245,28 @@ fn finished(before: &str, now: &str) -> bool {
     before == "working" && now == "idle"
 }
 
-/// The "?" over a cat that waits on the person. Always in the picture; `mascots.css` shows it
-/// in the waiting state only.
+/// How wide the "?" badge is drawn, in pixels, on a picture `size` pixels wide: about two
+/// fifths of the picture, but never under 10 pixels (so it reads on the 16 to 20 pixel pictures
+/// of a sidebar or a chat line, where it takes over half the width) nor over 22 (so it doesn't
+/// crowd the large ones).
+fn ask_width(size: u32) -> f64 {
+    (size as f64 * 0.42).clamp(10.0, 22.0)
+}
+
+/// The "?" on a drawn cat that waits on the person: a dark "?" on an amber disc (one fixed
+/// amber: a skin's own warning colour can be too dark to carry it) with a rim in the app's own
+/// ground, so it stands out on light and dark skins and off the cat. It sits on the picture's top right corner, a quarter of it past the edge.
+/// Always in the picture; `mascots.css` shows it in the waiting state only.
 #[component]
-fn Ask(color: String) -> Element {
+fn Ask(size: u32) -> Element {
+    // In the cats' 64-unit drawing.
+    let d = ask_width(size) * 64.0 / size.max(1) as f64;
+    let (cx, cy) = (64.0 - d * 0.25, d * 0.25);
     rsx! {
-        text { class: "cat-ask", x: "56", y: "19", font_size: "25", font_weight: "800", text_anchor: "middle", fill: "var(--identity-{color})", "?" }
+        g { class: "cat-ask", style: "transform-origin:{cx:.2}px {cy:.2}px",
+            circle { class: "cat-ask-disc", cx: "{cx:.2}", cy: "{cy:.2}", r: "{d / 2.0:.2}", stroke_width: "{d * 0.1:.2}" }
+            text { x: "{cx:.2}", y: "{cy + d * 0.29:.2}", font_size: "{d * 0.82:.2}", font_weight: "800", text_anchor: "middle", fill: INK, "?" }
+        }
     }
 }
 
@@ -301,13 +317,17 @@ fn RobotMark(mark: String, color: String, size: u32, state: String, #[props(defa
             "data-mark": "{mark}",
             "data-state": "{state}",
             "data-hop": hop.then_some("true"),
-            style: "{vary};width:{size}px;height:{size}px;overflow:hidden",
-            div { class: "robot-looks", style: "width:{ROBOT_LOOKS.len() * 100}%;isolation:isolate;-webkit-mask:url({base}) 0 0/100% 100% no-repeat;mask:url({base}) 0 0/100% 100% no-repeat",
-                div { style: "{layer};background-image:url({base})" }
-                div { style: "{layer};background:var(--identity-{color});mix-blend-mode:multiply;-webkit-mask:url({mask}) 0 0/100% 100% no-repeat;mask:url({mask}) 0 0/100% 100% no-repeat" }
-                div { style: "{layer};background-image:url({gloss});mix-blend-mode:screen" }
+            style: "{vary};width:{size}px;height:{size}px",
+            // The strip is clipped to one look here, not on the picture, so the "?" may sit
+            // past its corner.
+            div { style: "position:absolute;inset:0;overflow:hidden",
+                div { class: "robot-looks", style: "width:{ROBOT_LOOKS.len() * 100}%;isolation:isolate;-webkit-mask:url({base}) 0 0/100% 100% no-repeat;mask:url({base}) 0 0/100% 100% no-repeat",
+                    div { style: "{layer};background-image:url({base})" }
+                    div { style: "{layer};background:var(--identity-{color});mix-blend-mode:multiply;-webkit-mask:url({mask}) 0 0/100% 100% no-repeat;mask:url({mask}) 0 0/100% 100% no-repeat" }
+                    div { style: "{layer};background-image:url({gloss});mix-blend-mode:screen" }
+                }
             }
-            span { class: "cat-ask", style: "color:var(--identity-{color});font-size:{size * 2 / 5}px", "?" }
+            span { class: "cat-ask", style: "--ask:{ask_width(size):.1}px", "?" }
         } }
     }
 }
@@ -416,7 +436,7 @@ fn CatHead(color: String, size: u32, state: String, #[props(default)] hop: bool)
                 } }
             }
             path { fill: INK, d: NOSE }
-            Ask { color }
+            Ask { size }
         }
     }
 }
@@ -440,7 +460,7 @@ fn CatSitting(color: String, size: u32, state: String, #[props(default)] hop: bo
                 circle { cx: "21.7", cy: "20.7", r: "1.3", fill: "#ffffff" }
                 circle { cx: "36.7", cy: "20.7", r: "1.3", fill: "#ffffff" }
             } } }
-            Ask { color }
+            Ask { size }
         }
     }
 }
@@ -464,14 +484,27 @@ fn CatVisor(color: String, size: u32, state: String, #[props(default)] hop: bool
                 }
                 path { fill: "#ffffff", d: "M30 40.5L34 40.5Q34.8 40.7 34.3 41.5L32.6 43.3Q32 43.8 31.4 43.3L29.7 41.5Q29.2 40.7 30 40.5Z" }
             } }
-            Ask { color }
+            Ask { size }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{finished, robot_files, vary};
+    use super::{ask_width, finished, robot_files, vary};
+
+    #[test]
+    fn the_question_mark_reads_small_and_stays_modest_large() {
+        // On the small pictures it takes over half the width; on the large ones about a third.
+        assert_eq!((ask_width(16), ask_width(18), ask_width(20)), (10.0, 10.0, 10.0));
+        assert!((ask_width(28) - 11.76).abs() < 0.01);
+        assert_eq!((ask_width(64), ask_width(256)), (22.0, 22.0));
+        let mut last = 0.0;
+        for size in 12..=256 {
+            assert!(ask_width(size) >= last, "never smaller on a larger picture");
+            last = ask_width(size);
+        }
+    }
 
     #[test]
     fn a_picture_hops_when_its_bot_finishes() {
