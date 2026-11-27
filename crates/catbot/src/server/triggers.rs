@@ -831,6 +831,8 @@ pub fn start(app: &Arc<App>, trigger: &Trigger, source: &str, scheduled_for: Opt
                 super::handoffs::after_reply(&app, &runner, &thread, request_id, &reply, next).await;
             }
         }
+        // What the person sent while it ran (stage 29.12).
+        super::release_held(&app, &thread);
     });
     Ok(run)
 }

@@ -269,9 +269,9 @@ pub fn in_channel(mut bot: Bot, channel: &Channel, members: &[Bot]) -> Bot {
 /// `POST …/ch-…/messages`: the person's message, then each responder's turn in order.
 pub(super) fn send(app: &Arc<App>, channel: Channel, body: Value) -> Answer {
     let conversation = app.try_store(|store| store.channel_conversation(&channel.id)).map_err(fail)?.ok_or_else(|| bad("the channel has no transcript"))?;
-    if app.channel_busy(&channel.id) || app.turns.busy(&conversation.id) {
-        return Err((StatusCode::CONFLICT, "the channel is still answering the last message".into()));
-    }
+    // Busy: the message goes in the channel now, and is answered when the bots are done
+    // (stage 29.12, as a bot's own chat does since 29.11).
+    let busy = app.channel_busy(&channel.id) || app.turns.busy(&conversation.id);
     let members: Vec<Bot> = channel.members.iter().filter_map(|id| app.with_store(|store| store.bot_by_id(id)).flatten()).collect();
     if members.is_empty() {
         return Err(bad("the channel has no bots"));
@@ -302,20 +302,49 @@ pub(super) fn send(app: &Arc<App>, channel: Channel, body: Value) -> Answer {
     let message = turns::save_and_send(app, &conversation.id, Role::Person, &text, (detail != json!({})).then_some(&detail))
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "couldn't save the message".to_string()))?;
     let request_id = message["id"].as_str().and_then(wire::parse_message_id).ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no message id".to_string()))?;
-    let answering = responders(&text, &members, channel.lead.as_deref());
+    if busy {
+        app.held.lock().expect("held lock").entry(channel.id.clone()).or_default().push((request_id, text));
+        release_held(app, &channel.id);
+        return Ok((StatusCode::ACCEPTED, json!({ "ok": true, "message": message, "held": true })));
+    }
+    answer(app, &channel, &conversation.id, &members, request_id, &text);
+    Ok((StatusCode::ACCEPTED, json!({ "ok": true, "message": message })))
+}
+
+/// The bots a message asks for answer it, one after another, then whatever was said meanwhile.
+fn answer(app: &Arc<App>, channel: &Channel, thread: &str, members: &[Bot], request_id: i64, text: &str) {
+    let answering = responders(text, members, channel.lead.as_deref());
     app.set_channel_busy(&channel.id, true);
     announce(app, &channel.id);
     let app = app.clone();
     let channel_id = channel.id.clone();
-    let thread = conversation.id.clone();
+    let thread = thread.to_string();
     let asked = answering.len() as u32;
     let queue = answering.into_iter().map(|bot| super::handoffs::Turn { bot, depth: 0, from: None }).collect();
     tokio::spawn(async move {
         super::handoffs::follow(&app, &channel_id, &thread, request_id, queue, super::handoffs::Place::Channel(channel_id.clone()), asked, 0).await;
         app.set_channel_busy(&channel_id, false);
         announce(&app, &channel_id);
+        release_held(&app, &channel_id);
     });
-    Ok((StatusCode::ACCEPTED, json!({ "ok": true, "message": message })))
+}
+
+/// Messages sent while the channel was answering: once it's free, as one, to whoever they name
+/// (or the lead).
+pub fn release_held(app: &Arc<App>, channel_id: &str) {
+    let Some(channel) = app.with_store(|store| store.channel(channel_id)).flatten() else { return };
+    let Some(conversation) = app.with_store(|store| store.channel_conversation(channel_id)).flatten() else { return };
+    if app.channel_busy(channel_id) || app.turns.busy(&conversation.id) {
+        return;
+    }
+    let Some(held) = app.held.lock().expect("held lock").remove(channel_id).filter(|h| !h.is_empty()) else { return };
+    // (Each bot is shown the whole talk, replies given after these were sent included.)
+    let request_id = held.last().map(|(id, _)| *id).unwrap_or_default();
+    let said = held.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("\n\n");
+    let members: Vec<Bot> = channel.members.iter().filter_map(|id| app.with_store(|store| store.bot_by_id(id)).flatten()).collect();
+    if !members.is_empty() {
+        answer(app, &channel, &conversation.id, &members, request_id, &said);
+    }
 }
 
 #[cfg(test)]

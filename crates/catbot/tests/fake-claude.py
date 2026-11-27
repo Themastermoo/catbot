@@ -118,7 +118,8 @@ if prompt == "tool":
     out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1", "is_error": True,
          "content": "This command requires approval"}]}})
     denials = [{"tool_name": "Bash", "tool_use_id": "t1"}]
-if prompt == "approve":
+# (Also in a channel, where it's the person's last line in the talk.)
+if prompt == "approve" or ("</conversation_so_far>" in prompt and prompt.rsplit("</conversation_so_far>", 1)[0].rstrip().endswith("\nPerson: approve")):
     tool_input = {"command": "echo hi"}
     out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t2", "name": "Bash", "input": tool_input}]}})
     verdict = ask_permission("Bash", tool_input)

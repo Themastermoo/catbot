@@ -1733,6 +1733,31 @@ async fn pictures_are_asked_for_drawn_and_kept() {
 }
 
 #[tokio::test]
+async fn a_channel_holds_what_s_sent_while_it_answers() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let mut ids = Vec::new();
+    for name in ["Scout", "Kiwi"] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name }))).await;
+        ids.push(made["bot"]["id"].as_str().unwrap().to_string());
+    }
+    let (_, made) = s.call("POST", "/api/channels", Some(json!({ "name": "Garden", "members": ids, "lead": ids[0] }))).await;
+    let channel = made["bot"]["id"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{channel}/messages"), Some(json!({ "text": "approve" }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    let thread = asked["event"]["threadId"].as_str().unwrap().to_string();
+    // Sent while Scout waits: in the channel now, not turned away.
+    let (status, sent) = s.call("POST", &format!("/api/bots/{channel}/messages"), Some(json!({ "text": "@Kiwi and the beans?" }))).await;
+    assert_eq!((status, sent["held"].as_bool()), (202, Some(true)), "{sent}");
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    // Then Kiwi, named in it, answers it.
+    let kiwi = until(&mut events, "kiwi", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text" && f["message"]["botId"] == ids[1].as_str()).await;
+    assert!(kiwi["message"]["text"].as_str().unwrap().contains("and the beans?"), "{kiwi}");
+}
+
+#[tokio::test]
 async fn a_channel_is_answered_by_its_lead_or_whoever_is_named() {
     let s = setup().await;
     let mut events = s.events().await;
