@@ -78,6 +78,8 @@ pub struct Bot {
     pub approval_mode: String,
     /// Whether it may use the Codex vault.
     pub codex: bool,
+    /// Its answers get another look before they're done (stage 32.14).
+    pub review_check: bool,
     /// Whether its computer has a Codex vault at all (stage 29.1): no switch without one.
     pub codex_here: bool,
     /// What "Always allow" let it do without asking: (rule, how it reads).
@@ -224,6 +226,7 @@ impl Bot {
                 .unwrap_or_default(),
             approval_mode: wire["approvalMode"].as_str().unwrap_or("ask").to_string(),
             codex: wire["codex"].as_bool().unwrap_or(true),
+            review_check: wire["reviewCheck"] == true,
             codex_here: wire["codexHere"].as_bool().unwrap_or(true),
             allowed: wire["allowed"]
                 .as_array()

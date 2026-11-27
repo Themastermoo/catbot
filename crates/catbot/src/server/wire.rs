@@ -157,6 +157,8 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         // Catbot's own: which mascot it wears, and whether it may use the Codex vault.
         "mark": bot.mark.as_str(),
         "codex": bot.codex,
+        // Catbot's own: its answers get another look before they're done (stage 32.14).
+        "reviewCheck": super::review::is_on(store, &bot.id),
         // Catbot's own: the Chief of Staff wears a star.
         "chief": super::chief::is_chief_in(store, &bot.id),
         // Catbot's own: its department ("" for General), and whether it leads it.
@@ -296,6 +298,9 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                 "error": detail["error"],
                 // A done change to bots can be undone in one step (stage 32.12).
                 "canUndo": detail["state"] == "done" && detail["undo"].is_array(),
+                // A card's own words for its buttons (a review's Looks good and Needs work).
+                "approveLabel": detail["approveLabel"],
+                "declineLabel": detail["declineLabel"],
             },
         }),
         Role::Step if detail["kind"] == "trigger" => json!({

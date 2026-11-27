@@ -728,6 +728,19 @@ pub fn ApprovalSettings(bot: Bot) -> Element {
             if full {
                 p { class: "mt-2 text-[12px] text-warning", "{bot.name} acts without asking, anywhere it can reach." }
             }
+            // The review check (stage 32.14).
+            div { class: "mt-4 flex items-start gap-3", "data-review-check": true,
+                div { class: "min-w-0 flex-1",
+                    div { class: "text-[14px] text-ink", "Review check" }
+                    p { class: "mt-0.5 text-[12px] leading-snug text-ink-secondary",
+                        "Another look at {bot.name}'s answers before they're done: a bot that asked it checks the answer, and when you asked, a card in your Inbox asks you."
+                    }
+                }
+                Switch { checked: bot.review_check, disabled: false, label: "Review check".to_string(), on_toggle: {
+                    let on = !bot.review_check;
+                    move |_| change(json!({ "reviewCheck": on }))
+                } }
+            }
             // What "Always allow" on its approval cards let it do (allowed.rs).
             if !bot.allowed.is_empty() {
                 div { class: "mt-4 {LABEL}", "Always allowed" }

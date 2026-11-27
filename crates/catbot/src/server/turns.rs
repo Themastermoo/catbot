@@ -172,9 +172,13 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
         app.turns.finish(&thread_id);
         app.doing.lock().expect("doing lock").remove(&thread_id);
         app.announce_bot(&bot.id);
-        if let Some(reply) = reply.filter(|_| !next.is_empty()) {
+        let handed = !next.is_empty();
+        if let Some(reply) = reply.filter(|_| handed) {
             super::handoffs::after_reply(&app, &bot, &thread_id, request_id, &reply, next).await;
         }
+        // The person asked it directly and it has the review check on: their Inbox gets a card to
+        // look it over (stage 32.14).
+        super::review::ask_the_person(&app, &bot, &thread_id, request_id);
         // What the person said meanwhile (stage 29.11).
         super::release_held(&app, &thread_id);
         // Board work that waited for this bot (stage 30.3).

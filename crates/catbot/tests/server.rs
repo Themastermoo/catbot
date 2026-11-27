@@ -2276,6 +2276,55 @@ async fn a_channel_is_answered_by_its_lead_or_whoever_is_named() {
 }
 
 #[tokio::test]
+async fn the_review_check_asks_the_person_or_the_asking_bot() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let mut ids = Vec::new();
+    for (name, soul) in [("Scout", "fake-pass @Kiwi"), ("Kiwi", "")] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name, "soul": soul }))).await;
+        ids.push(made["bot"]["id"].as_str().unwrap().to_string());
+    }
+    let (_, on) = s.call("PATCH", &format!("/api/bots/{}", ids[1]), Some(json!({ "reviewCheck": true }))).await;
+    assert_eq!(on["bot"]["reviewCheck"], true, "{on}");
+
+    // Asked by the person: a review card in the chat and the Inbox (stage 32.14).
+    let (_, sent) = s.call("POST", &format!("/api/bots/{}/messages", ids[1]), Some(json!({ "text": "Draft the plan" }))).await;
+    let kiwis = sent["threadId"].as_str().unwrap().to_string();
+    let card = until(&mut events, "review card", |f| f["kind"] == "message" && f["threadId"] == kiwis.as_str() && f["message"]["kind"] == "team-change").await;
+    let change = &card["message"]["teamChange"];
+    assert_eq!((change["heading"].as_str(), change["approveLabel"].as_str(), change["declineLabel"].as_str()), (Some("Review Kiwi's answer"), Some("Looks good"), Some("Needs work")));
+    assert!(change["title"].as_str().unwrap().starts_with("Hello, Draft the plan"), "the answer's start: {change}");
+    // (The card comes once the turn is over.)
+    let (_, inbox) = s.call("GET", "/api/inbox", None).await;
+    assert!(inbox["rows"].as_array().unwrap().iter().any(|r| r["card"]["title"] == "Review Kiwi's answer"), "{inbox}");
+    let msg = card["message"]["id"].as_str().unwrap();
+    let (_, said) = s.call("POST", &format!("/api/threads/{kiwis}/team/{msg}"), Some(json!({ "approve": false }))).await;
+    assert_eq!(said["state"], "declined");
+    // Kiwi hears it with the next message.
+    s.call("POST", &format!("/api/bots/{}/messages", ids[1]), Some(json!({ "text": "again", "threadId": kiwis }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["threadId"] == kiwis.as_str() && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(reply["message"]["text"].as_str().unwrap().contains("says it needs work"), "{reply}");
+    until(&mut events, "card", |f| f["kind"] == "message" && f["threadId"] == kiwis.as_str() && f["message"]["kind"] == "team-change").await;
+
+    // Asked by Scout in their team chat: Scout looks it over there; it objects (no APPROVED),
+    // so Kiwi has one more go. No card for a bot's ask.
+    s.call("POST", "/api/departments", Some(json!({ "name": "Garden", "botIds": [ids[0], ids[1]] }))).await;
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    let room = list["bots"].as_array().unwrap().iter().find(|b| b["channel"]["teamChat"] == true).unwrap()["threadId"].as_str().unwrap().to_string();
+    let (_, sent) = s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Plan the beds" }))).await;
+    let thread = sent["threadId"].as_str().unwrap().to_string();
+    until(&mut events, "report", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["role"] == "bot" && f["message"]["text"].as_str().is_some_and(|t| t.contains("in #Garden]"))).await;
+    let (_, talk) = s.call("GET", &format!("/api/threads/{room}/messages?limit=40"), None).await;
+    let who: Vec<&str> = talk["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").filter_map(|m| m["botId"].as_str()).collect();
+    assert_eq!(who, [ids[0].as_str(), &ids[1], &ids[0], &ids[1]], "Scout asks; Kiwi answers; Scout reviews; Kiwi fixes: {talk}");
+    let texts: Vec<&str> = talk["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").filter_map(|m| m["text"].as_str()).collect();
+    assert!(texts[2].contains("has the review check on"), "Scout was asked to look it over: {}", texts[2]);
+    assert!(texts[3].contains("says it needs work"), "{}", texts[3]);
+    assert!(!talk.to_string().contains("Review Kiwi"), "no card for a bot's ask");
+}
+
+#[tokio::test]
 async fn a_running_hand_off_is_listed_and_can_be_stopped_alone() {
     let s = setup().await;
     let mut events = s.events().await;

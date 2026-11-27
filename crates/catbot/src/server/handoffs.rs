@@ -345,6 +345,24 @@ async fn in_team_chat(app: &Arc<App>, owner: &Bot, target: &Bot, thread: &str, c
     app.set_channel_busy(channel, true);
     channels::announce(app, channel);
     follow(app, channel, room, asked_id, queue, Place::Channel(channel.to_string()), 1, 0).await;
+    // The review check (stage 32.14): the asking bot looks the answer over there, and if it
+    // objects, the one that answered gets one more go.
+    if app.with_store(|store| Ok(super::review::is_on(store, &target.id))).unwrap_or(false) && !stopped(app, thread, run) {
+        let answered: Vec<String> = app
+            .with_store(|store| store.messages_after(room, asked_id))
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|m| m.role == Role::Bot && m.detail.as_ref().and_then(|d| d["botId"].as_str()) == Some(target.id.as_str()))
+            .map(|m| m.body.trim().to_string())
+            .collect();
+        if let Some(answer) = answered.last() {
+            let review = speak_in_room(app, owner, channel, room, &super::review::check_cue(&target.name, answer)).await;
+            if let Some(review) = review.filter(|r| !super::review::passed(r)) {
+                let cue = format!("[{}]: {}\n\n({} checked your answer and says it needs work: fix it here, briefly. Don't hand off from here.)", owner.name, review.trim(), owner.name);
+                speak_in_room(app, target, channel, room, &cue).await;
+            }
+        }
+    }
     app.set_channel_busy(channel, false);
     channels::announce(app, channel);
     channels::release_held(app, channel);
@@ -366,6 +384,22 @@ const DIRECT_REPLIES: u32 = 20;
 /// Whether a reply ends with a line saying just DONE: its bot thinks the task is done.
 pub fn says_done(reply: &str) -> bool {
     reply.trim_end().lines().last().is_some_and(|line| line.trim().trim_matches(|c: char| !c.is_alphanumeric()).eq_ignore_ascii_case("done"))
+}
+
+/// One turn of a bot in a team chat, as one of its members: what it said.
+async fn speak_in_room(app: &Arc<App>, bot: &Bot, channel: &str, room: &str, cue: &str) -> Option<String> {
+    let channel_row = app.with_store(|store| store.channel(channel)).flatten()?;
+    let members: Vec<Bot> = channel_row.members.iter().filter_map(|m| app.with_store(|store| store.bot_by_id(m)).flatten()).collect();
+    let now = app.with_store(|store| store.bot_by_id(&bot.id)).flatten().unwrap_or_else(|| bot.clone());
+    let mut runner = channels::in_channel(now, &channel_row, &members);
+    if let Some(dept) = super::team_chat::department_of_thread(app, room) {
+        runner.instructions.push_str(&super::team_chat::note(&channel_row, &dept));
+    }
+    let conversation = app.with_store(|store| store.conversation(room)).flatten()?;
+    let last = app.with_store(|store| store.messages(room, 1)).and_then(|m| m.last().map(|m| m.id))?;
+    let reply = turns::run_through(app, &runner, conversation, last, cue, false).await.ok().flatten();
+    app.announce_bot(channel);
+    reply
 }
 
 /// Another department (or none): a direct chat of the other bot's, opened for this, where the two

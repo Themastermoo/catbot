@@ -21,6 +21,9 @@ pub struct Change {
     pub choice: Option<Choice>,
     /// A done change to bots, which Undo takes back in one step (stage 32.12).
     pub can_undo: bool,
+    /// The buttons' words, when not Approve and Decline (a review's Looks good, Needs work).
+    pub approve_label: Option<String>,
+    pub decline_label: Option<String>,
 }
 
 /// A choice the person makes as they approve (where a page goes).
@@ -45,6 +48,8 @@ impl Change {
             state: wire["state"].as_str().unwrap_or("asking").to_string(),
             error: wire["error"].as_str().map(str::to_string),
             can_undo: wire["canUndo"] == true,
+            approve_label: wire["approveLabel"].as_str().map(str::to_string),
+            decline_label: wire["declineLabel"].as_str().map(str::to_string),
             choice: wire["choice"]["options"].as_array().map(|options| Choice {
                 label: wire["choice"]["label"].as_str().unwrap_or("Choose").to_string(),
                 options: options.iter().map(|o| (o["id"].as_str().unwrap_or_default().to_string(), o["label"].as_str().unwrap_or_default().to_string())).collect(),
@@ -152,7 +157,7 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                     "sending" => rsx! { p { class: "text-ink-secondary", "Sending…" } },
                     "publishing" => rsx! { p { class: "text-ink-secondary", "Publishing…" } },
                     "working" => rsx! { p { class: "text-ink-secondary", "Working…" } },
-                    "declined" => rsx! { p { class: "text-ink-tertiary", "Declined. Nothing changed." } },
+                    "declined" => rsx! { p { class: "text-ink-tertiary", {change.done_text.clone().unwrap_or_else(|| "Declined. Nothing changed.".into())} } },
                     "undone" => rsx! { p { class: "text-ink-tertiary", "data-team-undone": true, {change.done_text.clone().unwrap_or_else(|| "Undone.".into())} } },
                     _ => rsx! {},
                 }
@@ -167,7 +172,7 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                             disabled: sending(),
                             class: "rounded-lg bg-accent px-3 py-1.5 font-semibold text-white disabled:opacity-50",
                             onclick: move |_| send.call(true),
-                            "Approve"
+                            {change.approve_label.clone().unwrap_or_else(|| "Approve".into())}
                         }
                         button {
                             r#type: "button",
@@ -175,7 +180,7 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                             disabled: sending(),
                             class: "rounded-lg px-3 py-1.5 text-ink-secondary hover:bg-raised disabled:opacity-50",
                             onclick: move |_| send.call(false),
-                            "Decline"
+                            {change.decline_label.clone().unwrap_or_else(|| "Decline".into())}
                         }
                     }
                 }

@@ -50,6 +50,7 @@ pub mod events;
 pub mod folders;
 pub mod history;
 pub mod health;
+mod review;
 pub mod hooks;
 pub mod hub;
 pub mod memory;
@@ -1057,6 +1058,9 @@ pub(super) fn patch_bot_as(app: &Arc<App>, mut bot: Bot, body: Value, undo: bool
     }
     if let Some(list) = body.get("skills") {
         app.try_store(|store| skills::set(store, &bot.id, list).map_err(Into::into)).map_err(bad)?;
+    }
+    if let Some(on) = body["reviewCheck"].as_bool() {
+        app.try_store(|store| review::set(store, &bot.id, on)).map_err(bad)?;
     }
     if let Some(pet) = body["pet"].as_bool() {
         app.try_store(|store| pets::set(store, &bot.id, pet)).map_err(bad)?;

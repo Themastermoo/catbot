@@ -320,6 +320,14 @@ pub async fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -
     let title = detail["title"].as_str().unwrap_or_default().to_string();
     if body["approve"] != true {
         detail["state"] = json!("declined");
+        // A review that needs work (stage 32.14): the bot hears so with the person's next message.
+        if detail["action"] == "review" {
+            let name = detail["askedBy"].as_str().unwrap_or("The bot").to_string();
+            detail["doneText"] = json!(format!("Needs work: {name} hears so with your next message."));
+            update(app, thread, id, &detail);
+            remember(app, thread, "The person reviewed your last answer and says it needs work: fix what's wrong, or ask what to change.");
+            return Ok((StatusCode::OK, json!({ "ok": true, "state": "declined" })));
+        }
         update(app, thread, id, &detail);
         remember(app, thread, &format!("The person declined: {title}."));
         return Ok((StatusCode::OK, json!({ "ok": true, "state": "declined" })));
@@ -379,7 +387,9 @@ pub async fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -
                 detail["doneText"] = json!(note);
             }
             let more = note.as_deref().map(|n| format!(" {n}")).unwrap_or_default();
-            remember(app, thread, &format!("The person approved, and it's done: {title}.{more}"));
+            if detail["action"] != "review" {
+                remember(app, thread, &format!("The person approved, and it's done: {title}.{more}"));
+            }
         }
         Err(why) => {
             detail["state"] = json!("failed");
@@ -400,6 +410,7 @@ async fn apply(app: &Arc<App>, detail: &Value) -> Result<Option<String>, String>
     let channel = || app.with_store(|store| store.channel(target)).flatten().ok_or_else(|| "that channel is gone".to_string());
     let done = match detail["action"].as_str().unwrap_or_default() {
         "publish_page" => return super::pages::publish(app, &body).await.map(Some),
+        "review" => return Ok(Some("Looks good: reviewed.".into())),
         // ComfyUI's jobs are queued and waited for in the background (`comfyui.rs`).
         "app_call" if body["comfyui"] == true => return super::comfyui::run_approved(app, &body, target).await.map(Some),
         "app_call" => return super::apps::run_approved(app, &body).await.map(Some),

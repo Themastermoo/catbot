@@ -184,6 +184,13 @@ fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
         let Ok(Some(conversation)) = store.conversation(&thread) else { continue };
         let Some(detail) = &message.detail else { continue };
         let card = match detail["kind"].as_str() {
+            // A review (stage 32.14): "Review Kiwi's answer", the answer's start under it.
+            Some("team-change") if detail["state"] == "asking" && detail["action"] == "review" => json!({
+                "type": "change",
+                "title": detail["heading"],
+                "lines": [detail["title"]],
+                "warning": null,
+            }),
             Some("team-change") if detail["state"] == "asking" => json!({
                 "type": "change",
                 "title": detail["title"],
@@ -197,7 +204,7 @@ fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
         let bot = asked_by.and_then(|n| store.bot(n).ok().flatten()).map(|b| b.id).unwrap_or_else(|| conversation.bot_id.clone());
         let text = match card["type"].as_str() {
             Some("picture") => format!("Choose who draws: {}", detail["prompt"].as_str().unwrap_or_default()),
-            _ => detail["title"].as_str().unwrap_or(&message.body).to_string(),
+            _ => card["title"].as_str().unwrap_or(&message.body).to_string(),
         };
         let id = wire::message_id(message.id);
         rows.push(Row {
