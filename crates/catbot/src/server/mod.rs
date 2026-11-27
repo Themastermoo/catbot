@@ -144,6 +144,9 @@ pub struct App {
     /// When each AI last answered or was fixed, and a nudge when one is (stage 32.6): messages it
     /// stopped go again.
     pub worked: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+    /// Hand-offs running now from each person's chat, for the row above its message box
+    /// (stage 32.13), with the ones stopped.
+    pub handoffs_now: std::sync::Mutex<std::collections::HashMap<String, Vec<Value>>>,
     pub fixed: tokio::sync::Notify,
     /// Updates with rollback (stage 28): where this Catbot runs, and a download or install under way.
     pub updates: updates::Updates,
@@ -191,6 +194,7 @@ impl App {
             held: std::sync::Mutex::new(std::collections::HashMap::new()),
             troubles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
             worked: std::sync::Mutex::new(std::collections::HashMap::new()),
+            handoffs_now: std::sync::Mutex::new(std::collections::HashMap::new()),
             fixed: tokio::sync::Notify::new(),
             updates: updates::Updates::default(),
             local: std::sync::OnceLock::new(),
@@ -1583,6 +1587,15 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
         (Method::POST, ["steer"]) => {
             let body = json_body(req).await?;
             steer(app, thread, &body).await
+        }
+        // The hand-offs running from this chat (stage 32.13), and Stop on one of them.
+        (Method::GET, ["handoffs"]) => Ok((StatusCode::OK, json!({ "running": handoffs::running(app, thread) }))),
+        (Method::POST, ["handoffs", id, "stop"]) => {
+            if handoffs::stop(app, thread, id) {
+                Ok((StatusCode::OK, json!({ "ok": true })))
+            } else {
+                Err((StatusCode::NOT_FOUND, "that hand-off isn't running any more".into()))
+            }
         }
         (Method::POST, ["unsend"]) => {
             let body = json_body(req).await?;

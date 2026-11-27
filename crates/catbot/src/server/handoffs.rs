@@ -211,10 +211,20 @@ pub async fn after_reply(app: &Arc<App>, owner: &Bot, thread: &str, request_id: 
         if !app.channel_busy(thread) {
             break; // Stopped.
         }
-        let answers = match super::team_chat::shared_room(app, owner, &target) {
-            Some((channel, room)) => in_team_chat(app, owner, &target, thread, &channel, &room, &ask).await,
-            None => in_direct_chat(app, owner, &target, thread, &ask).await,
+        let shared = super::team_chat::shared_room(app, owner, &target);
+        let place = match &shared {
+            Some((channel, _)) => format!("#{}", app.with_store(|store| store.channel(channel)).flatten().map(|c| c.name).unwrap_or_else(|| "team chat".into())),
+            None => "a direct chat".to_string(),
         };
+        let run = begin(app, thread, owner, &target, &place);
+        let mut answers = match &shared {
+            Some((channel, room)) => in_team_chat(app, owner, &target, thread, channel, room, &ask, &run).await,
+            None => in_direct_chat(app, owner, &target, thread, &ask, &run).await,
+        };
+        if stopped(app, thread, &run) {
+            answers.push(format!("(The person stopped {}'s part before it was done.)", target.name));
+        }
+        end(app, thread, &run);
         heard.extend(answers);
     }
     // Back in the person's chat: the asking bot says what came of it.
@@ -237,6 +247,70 @@ pub async fn after_reply(app: &Arc<App>, owner: &Bot, thread: &str, request_id: 
     app.announce_bot(&owner.id);
 }
 
+/// A hand-off starting from the person's chat (stage 32.13): listed for the row above its
+/// message box until it ends. Returns its id.
+fn begin(app: &App, thread: &str, owner: &Bot, target: &Bot, place: &str) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    let entry = json!({
+        "id": id, "from": owner.name, "fromId": owner.id, "to": target.name, "toId": target.id,
+        "place": place, "room": null, "chatOf": null, "startedAt": chrono::Utc::now().timestamp_millis(), "stopped": false,
+    });
+    app.handoffs_now.lock().expect("handoffs lock").entry(thread.to_string()).or_default().push(entry);
+    told(app, thread);
+    id
+}
+
+/// Where a running hand-off talks, once there's a chat for it (for Open).
+fn talks_in(app: &App, thread: &str, run: &str, room: &str, chat_of: &str) {
+    if let Some(entry) = app.handoffs_now.lock().expect("handoffs lock").get_mut(thread).and_then(|l| l.iter_mut().find(|e| e["id"] == run)) {
+        entry["room"] = json!(room);
+        entry["chatOf"] = json!(chat_of);
+    }
+    told(app, thread);
+}
+
+fn end(app: &App, thread: &str, run: &str) {
+    if let Some(list) = app.handoffs_now.lock().expect("handoffs lock").get_mut(thread) {
+        list.retain(|e| e["id"] != run);
+    }
+    told(app, thread);
+}
+
+/// Whether the person stopped this hand-off.
+fn stopped(app: &App, thread: &str, run: &str) -> bool {
+    app.handoffs_now.lock().expect("handoffs lock").get(thread).and_then(|l| l.iter().find(|e| e["id"] == run)).is_some_and(|e| e["stopped"] == true)
+}
+
+/// The hand-offs running from a chat now.
+pub fn running(app: &App, thread: &str) -> Vec<Value> {
+    app.handoffs_now.lock().expect("handoffs lock").get(thread).cloned().unwrap_or_default()
+}
+
+/// Stop on one hand-off: its talk ends where it is (the turn there is interrupted), and the
+/// asking bot reports what came of it. False when it isn't running.
+pub fn stop(app: &App, thread: &str, run: &str) -> bool {
+    let room = {
+        let mut all = app.handoffs_now.lock().expect("handoffs lock");
+        let Some(entry) = all.get_mut(thread).and_then(|l| l.iter_mut().find(|e| e["id"] == run)) else { return false };
+        entry["stopped"] = json!(true);
+        (entry["room"].as_str().map(str::to_string), entry["chatOf"].as_str().map(str::to_string))
+    };
+    if let (Some(room), chat_of) = room {
+        app.turns.interrupt(&room);
+        // In a team chat, its chain stops too.
+        if let Some(channel) = chat_of.filter(|c| app.with_store(|store| store.channel(c)).flatten().is_some()) {
+            app.set_channel_busy(&channel, false);
+        }
+    }
+    told(app, thread);
+    true
+}
+
+/// The row's frame: `{ kind: "handoffs-running", threadId, running }`.
+fn told(app: &App, thread: &str) {
+    app.hub.send(json!({ "kind": "handoffs-running", "threadId": thread, "running": running(app, thread) }));
+}
+
 /// The line in the person's chat that says where the bots are talking, with Open.
 fn say_where(app: &App, owner: &Bot, thread: &str, text: &str, room: &str, chat_of: &str) {
     let detail = json!({ "teamUpdate": { "botId": owner.id, "kind": "handoff", "threadId": room, "chatOf": chat_of } });
@@ -244,9 +318,9 @@ fn say_where(app: &App, owner: &Bot, thread: &str, text: &str, room: &str, chat_
 }
 
 /// Waits (up to a quarter of an hour) for a chat to be free.
-async fn free(app: &App, key: &str, room: &str) {
+async fn free(app: &App, key: &str, room: &str, thread: &str, run: &str) {
     for _ in 0..450 {
-        if !app.channel_busy(key) && !app.turns.busy(room) {
+        if (!app.channel_busy(key) && !app.turns.busy(room)) || stopped(app, thread, run) {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -255,10 +329,15 @@ async fn free(app: &App, key: &str, room: &str) {
 
 /// Same department: the asking bot's words go in the team chat, and the other answers there (and
 /// may bring in its teammates there, within the limits). What they said comes back.
-async fn in_team_chat(app: &Arc<App>, owner: &Bot, target: &Bot, thread: &str, channel: &str, room: &str, ask: &str) -> Vec<String> {
+#[allow(clippy::too_many_arguments)]
+async fn in_team_chat(app: &Arc<App>, owner: &Bot, target: &Bot, thread: &str, channel: &str, room: &str, ask: &str, run: &str) -> Vec<String> {
     let name = app.with_store(|store| store.channel(channel)).flatten().map(|c| c.name).unwrap_or_else(|| "the team chat".into());
     say_where(app, owner, thread, &format!("{} asked {} in #{name}.", owner.name, target.name), room, channel);
-    free(app, channel, room).await;
+    free(app, channel, room, thread, run).await;
+    if stopped(app, thread, run) {
+        return Vec::new();
+    }
+    talks_in(app, thread, run, room, channel);
     let Some(asked) = turns::save_and_send(app, room, Role::Bot, ask, Some(&json!({ "botId": owner.id }))) else { return Vec::new() };
     let Some(asked_id) = asked["id"].as_str().and_then(super::wire::parse_message_id) else { return Vec::new() };
     let mut queue = VecDeque::new();
@@ -292,8 +371,9 @@ pub fn says_done(reply: &str) -> bool {
 /// Another department (or none): a direct chat of the other bot's, opened for this, where the two
 /// talk it through, taking turns, until both say it's done (Moo, 2026-11-27: "an agreed upon
 /// done", not one answer). Then it's closed (archived). At the limit it's left open to look in.
-async fn in_direct_chat(app: &Arc<App>, owner: &Bot, target: &Bot, thread: &str, ask: &str) -> Vec<String> {
+async fn in_direct_chat(app: &Arc<App>, owner: &Bot, target: &Bot, thread: &str, ask: &str, run: &str) -> Vec<String> {
     let Some(conversation) = app.with_store(|store| store.new_conversation(&target.id)) else { return Vec::new() };
+    talks_in(app, thread, run, &conversation.id, &target.id);
     let title: String = format!("{} asks: {}", owner.name, ask.split_whitespace().collect::<Vec<_>>().join(" "));
     let title: String = if title.chars().count() > 60 { format!("{}…", title.chars().take(59).collect::<String>()) } else { title };
     let _ = app.with_store(|store| store.set_title(&conversation.id, &title, false));
@@ -316,7 +396,7 @@ async fn in_direct_chat(app: &Arc<App>, owner: &Bot, target: &Bot, thread: &str,
     let mut done_by: Option<String> = None;
     let mut agreed = false;
     let mut replies = 0;
-    while replies < limit && app.channel_busy(thread) {
+    while replies < limit && app.channel_busy(thread) && !stopped(app, thread, run) {
         let (speaker, other) = if replies % 2 == 0 { (target, owner) } else { (owner, target) };
         let now = app.with_store(|store| store.bot_by_id(&speaker.id)).flatten().unwrap_or_else(|| speaker.clone());
         let bot = match super::backups::choose(app, &now) {
@@ -349,7 +429,9 @@ async fn in_direct_chat(app: &Arc<App>, owner: &Bot, target: &Bot, thread: &str,
         done_by = done.then(|| speaker.name.clone());
     }
     super::departments::hand_done(app, &target.id, &conversation.id);
-    if agreed {
+    if stopped(app, thread, run) {
+        turns::save_and_send(app, &conversation.id, Role::Note, "The person stopped this here; it's left open to look in.", None);
+    } else if agreed {
         turns::save_and_send(app, &conversation.id, Role::Note, "Both said it's done: this direct chat is closed.", None);
         let _ = app.with_store(|store| store.set_archived(&conversation.id, true));
     } else if replies >= limit {

@@ -294,6 +294,8 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
                 "choice": detail["choice"],
                 "state": detail["state"],
                 "error": detail["error"],
+                // A done change to bots can be undone in one step (stage 32.12).
+                "canUndo": detail["state"] == "done" && detail["undo"].is_array(),
             },
         }),
         Role::Step if detail["kind"] == "trigger" => json!({

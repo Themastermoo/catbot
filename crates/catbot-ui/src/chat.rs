@@ -872,6 +872,7 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, after: Option<String
                         button { r#type: "button", class: "flex size-5 shrink-0 items-center justify-center rounded hover:bg-danger/10", "aria-label": "Dismiss", onclick: move |_| problem.set(None), "×" }
                     }
                 }
+                HandoffRows { thread: bot.thread_id.clone() }
                 if let Some(question) = pending.first() {
                     if question.questions.is_empty() {
                         ApprovalPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len(), on_cancel_turn: move |_| stop(()) }
@@ -2011,6 +2012,72 @@ pub fn approval_detail(subtitle: &str, tool: Option<&str>) -> String {
 
 /// Their code chip for a request's detail (`APPROVAL_CODE_CHIP`).
 const APPROVAL_CODE_CHIP: &str = "inline-flex min-w-0 max-w-full items-baseline rounded-full bg-inset px-2 pb-px pt-[3px] font-mono text-[13px] leading-5 text-ink";
+
+/// A row above the message box for each hand-off running from this chat (stage 32.13, after
+/// OpenMausBot 0.1.180): who asked whom, where, for how long; Open shows that talk, Stop ends it
+/// alone (the asking bot still reports back).
+#[component]
+fn HandoffRows(thread: String) -> Element {
+    let mut state = use_context::<Signal<State>>();
+    let ui = use_context::<crate::settings::Ui>();
+    // What's running when the chat opens; the server's frames keep it up to date after.
+    use_effect(use_reactive!(|thread| {
+        spawn(async move {
+            if let Ok(answer) = api::get(&format!("/api/threads/{thread}/handoffs")).await {
+                state.write().running_handoffs.insert(thread.clone(), answer["running"].as_array().cloned().unwrap_or_default());
+            }
+        });
+    }));
+    let mut tick = use_signal(|| 0u64);
+    use_future(move || async move {
+        loop {
+            crate::events::pause(1000).await;
+            tick += 1;
+        }
+    });
+    let _ = tick();
+    let rows = state.read().running_handoffs.get(&thread).cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return rsx! {};
+    }
+    rsx! {
+        div { class: "mb-2 flex flex-col gap-1", "data-handoff-rows": true,
+            for row in rows {
+                {
+                    let id = row["id"].as_str().unwrap_or_default().to_string();
+                    let (from, to, place) = (row["from"].as_str().unwrap_or("A bot").to_string(), row["to"].as_str().unwrap_or("another bot").to_string(), row["place"].as_str().unwrap_or("").to_string());
+                    let stopped = row["stopped"] == true;
+                    let since = elapsed_label((js_now() - row["startedAt"].as_f64().unwrap_or_else(js_now)).max(0.0));
+                    let (room, chat_of) = (row["room"].as_str().unwrap_or_default().to_string(), row["chatOf"].as_str().unwrap_or_default().to_string());
+                    let can_open = !room.is_empty() && state.read().bots.iter().any(|b| b.id == chat_of);
+                    let stop_path = format!("/api/threads/{thread}/handoffs/{id}/stop");
+                    rsx! {
+                        div { key: "{id}", class: "flex min-w-0 items-center gap-2 rounded-full bg-composer px-3 py-1.5 text-[13px] ring-[0.5px] ring-ink/10", "data-handoff-row": "{id}",
+                            span { class: "shrink-0 text-ink-secondary", crate::sidebar::Icon { name: "handoff", size: 14 } }
+                            span { class: "min-w-0 flex-1 truncate text-ink",
+                                "{from} ⇄ {to}"
+                                span { class: "text-ink-tertiary", if place.is_empty() { " · " } else { " · in {place} · " } }
+                                span { class: "tabular-nums text-ink-tertiary", if stopped { "stopping…" } else { "working · {since}" } }
+                            }
+                            if can_open {
+                                button { r#type: "button", "data-handoff-open": true, class: "shrink-0 rounded-full px-2 py-0.5 text-[12px] font-medium text-ink-secondary hover:bg-ink/[0.06]",
+                                    onclick: move |_| crate::chats::open(state, ui, &chat_of, &room), "Open" }
+                            }
+                            button { r#type: "button", "data-handoff-stop": true, disabled: stopped, title: "Stop just this hand-off; {from} still reports back",
+                                class: "shrink-0 rounded-full bg-ink/[0.07] px-2.5 py-0.5 text-[12px] font-medium text-ink hover:bg-ink/[0.11] disabled:opacity-40",
+                                onclick: move |_| {
+                                    let path = stop_path.clone();
+                                    spawn(async move { let _ = api::post(&path, &serde_json::json!({})).await; });
+                                },
+                                "Stop"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// A question in words in the conversation (stage 32.5): what was asked, and once answered, the
 /// answers. While it waits, the panel above the typing box asks it.

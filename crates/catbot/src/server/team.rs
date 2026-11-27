@@ -24,11 +24,12 @@ pub const CHIEF_NOTE: &str = "\n\nYou can change the team, but only with the per
 only if they approve; you'll hear how it went with their next message. Say in your reply what you proposed and why. The changes:\n\
 - {\"action\":\"create_bot\",\"name\":\"…\",\"instructions\":\"…\",\"ai\":\"claude\",\"approval\":\"ask\"}\n\
 - {\"action\":\"change_bot\",\"bot\":\"its name\", and any of \"name\", \"instructions\", \"ai\", \"model\", \"approval\", \"color\", \"codex\": true or false}\n\
+- {\"action\":\"change_bots\",\"bots\":[\"bot names\"] or \"all\", and any of \"ai\", \"model\", \"approval\", \"color\", \"codex\"}: one change to several bots at once\n\
 - {\"action\":\"delete_bot\",\"bot\":\"its name\"}\n\
 - {\"action\":\"create_channel\",\"name\":\"…\",\"members\":[\"bot names\"],\"lead\":\"a member\",\"instructions\":\"…\"}\n\
 - {\"action\":\"change_channel\",\"channel\":\"its name\", and any of \"name\", \"instructions\", \"members\", \"lead\"}\n\
 - {\"action\":\"delete_channel\",\"channel\":\"its name\"}\n\
-Approval levels: \"ask\" (asks before acting), \"edits\" (edits files without asking), \"auto\" (decides what's safe), \
+A change to bots can be undone afterwards, in one step, from its card. Approval levels: \"ask\" (asks before acting), \"edits\" (edits files without asking), \"auto\" (decides what's safe), \
 \"full\" (acts without asking). AIs are named by id: claude, and also openai, xai, groq, mistral, deepseek-chat, ollama, gemini, grok-cli and others in Catbot's list.";
 
 /// Takes `<team-change>…</team-change>` out of a reply: the reply without them, and what was in them.
@@ -173,6 +174,38 @@ fn ready(store: &Store, raw: &str) -> Result<Ready, String> {
             }
             (format!("Change {}", bot.name), Some(bot.id.clone()), body)
         }
+        // One change to several bots, or all of them (stage 32.12, after OpenMausBot 0.1.178).
+        "change_bots" => {
+            let chosen: Vec<Bot> = match &change["bots"] {
+                Value::String(all) if all.eq_ignore_ascii_case("all") => bots.clone(),
+                Value::Array(list) => {
+                    let mut found: Vec<Bot> = Vec::new();
+                    for name in list.iter().filter_map(Value::as_str) {
+                        let bot = find_bot(&bots, name)?;
+                        if !found.iter().any(|b| b.id == bot.id) {
+                            found.push(bot.clone());
+                        }
+                    }
+                    found
+                }
+                _ => return Err("it doesn't say which bots (\"bots\": names, or \"all\")".into()),
+            };
+            if chosen.is_empty() {
+                return Err("there are no bots to change".into());
+            }
+            if change.get("name").is_some() || change.get("instructions").is_some() {
+                return Err("a name or instructions are changed one bot at a time (change_bot)".into());
+            }
+            let who = if chosen.len() == bots.len() && chosen.len() > 1 { "every bot".to_string() } else { names(&chosen) };
+            let mut body = bot_fields(&change, &mut lines, &mut warning, Some(&who))?;
+            if lines.is_empty() {
+                return Err("it doesn't say what to change about them".into());
+            }
+            lines.insert(0, format!("Bots: {}", names(&chosen)));
+            body["bots"] = json!(chosen.iter().map(|b| &b.id).collect::<Vec<_>>());
+            let title = if chosen.len() == 1 { format!("Change {}", chosen[0].name) } else { format!("Change {} bots", chosen.len()) };
+            (title, None, body)
+        }
         "delete_bot" => {
             let bot = find_bot(&bots, change["bot"].as_str().unwrap_or_default())?;
             warning = Some(format!("{}'s chats are deleted for good. Its folder of files stays.", bot.name));
@@ -278,6 +311,9 @@ pub async fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -
         .filter(|m| m.detail.as_ref().is_some_and(|d| d["kind"] == "team-change"))
         .ok_or((StatusCode::NOT_FOUND, "no such team change in this chat".to_string()))?;
     let mut detail = row.detail.clone().unwrap_or(Value::Null);
+    if body["undo"] == true {
+        return undo(app, thread, id, detail);
+    }
     if detail["state"] != "asking" {
         return Err((StatusCode::CONFLICT, "this change has been answered already".into()));
     }
@@ -310,7 +346,31 @@ pub async fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -
         working["state"] = json!(state);
         update(app, thread, id, &working);
     }
+    // Each bot's settings before a change to bots, for Undo (stage 32.12).
+    let changed: Vec<String> = match detail["action"].as_str() {
+        Some("change_bot") => detail["target"].as_str().map(|t| vec![t.to_string()]).unwrap_or_default(),
+        Some("change_bots") => detail["body"]["bots"].as_array().map(|l| l.iter().filter_map(|b| b.as_str().map(str::to_string)).collect()).unwrap_or_default(),
+        _ => Vec::new(),
+    };
+    let settings_of = |id: &str| app.with_store(|store| store.bot_by_id(id)).flatten().map(|b| (b.name.clone(), super::history::snapshot(app, &b)));
+    let before: Vec<(String, Option<(String, Value)>)> = changed.iter().map(|id| (id.clone(), settings_of(id))).collect();
     let outcome = apply(app, &detail).await;
+    let undoable: Vec<Value> = before
+        .into_iter()
+        .filter_map(|(id, was)| {
+            let (name, was) = was?;
+            let (_, now) = settings_of(&id)?;
+            let keys: Vec<&String> = was.as_object()?.keys().filter(|k| was[k.as_str()] != now[k.as_str()]).collect();
+            if keys.is_empty() {
+                return None;
+            }
+            let pick = |from: &Value| Value::Object(keys.iter().map(|k| ((*k).clone(), from[k.as_str()].clone())).collect());
+            Some(json!({ "bot": id, "name": name, "before": pick(&was), "after": pick(&now) }))
+        })
+        .collect();
+    if !undoable.is_empty() {
+        detail["undo"] = json!(undoable);
+    }
     match &outcome {
         Ok(note) => {
             detail["state"] = json!("done");
@@ -345,6 +405,30 @@ async fn apply(app: &Arc<App>, detail: &Value) -> Result<Option<String>, String>
         "app_call" => return super::apps::run_approved(app, &body).await.map(Some),
         "create_bot" => super::make_bot(app, &body).map(|_| ()).map_err(refused),
         "change_bot" => super::patch_bot(app, bot()?, body).map(|_| ()).map_err(refused),
+        "change_bots" => {
+            let mut change = body.clone();
+            if let Some(map) = change.as_object_mut() {
+                map.remove("bots");
+            }
+            let mut done = Vec::new();
+            let mut failed = Vec::new();
+            for id in body["bots"].as_array().into_iter().flatten().filter_map(Value::as_str) {
+                let Some(bot) = app.with_store(|store| store.bot_by_id(id)).flatten() else { continue };
+                let name = bot.name.clone();
+                match super::patch_bot(app, bot, change.clone()) {
+                    Ok(_) => done.push(name),
+                    Err((_, why)) => failed.push(format!("{name} ({why})")),
+                }
+            }
+            if done.is_empty() {
+                return Err(if failed.is_empty() { "those bots are gone".to_string() } else { format!("none of them changed: {}", failed.join("; ")) });
+            }
+            let mut note = format!("Changed {}.", done.join(", "));
+            if !failed.is_empty() {
+                note.push_str(&format!(" Not changed: {}.", failed.join("; ")));
+            }
+            return Ok(Some(note));
+        }
         "delete_bot" => super::remove_bot(app, &bot()?).map(|_| ()).map_err(refused),
         "create_channel" => channels::create(app, &body).map(|_| ()).map_err(refused),
         "change_channel" => channels::change(app, channel()?, body).map(|_| ()).map_err(refused),
@@ -354,6 +438,43 @@ async fn apply(app: &Arc<App>, detail: &Value) -> Result<Option<String>, String>
         other => Err(format!("{other} isn't a change Catbot knows")),
     };
     done.map(|_| None)
+}
+
+/// Undo on a done change to bots (stage 32.12): each bot goes back to how it was, unless its
+/// settings have changed again since (then it's left, and the card says so). One step for all.
+fn undo(app: &Arc<App>, thread: &str, id: i64, mut detail: Value) -> Answer {
+    if detail["state"] != "done" || !detail["undo"].is_array() {
+        return Err((StatusCode::CONFLICT, "this change can't be undone".into()));
+    }
+    let title = detail["title"].as_str().unwrap_or_default().to_string();
+    let mut back = Vec::new();
+    let mut stale = Vec::new();
+    for entry in detail["undo"].as_array().cloned().unwrap_or_default() {
+        let name = entry["name"].as_str().unwrap_or("a bot").to_string();
+        let Some(bot) = entry["bot"].as_str().and_then(|b| app.with_store(|store| store.bot_by_id(b)).flatten()) else {
+            stale.push(format!("{name} (gone)"));
+            continue;
+        };
+        let now = super::history::snapshot(app, &bot);
+        let after = entry["after"].as_object().cloned().unwrap_or_default();
+        if after.iter().any(|(k, v)| now[k.as_str()] != *v) {
+            stale.push(format!("{name} (changed since)"));
+            continue;
+        }
+        match super::patch_bot_as(app, bot, entry["before"].clone(), true) {
+            Ok(_) => back.push(name),
+            Err((_, why)) => stale.push(format!("{name} ({why})")),
+        }
+    }
+    detail["state"] = json!("undone");
+    let mut said = if back.is_empty() { "Nothing was undone.".to_string() } else { format!("Undone: {} back as before.", back.join(", ")) };
+    if !stale.is_empty() {
+        said.push_str(&format!(" Left as they are: {}.", stale.join(", ")));
+    }
+    detail["doneText"] = json!(said);
+    update(app, thread, id, &detail);
+    remember(app, thread, &format!("The person undid: {title}. {said}"));
+    Ok((StatusCode::OK, json!({ "ok": true, "state": "undone", "text": said })))
 }
 
 fn update(app: &App, thread: &str, id: i64, detail: &Value) {

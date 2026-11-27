@@ -2276,6 +2276,39 @@ async fn a_channel_is_answered_by_its_lead_or_whoever_is_named() {
 }
 
 #[tokio::test]
+async fn a_running_hand_off_is_listed_and_can_be_stopped_alone() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let mut ids = Vec::new();
+    // Neither says DONE: left alone, they'd talk to the limit.
+    for (name, soul) in [("Scout", "fake-pass @Kiwi"), ("Kiwi", "fake-pass @Scout")] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name, "soul": soul }))).await;
+        ids.push(made["bot"]["id"].as_str().unwrap().to_string());
+    }
+    let (_, sent) = s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Plan the beds" }))).await;
+    let thread = sent["threadId"].as_str().unwrap().to_string();
+    // The row (stage 32.13): who asked whom, where, and the chat to open.
+    let row = until(&mut events, "running", |f| f["kind"] == "handoffs-running" && f["threadId"] == thread.as_str() && f["running"][0]["room"].is_string()).await;
+    let run = row["running"][0].clone();
+    assert_eq!((run["from"].as_str(), run["to"].as_str(), run["place"].as_str()), (Some("Scout"), Some("Kiwi"), Some("a direct chat")), "{run}");
+    let (_, listed) = s.call("GET", &format!("/api/threads/{thread}/handoffs"), None).await;
+    assert_eq!(listed["running"][0]["id"], run["id"]);
+    // Stop: that talk ends; Scout still reports back, told it was stopped.
+    let (status, _) = s.call("POST", &format!("/api/threads/{thread}/handoffs/{}/stop", run["id"].as_str().unwrap()), None).await;
+    assert_eq!(status, 200);
+    until(&mut events, "gone", |f| f["kind"] == "handoffs-running" && f["threadId"] == thread.as_str() && f["running"].as_array().is_some_and(|r| r.is_empty())).await;
+    let report = until(&mut events, "report", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["role"] == "bot" && f["message"]["text"].as_str().is_some_and(|t| t.contains("stopped Kiwi's part"))).await;
+    assert!(report["message"]["text"].as_str().unwrap().contains("report to the person"), "{report}");
+    let dm = run["room"].as_str().unwrap();
+    let (_, talk) = s.call("GET", &format!("/api/threads/{dm}/messages?limit=60"), None).await;
+    let replies = talk["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").count();
+    assert!(replies < 21, "it stopped before the limit: {replies}");
+    assert!(talk.to_string().contains("The person stopped this here"), "{talk}");
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/handoffs/{}/stop", run["id"].as_str().unwrap()), None).await.0, 404, "once");
+}
+
+#[tokio::test]
 async fn a_bot_hands_work_on_within_the_limits_set() {
     let s = setup().await;
     let mut events = s.events().await;
@@ -2459,6 +2492,58 @@ async fn departments_group_bots_share_instructions_and_take_map_messages() {
     let (_, map) = s.call("GET", "/api/team-map", None).await;
     assert!(map["layout"]["departments"].as_object().unwrap().is_empty(), "{map}");
     assert_eq!(s.call("DELETE", "/api/departments/Allotment", None).await.0, 404);
+}
+
+#[tokio::test]
+async fn the_chief_changes_many_bots_at_once_and_it_can_be_undone() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    // Colours set, not left to chance: one already teal wouldn't be changed by the card.
+    let id = async |name: &str| s.call("POST", "/api/bots", Some(json!({ "name": name, "color": "coral" }))).await.1["bot"]["id"].as_str().unwrap().to_string();
+    let (scout, kiwi, quill) = (id("Scout").await, id("Kiwi").await, id("Quill").await);
+    let (_, ready) = s.call("POST", "/api/chief/ready-made", None).await;
+    let chief = ready["chief"]["botId"].as_str().unwrap().to_string();
+    let card = |f: &Value| f["kind"] == "message" && f["message"]["kind"] == "team-change";
+    let color = async |bot: &str| s.call("GET", &format!("/api/bots/{bot}"), None).await.1["bot"]["color"].clone();
+    let before = (color(&scout).await, color(&kiwi).await, color(&quill).await);
+
+    // Two bots on one card (stage 32.12); approved, both change, and the card offers Undo.
+    let (_, sent) = s.call("POST", &format!("/api/bots/{chief}/messages"), Some(json!({ "text": r#"team: {"action":"change_bots","bots":["scout","Kiwi","scout"],"color":"teal","approval":"edits"}"# }))).await;
+    let thread = sent["threadId"].as_str().unwrap().to_string();
+    let shown = until(&mut events, "card", card).await;
+    let change = &shown["message"]["teamChange"];
+    assert_eq!(change["title"], "Change 2 bots");
+    assert_eq!(change["lines"][0], "Bots: Scout, Kiwi", "named once each");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let msg = shown["message"]["id"].as_str().unwrap().to_string();
+    let (_, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{msg}"), Some(json!({ "approve": true }))).await;
+    assert_eq!(answered["state"], "done", "{answered}");
+    assert_eq!((color(&scout).await, color(&kiwi).await, color(&quill).await), (json!("teal"), json!("teal"), before.2.clone()));
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=20"), None).await;
+    let shown = page["messages"].as_array().unwrap().iter().find(|m| m["id"] == msg.as_str()).unwrap().clone();
+    assert_eq!(shown["teamChange"]["canUndo"], true, "{shown}");
+    assert_eq!(shown["teamChange"]["doneText"], "Changed Scout, Kiwi.");
+
+    // Kiwi changed again since: Undo puts Scout back and leaves Kiwi, saying so.
+    s.call("PATCH", &format!("/api/bots/{kiwi}"), Some(json!({ "color": "purple" }))).await;
+    let (_, undone) = s.call("POST", &format!("/api/threads/{thread}/team/{msg}"), Some(json!({ "undo": true }))).await;
+    assert_eq!(undone["state"], "undone", "{undone}");
+    assert_eq!(undone["text"], "Undone: Scout back as before. Left as they are: Kiwi (changed since).");
+    assert_eq!(color(&scout).await, before.0);
+    let (_, bot) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
+    assert_eq!(bot["bot"]["approvalMode"], "ask");
+    assert_eq!(color(&kiwi).await, json!("purple"));
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/team/{msg}"), Some(json!({ "undo": true }))).await.0, 409, "once");
+
+    // "all", and a name or instructions for many bots is refused.
+    s.call("POST", &format!("/api/bots/{chief}/messages"), Some(json!({ "text": r#"team: {"action":"change_bots","bots":"all","codex":true}"#, "threadId": thread }))).await;
+    let shown = until(&mut events, "card", card).await;
+    assert_eq!(shown["message"]["teamChange"]["title"], "Change 4 bots");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    s.call("POST", &format!("/api/bots/{chief}/messages"), Some(json!({ "text": r#"team: {"action":"change_bots","bots":"all","name":"Twin"}"#, "threadId": thread }))).await;
+    let note = until(&mut events, "note", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("couldn't use"))).await;
+    assert!(note["message"]["tool"]["name"].as_str().unwrap().contains("one bot at a time"), "{note}");
 }
 
 #[tokio::test]

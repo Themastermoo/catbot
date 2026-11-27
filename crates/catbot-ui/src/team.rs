@@ -19,6 +19,8 @@ pub struct Change {
     pub state: String,
     pub error: Option<String>,
     pub choice: Option<Choice>,
+    /// A done change to bots, which Undo takes back in one step (stage 32.12).
+    pub can_undo: bool,
 }
 
 /// A choice the person makes as they approve (where a page goes).
@@ -42,6 +44,7 @@ impl Change {
             done_text: wire["doneText"].as_str().map(str::to_string),
             state: wire["state"].as_str().unwrap_or("asking").to_string(),
             error: wire["error"].as_str().map(str::to_string),
+            can_undo: wire["canUndo"] == true,
             choice: wire["choice"]["options"].as_array().map(|options| Choice {
                 label: wire["choice"]["label"].as_str().unwrap_or("Choose").to_string(),
                 options: options.iter().map(|o| (o["id"].as_str().unwrap_or_default().to_string(), o["label"].as_str().unwrap_or_default().to_string())).collect(),
@@ -58,6 +61,17 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
     let start = change.choice.as_ref().map(|c| c.value.clone()).unwrap_or_default();
     let mut picked = use_signal(move || start);
     let has_choice = change.choice.is_some();
+    let undo_path = format!("/api/threads/{thread}/team/{message}");
+    let undo = move |_| {
+        let path = undo_path.clone();
+        sending.set(true);
+        spawn(async move {
+            if let Err(err) = api::post(&path, &json!({ "undo": true })).await {
+                problem.set(Some(err));
+            }
+            sending.set(false);
+        });
+    };
     let send = use_callback(move |approve: bool| {
         let path = format!("/api/threads/{thread}/team/{message}");
         sending.set(true);
@@ -139,6 +153,7 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                     "publishing" => rsx! { p { class: "text-ink-secondary", "Publishing…" } },
                     "working" => rsx! { p { class: "text-ink-secondary", "Working…" } },
                     "declined" => rsx! { p { class: "text-ink-tertiary", "Declined. Nothing changed." } },
+                    "undone" => rsx! { p { class: "text-ink-tertiary", "data-team-undone": true, {change.done_text.clone().unwrap_or_else(|| "Undone.".into())} } },
                     _ => rsx! {},
                 }
                 if let Some(err) = &change.error {
@@ -161,6 +176,19 @@ pub fn TeamChangeCard(thread: String, message: String, change: Change) -> Elemen
                             class: "rounded-lg px-3 py-1.5 text-ink-secondary hover:bg-raised disabled:opacity-50",
                             onclick: move |_| send.call(false),
                             "Decline"
+                        }
+                    }
+                }
+                if change.can_undo {
+                    div { class: "flex gap-1.5 pl-6",
+                        button {
+                            r#type: "button",
+                            "data-team-undo": true,
+                            disabled: sending(),
+                            title: "Put back how they were before this change",
+                            class: "rounded-lg px-3 py-1.5 text-ink-secondary ring-1 ring-inset ring-hairline hover:bg-raised disabled:opacity-50",
+                            onclick: undo,
+                            "Undo"
                         }
                     }
                 }

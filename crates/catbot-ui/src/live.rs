@@ -57,6 +57,8 @@ pub struct LiveStep {
 pub struct State {
     pub bots: Vec<Bot>,
     pub threads: HashMap<String, Thread>,
+    /// The hand-offs running from each chat (stage 32.13), as the server lists them.
+    pub running_handoffs: HashMap<String, Vec<Value>>,
     /// Goes up whenever the paired devices or the waiting pairing change (`devices` frames),
     /// so the devices dialog knows to look again.
     /// Counts `engines` frames: an AI's key was saved or forgotten (the bot settings fetch again).
@@ -183,6 +185,11 @@ impl State {
             Some("limits") => self.limits_changed += 1,
             Some("local-ai") => self.local_ai_changed += 1,
             Some("handoffs") => self.handoffs_changed += 1,
+            Some("handoffs-running") => {
+                if let Some(thread) = frame["threadId"].as_str() {
+                    self.running_handoffs.insert(thread.to_string(), frame["running"].as_array().cloned().unwrap_or_default());
+                }
+            }
             Some("chief") => self.chief_changed += 1,
             Some("skills") => self.skills_changed += 1,
             Some("email") => self.email_changed += 1,
@@ -482,6 +489,16 @@ mod tests {
         let ids: Vec<_> = s.threads["t1"].messages.iter().map(|m| m.id.as_str()).collect();
         assert_eq!(ids, ["a", "b", "c", "d"]);
         assert!(!s.threads["t1"].more);
+    }
+
+    #[test]
+    fn running_hand_offs_are_kept_per_chat() {
+        let mut state = State::default();
+        state.apply(&json!({ "kind": "handoffs-running", "threadId": "t1", "running": [{ "id": "h1", "from": "Scout", "to": "Kiwi" }] }));
+        assert_eq!(state.running_handoffs["t1"][0]["to"], "Kiwi");
+        state.apply(&json!({ "kind": "handoffs-running", "threadId": "t1", "running": [] }));
+        assert!(state.running_handoffs["t1"].is_empty(), "ended");
+        assert_eq!(state.handoffs_changed, 0, "not the Hand-offs settings' frame");
     }
 
     #[test]
