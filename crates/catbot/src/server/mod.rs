@@ -21,6 +21,7 @@ pub mod computers;
 pub mod channels;
 pub mod skills;
 pub mod team;
+pub mod team_chat;
 pub mod teams;
 pub mod terminal;
 pub mod grok_move;
@@ -324,6 +325,8 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
         repair_guest_sessions(store);
         Ok(())
     });
+    // The Team Chat, made or brought up to date with the team (stage 30.1).
+    team_chat::sync(&app);
 
     let listener = tokio::net::TcpListener::bind(options.listen)
         .await
@@ -902,6 +905,7 @@ pub(super) fn make_bot(app: &Arc<App>, body: &Value) -> Result<Bot, (StatusCode,
     profiles::patch(app, &bot.id, &changes)?;
     app.seed_memory(&bot);
     app.announce_bot(&bot.id);
+    team_chat::sync(app);
     eprintln!("catbot: made {} ({})", bot.name, bot.folder.display());
     Ok(bot)
 }
@@ -923,6 +927,7 @@ pub(super) fn remove_bot(app: &Arc<App>, bot: &Bot) -> Answer {
     }
     let bot = app.try_store(|store| store.delete_bot(&bot.name)).map_err(fail)?;
     app.hub.send(json!({ "kind": "bot.deleted", "botId": bot.id }));
+    team_chat::sync(app);
     // Its computer goes with it, wherever it is.
     if computers::has(app, &bot.id) {
         let (app, id) = (app.clone(), bot.id.clone());

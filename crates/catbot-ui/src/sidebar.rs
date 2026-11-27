@@ -77,9 +77,11 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     // only a search shows it.
     let the_chief = all.iter().find(|b| b.chief && b.channel.is_none()).cloned();
     let chief = the_chief.clone().filter(|_| q.is_empty() && show_chief);
+    // The Team Chat has its own row at the top (stage 30.1), and is in the list only for a search.
+    let team_chat = all.iter().find(|b| b.is_team_chat()).cloned().filter(|_| q.is_empty());
     let shown: Vec<Bot> = all
         .iter()
-        .filter(|b| b.matches(&query.read()) && !the_chief.as_ref().is_some_and(|c| c.id == b.id && q.is_empty()))
+        .filter(|b| b.matches(&query.read()) && !the_chief.as_ref().is_some_and(|c| c.id == b.id && q.is_empty()) && !(b.is_team_chat() && q.is_empty()))
         .cloned()
         .collect();
     let empty = all.is_empty();
@@ -193,6 +195,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             if q.is_empty() {
                 crate::inbox::InboxRow {}
                 TeamMapRow {}
+                if let Some(team) = team_chat {
+                    TeamChatRow { selected: selected.read().as_deref() == Some(team.id.as_str()), bot: team, on_select: pick }
+                }
             }
             div { class: "min-h-0 flex-1 overflow-y-auto",
                 if let Some(chief) = chief {
@@ -298,6 +303,40 @@ fn TeamMapRow() -> Element {
                     Icon { name: "users", size: 16 }
                 }
                 span { class: "min-w-0 flex-1 truncate text-[14px] font-medium leading-5 text-ink", "Team map" }
+            }
+        }
+    }
+}
+
+/// The Team Chat, below the Team map: every bot in one room (stage 30.1).
+#[component]
+fn TeamChatRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element {
+    let ui = use_context::<Ui>();
+    let id = bot.id.clone();
+    let busy = bot.activity != Activity::Idle;
+    let count = bot.channel.as_ref().map_or(0, |c| c.members.len());
+    let ring = if selected { "bg-ink/[0.16] text-ink" } else { "bg-raised text-ink-secondary" };
+    let weight = if bot.unread { "font-semibold" } else { "font-medium" };
+    rsx! {
+        div { class: "px-3 pb-1",
+            button { r#type: "button", "data-sidebar-team-chat": true, "aria-current": if selected { "true" } else { "false" }, title: "Team Chat: every bot, together",
+                class: "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left outline-none hover:bg-raised/60 focus-visible:ring-2 focus-visible:ring-accent/60",
+                onclick: move |_| {
+                    let mut map = ui.map;
+                    map.set(false);
+                    on_select.call(id.clone());
+                },
+                span { class: "grid size-9 shrink-0 place-items-center rounded-full {ring}",
+                    Icon { name: "message", size: 16 }
+                }
+                span { class: "min-w-0 flex-1 truncate text-[14px] leading-5 text-ink {weight}", "Team Chat" }
+                if busy {
+                    span { role: "img", "aria-label": "Working", class: "size-1.5 shrink-0 animate-pulse rounded-full bg-accent" }
+                } else if bot.unread {
+                    span { role: "img", "aria-label": "Unread", class: "size-2 shrink-0 rounded-full bg-accent" }
+                } else {
+                    span { class: "shrink-0 text-[12px] tabular-nums text-ink-tertiary", "{count}" }
+                }
             }
         }
     }

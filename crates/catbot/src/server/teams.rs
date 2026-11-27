@@ -335,7 +335,13 @@ fn slug(name: &str) -> String {
 
 /// The team as a file: the chosen bots, the channels among them, and the Chief if it's one of them.
 fn write(app: &App, name: &str, tagline: &str, author: &str, ids: Option<Vec<String>>) -> Result<String, String> {
-    let (bots, all_channels) = app.with_store(|store| Ok((store.bots()?, store.channels()?))).ok_or("couldn't read the team")?;
+    // Not the Team Chat: every Catbot makes its own (stage 30.1).
+    let (bots, all_channels) = app
+        .with_store(|store| {
+            let team = super::team_chat::id_in(store);
+            Ok((store.bots()?, store.channels()?.into_iter().filter(|c| Some(&c.id) != team.as_ref()).collect::<Vec<_>>()))
+        })
+        .ok_or("couldn't read the team")?;
     let bots: Vec<Bot> = bots.into_iter().filter(|b| ids.as_ref().is_none_or(|ids| ids.contains(&b.id))).collect();
     if bots.is_empty() {
         return Err("pick at least one bot".into());

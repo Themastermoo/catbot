@@ -141,7 +141,11 @@ pub fn NewChannelDialog(on_close: EventHandler<()>) -> Element {
 /// A channel's settings: name, instructions, members and lead, deleting it.
 #[component]
 pub fn ChannelSettings(bot: Bot, saving: bool, change: Callback<Value>) -> Element {
-    let info = bot.channel.clone().unwrap_or_else(|| crate::bots::ChannelInfo { members: Vec::new(), lead: String::new(), folder: String::new() });
+    // (The Team Chat's own settings are below.)
+    let info = bot.channel.clone().unwrap_or_default();
+    if info.team_chat {
+        return rsx! { TeamChatSettings { info, saving, change } };
+    }
     let chosen = use_signal(|| info.members.iter().map(|m| m.0.clone()).collect::<Vec<_>>());
     let lead = use_signal(|| info.lead.clone());
     let folder = info.folder.clone();
@@ -160,6 +164,41 @@ pub fn ChannelSettings(bot: Bot, saving: bool, change: Callback<Value>) -> Eleme
                     "Save members"
                 }
             }
+        }
+    }
+}
+
+/// The Team Chat's: every bot is in it, so there are no members to pick; the Chief of Staff
+/// answers what isn't @named, or with no Chief the bot chosen here (stage 30.1).
+#[component]
+fn TeamChatSettings(info: crate::bots::ChannelInfo, saving: bool, change: Callback<Value>) -> Element {
+    let state = use_context::<Signal<State>>();
+    let chief = state.read().bots.iter().find(|b| b.chief && b.channel.is_none()).map(|b| b.name.clone());
+    let names = info.members.iter().map(|m| m.1.clone()).collect::<Vec<_>>().join(", ");
+    rsx! {
+        div { class: "rounded-xl bg-card p-4", "data-channel-settings": true, "data-team-chat-settings": true,
+            div { class: LABEL, "Who's in it" }
+            p { class: "mt-1 text-[13px] leading-relaxed text-ink", "Every bot: {names}." }
+            p { class: "mt-0.5 text-[12px] text-ink-tertiary", "New bots join by themselves; a bot leaves when it's deleted or put away." }
+            label { class: "mt-4 {LABEL}", "Answers when no one is @named"
+                if let Some(chief) = &chief {
+                    p { class: "mt-1 text-[13px] text-ink", "{chief}, your Chief of Staff." }
+                } else {
+                    select {
+                        "data-team-chat-lead": true,
+                        disabled: saving,
+                        class: "mt-1 w-full rounded-lg border border-hairline/60 bg-app px-2.5 py-1.5 text-[13px] text-ink",
+                        onchange: move |e: FormEvent| change.call(json!({ "lead": e.value() })),
+                        for (id, name, _, _) in info.members.iter().cloned() {
+                            option { key: "{id}", value: "{id}", selected: id == info.lead, "{name}" }
+                        }
+                    }
+                }
+            }
+            if chief.is_some() {
+                p { class: "mt-1 text-[12px] text-ink-tertiary", "With no Chief of Staff, a bot you choose here answers." }
+            }
+            p { class: "mt-3 text-[12px] text-ink-tertiary", "Working folder: {info.folder}" }
         }
     }
 }

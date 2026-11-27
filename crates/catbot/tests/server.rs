@@ -226,7 +226,8 @@ async fn the_bot_list_has_both_teams() {
     assert_eq!(made["bot"]["name"], "Scout");
     let (_, list) = s.call("GET", "/api/bots?messages=50", None).await;
     let names: Vec<&str> = list["bots"].as_array().unwrap().iter().map(|b| b["name"].as_str().unwrap()).collect();
-    assert_eq!(names, ["MausBot", "Scout"]);
+    // With the Team Chat, made with the first bot (stage 30.1).
+    assert_eq!(names, ["MausBot", "Scout", "Team Chat"]);
     let scout_id = made["bot"]["id"].as_str().unwrap();
     assert!(list["computerControl"][scout_id].is_object());
     assert!(list["computerControl"]["their-bot"].is_object());
@@ -1730,6 +1731,61 @@ async fn pictures_are_asked_for_drawn_and_kept() {
     until(&mut events, "rendered", |f| f["kind"] == "message.patch" && f["message"]["image"]["state"] == "done").await;
     let pictures = std::fs::read_dir(&folder).unwrap().count();
     assert_eq!(pictures, 3);
+}
+
+#[tokio::test]
+async fn the_team_chat_has_every_bot_the_chief_answers_and_notes_change_with_a_yes() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let mut ids = Vec::new();
+    for name in ["Scout", "Kiwi"] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name }))).await;
+        ids.push(made["bot"]["id"].as_str().unwrap().to_string());
+    }
+    let team = || async {
+        let (_, list) = s.call("GET", "/api/bots", None).await;
+        list["bots"].as_array().unwrap().iter().find(|b| b["channel"]["teamChat"] == true).cloned().expect("a Team Chat")
+    };
+    let members = |chat: &Value| chat["channel"]["members"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+    let chat = team().await;
+    let id = chat["id"].as_str().unwrap().to_string();
+    assert_eq!((chat["name"].as_str(), members(&chat)), (Some("Team Chat"), vec!["Kiwi".to_string(), "Scout".into()]));
+    assert_eq!(chat["channel"]["lead"], ids[1].as_str(), "with no Chief and no pick, the first bot leads");
+
+    // The person's pick leads, until there's a Chief; the Chief leads; the pick comes back after.
+    let (status, picked) = s.call("PATCH", &format!("/api/bots/{id}"), Some(json!({ "lead": ids[0] }))).await;
+    assert_eq!((status, picked["bot"]["channel"]["lead"].as_str()), (200, Some(ids[0].as_str())), "{picked}");
+    s.call("PUT", "/api/chief", Some(json!({ "botId": ids[1] }))).await;
+    assert_eq!(team().await["channel"]["lead"], ids[1].as_str());
+    s.call("PUT", "/api/chief", Some(json!({ "botId": null }))).await;
+    assert_eq!(team().await["channel"]["lead"], ids[0].as_str());
+
+    // Everyone, always: it can't lose a bot or be deleted; new bots join and deleted ones leave.
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{id}"), Some(json!({ "members": [ids[0]] }))).await.0, 400);
+    assert_eq!(s.call("DELETE", &format!("/api/bots/{id}"), None).await.0, 409);
+    s.call("POST", "/api/bots", Some(json!({ "name": "Lin" }))).await;
+    assert_eq!(members(&team().await), ["Kiwi", "Lin", "Scout"]);
+    s.call("DELETE", &format!("/api/bots/{}", ids[0]), None).await;
+    let chat = team().await;
+    assert_eq!((members(&chat), chat["id"].as_str()), (vec!["Kiwi".to_string(), "Lin".into()], Some(id.as_str())));
+    // It isn't part of a team sent to a file.
+    let (_, out) = s.call("POST", "/api/teams/export", Some(json!({ "name": "Garden Crew" }))).await;
+    assert!(!out["markdown"].as_str().unwrap().contains("Team Chat"), "{out}");
+
+    // A bot there proposes new pinned notes: a card, and they change only with a yes.
+    let thread = chat["threadId"].as_str().unwrap().to_string();
+    let (status, sent) = s.call("POST", &format!("/api/bots/{id}/messages"), Some(json!({ "text": "<team-notes>Kiwi: seeds. Lin: beds.</team-notes>" }))).await;
+    assert_eq!(status, 202, "{sent}");
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["kind"] == "text" && f["message"]["role"] == "bot").await;
+    assert!(!reply["message"]["text"].as_str().unwrap().contains("<team-notes>"), "taken out of the reply");
+    let card = until(&mut events, "card", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["teamChange"].is_object()).await;
+    assert_eq!(card["message"]["teamChange"]["title"], "Change the Team Chat's pinned notes", "{card}");
+    let message = card["message"]["id"].as_str().unwrap().to_string();
+    assert_eq!(team().await["channel"]["instructions"], "", "not yet");
+    let (status, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{message}"), Some(json!({ "approve": true }))).await;
+    assert_eq!((status, answered["state"].as_str()), (200, Some("done")), "{answered}");
+    assert_eq!(team().await["channel"]["instructions"], "Kiwi: seeds. Lin: beds.");
 }
 
 #[tokio::test]

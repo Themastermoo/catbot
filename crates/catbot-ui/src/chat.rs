@@ -356,6 +356,9 @@ pub fn Chat(bot: Bot) -> Element {
     rsx! {
         main { class: "relative flex h-full min-w-0 flex-1 flex-col bg-app",
             ChatHead { bot: bot.clone(), faces }
+            if let Some(info) = bot.channel.as_ref().filter(|c| c.team_chat) {
+                PinnedNotes { text: info.instructions.clone() }
+            }
             FindBar { key: "{bot.thread_id}" }
             div {
                 id: "chat-scroll",
@@ -1299,6 +1302,39 @@ fn Row(
         Body::Card { subtitle, answer, tool, .. } => {
             let answer = settled_answer(*answer, asking);
             rsx! { ApprovalRow { line: approval_line(&bot_name, tool.as_deref()), detail: approval_detail(subtitle, tool.as_deref()), answer } }
+        }
+    }
+}
+
+/// The Team Chat's pinned notes, under its header (stage 30.1): one line until opened; Edit
+/// opens them in its settings.
+#[component]
+fn PinnedNotes(text: String) -> Element {
+    let mut ui = use_context::<crate::settings::Ui>();
+    let mut open = use_signal(|| false);
+    let text = text.trim().to_string();
+    let first = text.lines().find(|l| !l.trim().is_empty()).unwrap_or_default().to_string();
+    let more = text.lines().filter(|l| !l.trim().is_empty()).count() > 1;
+    rsx! {
+        div { "data-pinned-notes": true, class: "relative z-[24] shrink-0 border-b border-hairline/40 bg-app/85 px-5 py-2 backdrop-blur-md",
+            div { class: "chat-column mx-auto flex w-full items-start gap-2 text-[13px]",
+                span { class: "shrink-0 pt-0.5 text-[11px] font-semibold uppercase tracking-wide text-ink-tertiary", "Pinned" }
+                if text.is_empty() {
+                    span { class: "min-w-0 flex-1 text-ink-tertiary", "No notes yet: who does what, the goals, a checklist. Every bot here reads them." }
+                } else if open() {
+                    div { class: "min-w-0 flex-1 whitespace-pre-wrap [overflow-wrap:anywhere] text-ink-secondary", "{text}" }
+                } else {
+                    span { class: "min-w-0 flex-1 truncate text-ink-secondary", "{first}" }
+                }
+                if more {
+                    button { r#type: "button", "data-pinned-toggle": true, class: "shrink-0 text-ink-tertiary hover:text-ink hover:underline", onclick: move |_| open.toggle(),
+                        if open() { "Less" } else { "More" }
+                    }
+                }
+                button { r#type: "button", "data-pinned-edit": true, class: "shrink-0 text-ink-tertiary hover:text-ink hover:underline", onclick: move |_| ui.settings_open.set(true),
+                    if text.is_empty() { "Add" } else { "Edit" }
+                }
+            }
         }
     }
 }

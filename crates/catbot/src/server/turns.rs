@@ -353,6 +353,13 @@ async fn run(
     // Skills any bot offers come out the same way.
     let (reply, offered) = super::skills::take(&result.reply);
     result.reply = reply;
+    // In the Team Chat, new pinned notes a bot proposes (stage 30.1).
+    let mut notes = None;
+    if super::team_chat::is_thread(app, thread) {
+        let (reply, found) = super::team_chat::take(&result.reply);
+        result.reply = reply;
+        notes = found;
+    }
     if !result.reply.is_empty() {
         let outcome = result.outcome.as_ref();
         let detail = json!({
@@ -373,6 +380,9 @@ async fn run(
         super::team::propose(app, thread, chief, proposed);
     }
     super::skills::propose(app, thread, bot, offered);
+    if let Some(text) = &notes {
+        super::team_chat::propose(app, thread, bot, text);
+    }
     super::changes::after_turn(app, thread, &bot.id, points, before).await;
     // A backup answered: the bot's own AI starts afresh next time, shown everything said.
     let own_engine = app.with_store(|store| store.bot_by_id(&bot.id)).flatten().map(|b| b.engine);

@@ -206,6 +206,10 @@ fn set(app: &App, next: Options) {
         app.announce_bot(&id);
     }
     app.hub.send(json!({ "kind": "chief", "chief": next }));
+    // The Chief leads the Team Chat (stage 30.1).
+    if moved {
+        super::team_chat::sync(app);
+    }
 }
 
 fn wire(app: &App) -> Value {

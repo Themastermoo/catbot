@@ -110,7 +110,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                 button { r#type: "button", "aria-label": "Collapse bot settings", class: ICON_BUTTON, onclick: close,
                     Glyph { d: "m15 18-6-6 6-6", size: 18 }
                 }
-                span { class: "text-[15px] font-semibold text-ink", if channel { "Channel settings" } else { "Bot settings" } }
+                span { class: "text-[15px] font-semibold text-ink", if bot.is_team_chat() { "Team Chat settings" } else if channel { "Channel settings" } else { "Bot settings" } }
                 button { r#type: "button", "aria-label": "Close bot settings", class: ICON_BUTTON, onclick: close,
                     Glyph { d: "M18 6 6 18M6 6l12 12", size: 18 }
                 }
@@ -190,6 +190,7 @@ pub fn BotSettings(bot: Bot) -> Element {
     };
     let full = bot.approval_mode == "full";
     let channel = bot.channel.is_some();
+    let team_chat = bot.is_team_chat();
     rsx! {
                 div { class: "flex flex-col gap-4 pt-4",
                     // Picture, colour and name.
@@ -258,12 +259,12 @@ pub fn BotSettings(bot: Bot) -> Element {
                     }
                     // Instructions.
                     div { class: CARD,
-                        label { class: LABEL, "Instructions"
+                        label { class: LABEL, if team_chat { "Pinned notes" } else { "Instructions" }
                             textarea {
                                 key: "{bot.id}-soul",
                                 rows: 6,
                                 class: "{FIELD} resize-y text-[13px] leading-relaxed",
-                                placeholder: if channel { "What this channel is for; every bot in it reads this" } else { "What this bot is for, and how it should work" },
+                                placeholder: if team_chat { "Who does what, the goals, a checklist… every bot reads these" } else if channel { "What this channel is for; every bot in it reads this" } else { "What this bot is for, and how it should work" },
                                 value: "{bot.soul}",
                                 onchange: {
                                     let current = bot.soul.clone();
@@ -275,7 +276,9 @@ pub fn BotSettings(bot: Bot) -> Element {
                                 },
                             }
                         }
-                        p { class: "mt-1.5 text-[12px] text-ink-tertiary", "Saved when you click away. Used from its next message." }
+                        p { class: "mt-1.5 text-[12px] text-ink-tertiary",
+                            if team_chat { "Saved when you click away. A bot can propose changes; you approve them." } else { "Saved when you click away. Used from its next message." }
+                        }
                     }
                     if channel {
                         crate::channels::ChannelSettings { key: "{bot.id}-members", bot: bot.clone(), saving: saving(), change }
@@ -361,8 +364,8 @@ pub fn BotSettings(bot: Bot) -> Element {
                             }
                         }
                     }
-                    // Deleting.
-                    div { class: CARD,
+                    // Deleting (not the Team Chat: it stays).
+                    div { class: CARD, hidden: team_chat,
                         if confirm_delete() {
                             p { class: "text-[13px] leading-relaxed text-ink",
                                 if channel { "Delete {bot.name}? Its conversation is deleted for good. The bots in it, and its folder of files, stay." } else { "Delete {bot.name}? Its conversation is deleted for good. Its folder of files stays where it is." }

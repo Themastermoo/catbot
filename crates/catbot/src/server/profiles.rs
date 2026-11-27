@@ -232,7 +232,9 @@ pub fn archive(app: &Arc<App>, bot: &Bot) -> Answer {
     if app.with_store(|store| Ok(super::chief::is_chief_in(store, &bot.id))).unwrap_or(false) {
         return Err((StatusCode::CONFLICT, format!("{} is the Chief of Staff: choose another one first", bot.name)));
     }
-    if let Some(channel) = app.try_store(|store| store.channels()).map_err(fail)?.into_iter().find(|c| c.members.contains(&bot.id)) {
+    // (Not the Team Chat: every bot is in it, and leaves it when put away.)
+    let team = app.with_store(|store| Ok(super::team_chat::id_in(store))).flatten();
+    if let Some(channel) = app.try_store(|store| store.channels()).map_err(fail)?.into_iter().find(|c| c.members.contains(&bot.id) && Some(&c.id) != team.as_ref()) {
         return Err((StatusCode::CONFLICT, format!("{} is in the channel {}: take it out first", bot.name, channel.name)));
     }
     let mut profile = of(app, &bot.id);
@@ -241,6 +243,7 @@ pub fn archive(app: &Arc<App>, bot: &Bot) -> Answer {
     app.try_store(|store| super::pets::set(store, &bot.id, false)).map_err(fail)?;
     app.hub.send(json!({ "kind": "bot.deleted", "botId": bot.id }));
     app.hub.send(json!({ "kind": "archived-bots" }));
+    super::team_chat::sync(app);
     Ok((StatusCode::OK, json!({ "ok": true })))
 }
 
@@ -251,6 +254,7 @@ pub fn unarchive(app: &Arc<App>, bot: &Bot) -> Answer {
     app.try_store(|store| store.set_profile(&bot.id, &profile)).map_err(fail)?;
     app.announce_bot(&bot.id);
     app.hub.send(json!({ "kind": "archived-bots" }));
+    super::team_chat::sync(app);
     let wire = app.try_store(|store| app.wire_bot(store, bot, Some(50))).map_err(fail)?;
     Ok((StatusCode::OK, json!({ "bot": wire })))
 }

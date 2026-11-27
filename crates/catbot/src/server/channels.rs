@@ -65,6 +65,7 @@ pub fn channel_wire(app: &App, store: &Store, channel: &Channel, messages: Optio
             "lead": lead,
             "instructions": channel.instructions,
             "folder": channel.folder.to_string_lossy(),
+            "teamChat": super::team_chat::id_in(store).is_some_and(|id| id == channel.id),
         },
         "threadId": conversation.id,
         "mainThreadId": conversation.id,
@@ -151,6 +152,9 @@ fn lead_bot(app: &App, channel: &Channel) -> Result<Bot, BoxError> {
 /// `PATCH`: `name`, `soul` (the instructions), `color`, `members`, `lead`.
 /// Deletes a channel: its conversation goes; its members and folder stay.
 pub fn remove(app: &Arc<App>, channel: &Channel) -> Answer {
+    if super::team_chat::is_team_chat(app, &channel.id) {
+        return Err((StatusCode::CONFLICT, "the Team Chat stays: every bot is in it".into()));
+    }
     if let Some(conversation) = app.with_store(|store| store.channel_conversation(&channel.id)).flatten() {
         app.turns.interrupt(&conversation.id);
     }
@@ -173,11 +177,24 @@ pub fn change(app: &Arc<App>, mut channel: Channel, body: Value) -> Answer {
     if let Some(color) = body["color"].as_str() {
         channel.color = color.to_string();
     }
+    // The Team Chat has every bot, and the Chief as its lead when there is one: a lead picked
+    // here answers when there's no Chief (stage 30.1).
+    let team = super::team_chat::is_team_chat(app, &channel.id);
     if body.get("members").is_some() {
+        if team && ids(&body["members"]) != channel.members {
+            return Err(bad("every bot is in the Team Chat"));
+        }
         channel.members = ids(&body["members"]);
     }
     if let Some(lead) = body["lead"].as_str() {
-        channel.lead = Some(lead.to_string());
+        if team {
+            if !channel.members.iter().any(|m| m == lead) {
+                return Err(bad("the lead has to be one of its bots"));
+            }
+            super::team_chat::pick_lead(app, lead);
+        } else {
+            channel.lead = Some(lead.to_string());
+        }
     }
     app.try_store(|store| {
         for id in &channel.members {
@@ -186,6 +203,9 @@ pub fn change(app: &Arc<App>, mut channel: Channel, body: Value) -> Answer {
         store.update_channel(&channel)
     })
     .map_err(bad)?;
+    if team {
+        super::team_chat::sync(app);
+    }
     let channel = app.try_store(|store| store.channel(&channel.id)).map_err(fail)?.ok_or_else(|| bad("no such channel"))?;
     let wire = app.try_store(|store| channel_wire(app, store, &channel, None)).map_err(fail)?;
     app.hub.send(json!({ "kind": "bot", "bot": wire }));

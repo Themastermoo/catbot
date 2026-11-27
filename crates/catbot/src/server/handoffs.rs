@@ -226,7 +226,11 @@ pub async fn follow(app: &Arc<App>, key: &str, thread: &str, request_id: i64, mu
                     None if first => format!("It's your turn to answer the person's last message, as {}.", bot.name),
                     None => format!("It's your turn now, as {}.", bot.name),
                 };
-                (channels::in_channel(bot, &channel, &members), false, cue, members)
+                let mut runner = channels::in_channel(bot, &channel, &members);
+                if super::team_chat::is_team_chat(app, &channel.id) {
+                    runner.instructions.push_str(&super::team_chat::note(&channel));
+                }
+                (runner, false, cue, members)
             }
             Place::Chat(owner_id) => {
                 let everyone = app.with_store(|store| store.bots()).unwrap_or_default();

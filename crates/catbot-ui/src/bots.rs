@@ -7,13 +7,16 @@
 use serde_json::Value;
 
 /// What a channel adds to the bot it's shown as.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct ChannelInfo {
     /// Its bots in order: (id, name, mark, colour).
     pub members: Vec<(String, String, String, String)>,
     /// The bot that answers when no one is @named.
     pub lead: String,
     pub folder: String,
+    /// The Team Chat (stage 30.1): every bot is in it, and its instructions are the pinned notes.
+    pub team_chat: bool,
+    pub instructions: String,
 }
 
 impl ChannelInfo {
@@ -33,6 +36,8 @@ impl ChannelInfo {
                 .collect(),
             lead: wire["lead"].as_str().unwrap_or_default().to_string(),
             folder: wire["folder"].as_str().unwrap_or_default().to_string(),
+            team_chat: wire["teamChat"] == true,
+            instructions: wire["instructions"].as_str().unwrap_or_default().to_string(),
         })
     }
 
@@ -174,6 +179,11 @@ pub struct Last {
 }
 
 impl Bot {
+    /// Whether this is the Team Chat (stage 30.1).
+    pub fn is_team_chat(&self) -> bool {
+        self.channel.as_ref().is_some_and(|c| c.team_chat)
+    }
+
     /// Catbot's own bots from a `GET /api/bots` answer, in the server's order.
     /// The reference server's bots (MausBot) are left to its own interface.
     pub fn list(answer: &Value) -> Vec<Bot> {
@@ -412,6 +422,15 @@ mod tests {
         let mut bot = json!({ "id": "b1", "threadId": "t1", "catbot": true, "name": "Kiwi", "color": "teal", "activity": "idle", "busy": false, "unread": false, "messages": [] });
         bot.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
         bot
+    }
+
+    #[test]
+    fn the_team_chat_is_known_with_its_notes() {
+        let team = Bot::from_wire(&wire(json!({ "id": "ch-1", "name": "Team Chat", "channel": { "members": [{ "id": "b1", "name": "Kiwi" }], "lead": "b1", "teamChat": true, "instructions": "Kiwi: seeds." } }))).unwrap();
+        assert!(team.is_team_chat());
+        assert_eq!(team.channel.unwrap().instructions, "Kiwi: seeds.");
+        let other = Bot::from_wire(&wire(json!({ "id": "ch-2", "channel": { "members": [], "lead": "" } }))).unwrap();
+        assert!(!other.is_team_chat());
     }
 
     #[test]
