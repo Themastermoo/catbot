@@ -1,6 +1,10 @@
 """A stand-in agent program speaking the Agent Client Protocol, for Catbot's tests.
 
+session/load replays the conversation before it answers, as ACP has agents do (and Grok CLI
+does): the person's earlier message, a tool call and the earlier reply, as session updates.
+
 session/prompt behaviour by the message's last line:
+  contains "look" -> says "Looking.", reads a file (a tool call), then says "Found it."
   contains "edit" -> a tool call that asks permission, then (if allowed) writes notes.md through
                      Catbot's fs/write_text_file, and says what happened
   anything else   -> thinks briefly, then answers "Echo: <line> (new|resumed)"; "new" when the
@@ -110,6 +114,10 @@ for line in sys.stdin:
         send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": options(params.get("value"))}})
     elif method == "session/load":
         if params.get("sessionId", "").startswith("fake-session"):
+            session = params["sessionId"]
+            chunk(session, "hello", "user_message_chunk")
+            update(session, {"sessionUpdate": "tool_call", "toolCallId": "old-1", "title": "Read notes.md", "kind": "read", "status": "completed"})
+            chunk(session, "Echo: hello (new)")
             send({"jsonrpc": "2.0", "id": rid, "result": {"configOptions": options("medium")}})
         else:
             send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32602, "message": "no such session"}})
@@ -117,7 +125,11 @@ for line in sys.stdin:
         session = params["sessionId"]
         text = params["prompt"][0]["text"]
         last = text.strip().splitlines()[-1]
-        if "edit" in last:
+        if "look" in last:
+            chunk(session, "Looking.")
+            update(session, {"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Read notes.md", "kind": "read", "status": "completed"})
+            chunk(session, "Found it.")
+        elif "edit" in last:
             path = os.path.join(os.getcwd(), "notes.md")
             update(session, {"sessionUpdate": "tool_call", "toolCallId": "t1", "title": "Write notes.md", "kind": "edit", "status": "pending", "locations": [{"path": path}]})
             answer = ask("session/request_permission", {"sessionId": session, "toolCall": {"toolCallId": "t1", "title": "Write notes.md", "kind": "edit", "locations": [{"path": path}]},

@@ -1317,10 +1317,15 @@ async fn a_bot_on_an_agent_program_streams_asks_and_resumes() {
     // The next message carries on the agent's session, at that level.
     s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "again", "threadId": thread }))).await;
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
-    assert_eq!(reply["message"]["text"], "Echo: again (resumed)");
+    assert_eq!(reply["message"]["text"], "Echo: again (resumed)", "what the agent replays as it loads the session isn't the new reply");
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
     let set: Vec<Value> = std::fs::read_to_string(&log).unwrap().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|l| l.get("set").is_some()).collect();
     assert_eq!(set, [json!({ "set": "reasoning", "value": "high", "session": "fake-session-1" })]);
+    // Text on either side of a tool call reads as two paragraphs, not one run-on line.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "look it up", "threadId": thread }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Looking.\n\nFound it.");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
     // Another model thinks in other words: the level goes back to its own.
     let (_, moved) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "grok-cli", "model": "grok-4.7" } }))).await;
     assert_eq!(moved["bot"]["effort"], Value::Null);

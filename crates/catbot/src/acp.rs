@@ -134,6 +134,12 @@ struct Heard {
     text: String,
     /// Tool calls started and not yet finished.
     open_tools: Vec<String>,
+    /// Whether the prompt has gone. Before then, updates are the agent replaying the session as
+    /// it loads (ACP's session/load does, and Grok CLI did), not this turn: they're left out.
+    listening: bool,
+    /// Something other than reply text came since the last text (a tool call, thinking): the
+    /// next text starts a new paragraph.
+    gap: bool,
 }
 
 async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: Answerer) {
@@ -151,7 +157,7 @@ async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: 
     let heard = Arc::new(Mutex::new(Heard::default()));
     let reader = tokio::spawn(read(stdout, link.clone(), tx.clone(), answers, heard.clone(), turn.workspace.clone()));
 
-    let result = converse(&turn, &link, &tx).await;
+    let result = converse(&turn, &link, &tx, &heard).await;
     let text = std::mem::take(&mut heard.lock().expect("heard lock").text);
     if !text.trim().is_empty() {
         let _ = tx.send(Event::Text { text: text.clone() }).await;
@@ -182,7 +188,7 @@ async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: 
 }
 
 /// The handshake, the session and the prompt. The session id and why the agent stopped.
-async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>) -> Result<(String, String), String> {
+async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: &Mutex<Heard>) -> Result<(String, String), String> {
     let init = link
         .call(
             "initialize",
@@ -233,6 +239,8 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>) -> Resu
         }
     }
     let _ = tx.send(Event::Started { session_id: session.clone(), model: (!turn.model.is_empty()).then(|| turn.model.clone()) }).await;
+    // The replay (if any) came before session/load's answer, which the reader handles in order.
+    heard.lock().expect("heard lock").listening = true;
     let answer = link.call("session/prompt", json!({ "sessionId": session, "prompt": [{ "type": "text", "text": prompt }] }), None).await?;
     let stop = answer["stopReason"].as_str().unwrap_or("end_turn").to_string();
     Ok((session, stop))
@@ -356,22 +364,39 @@ async fn read(
 
 /// One session update: reply text, thinking, or a tool call's progress.
 async fn update(update: &Value, tx: &mpsc::Sender<Event>, heard: &Mutex<Heard>) {
+    if !heard.lock().expect("heard lock").listening {
+        return;
+    }
     match update["sessionUpdate"].as_str().unwrap_or_default() {
         "agent_message_chunk" => {
             if let Some(text) = update["content"]["text"].as_str().filter(|t| !t.is_empty()) {
-                heard.lock().expect("heard lock").text.push_str(text);
-                let _ = tx.send(Event::TextDelta { text: text.to_string() }).await;
+                let text = {
+                    let mut heard = heard.lock().expect("heard lock");
+                    let text = if std::mem::take(&mut heard.gap) && !heard.text.trim().is_empty() && !heard.text.ends_with("\n\n") {
+                        format!("\n\n{}", text.trim_start())
+                    } else {
+                        text.to_string()
+                    };
+                    heard.text.push_str(&text);
+                    text
+                };
+                let _ = tx.send(Event::TextDelta { text }).await;
             }
         }
         "agent_thought_chunk" => {
             if let Some(text) = update["content"]["text"].as_str().filter(|t| !t.is_empty()) {
+                heard.lock().expect("heard lock").gap = true;
                 let _ = tx.send(Event::ThinkingDelta { text: text.to_string() }).await;
             }
         }
         "tool_call" => {
             let id = update["toolCallId"].as_str().unwrap_or("tool").to_string();
             let (name, input) = shown(update);
-            heard.lock().expect("heard lock").open_tools.push(id.clone());
+            {
+                let mut heard = heard.lock().expect("heard lock");
+                heard.open_tools.push(id.clone());
+                heard.gap = true;
+            }
             let _ = tx.send(Event::ToolStarted { id: id.clone(), name, input }).await;
             if let Some(ok) = finished(update) {
                 heard.lock().expect("heard lock").open_tools.retain(|t| *t != id);
