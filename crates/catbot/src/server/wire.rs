@@ -318,6 +318,10 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
             if let Some((from, to)) = handoff_of(&m.body) {
                 note["handoff"] = json!({ "from": from, "to": to });
             }
+            // A line about the team, in the Team Chat (stage 30.2): whose, and which chat it opens.
+            if detail["teamUpdate"].is_object() {
+                note["teamUpdate"] = detail["teamUpdate"].clone();
+            }
             note
         }
         Role::Card => json!({ "role": "bot", "kind": "options", "card": detail["card"] }),

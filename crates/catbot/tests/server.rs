@@ -1789,6 +1789,46 @@ async fn the_team_chat_has_every_bot_the_chief_answers_and_notes_change_with_a_y
 }
 
 #[tokio::test]
+async fn the_team_chat_hears_of_hand_offs_and_bots_waiting_elsewhere() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let mut ids = Vec::new();
+    for (name, soul) in [("Scout", "fake-pass @Kiwi"), ("Kiwi", "")] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name, "soul": soul }))).await;
+        ids.push(made["bot"]["id"].as_str().unwrap().to_string());
+    }
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    let room = list["bots"].as_array().unwrap().iter().find(|b| b["channel"]["teamChat"] == true).unwrap()["threadId"].as_str().unwrap().to_string();
+    let updates = || async {
+        let (_, page) = s.call("GET", &format!("/api/threads/{room}/messages?limit=50"), None).await;
+        page["messages"].as_array().unwrap().iter().filter(|m| m["teamUpdate"].is_object()).cloned().collect::<Vec<_>>()
+    };
+
+    // Scout hands to Kiwi in Scout's own chat.
+    let (_, sent) = s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Plan the beds" }))).await;
+    let scouts = sent["threadId"].as_str().unwrap().to_string();
+    until(&mut events, "handed", |f| f["kind"] == "message" && f["threadId"] == room.as_str()).await;
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
+    let said = updates().await;
+    let line = said[0]["tool"]["name"].as_str().unwrap();
+    assert!(line.starts_with("notice: Scout handed work to Kiwi in its chat"), "{line}");
+    assert_eq!((said[0]["teamUpdate"]["kind"].as_str(), said[0]["teamUpdate"]["threadId"].as_str(), said[0]["teamUpdate"]["chatOf"].as_str()), (Some("handoff"), Some(scouts.as_str()), Some(ids[0].as_str())));
+
+    // Kiwi asks for an approval in its own chat: said once, however many times it asks.
+    for _ in 0..2 {
+        s.call("POST", &format!("/api/bots/{}/messages", ids[1]), Some(json!({ "text": "approve" }))).await;
+        let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+        let (request, thread) = (asked["event"]["requestId"].as_str().unwrap().to_string(), asked["event"]["threadId"].as_str().unwrap().to_string());
+        s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+        until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[1].as_str() && f["bot"]["activity"] == "idle").await;
+    }
+    let waiting: Vec<String> = updates().await.iter().filter(|m| m["teamUpdate"]["kind"] == "waiting").map(|m| m["tool"]["name"].as_str().unwrap().to_string()).collect();
+    assert_eq!(waiting.len(), 1, "{waiting:?}");
+    assert!(waiting[0].starts_with("notice: Kiwi is waiting for you in its chat") && waiting[0].ends_with(": Bash echo hi."), "{waiting:?}");
+}
+
+#[tokio::test]
 async fn a_channel_holds_what_s_sent_while_it_answers() {
     let s = setup().await;
     let mut events = s.events().await;

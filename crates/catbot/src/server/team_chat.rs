@@ -139,6 +139,108 @@ pub fn propose(app: &App, thread: &str, bot: &Bot, text: &str) {
     turns::save_and_send(app, thread, Role::Step, &format!("Team change: change the {NAME}'s pinned notes"), Some(&detail));
 }
 
+// --- Team updates (stage 30.2) -------------------------------------------------------------
+//
+// Moo's choice: hand-offs, finished jobs and bots waiting on him show up in the Team Chat as
+// short lines, so the whole team can be followed in one place. Each says which chat it's about
+// and opens it. Kept short on purpose: a hand-off made elsewhere; a job that took two minutes or
+// more, a trigger's run, or a turn that failed; a bot waiting for an approval (once per chat in
+// ten minutes). Nothing from the Team Chat itself. Bots aren't shown these lines.
+
+/// How long a turn runs before its end is news.
+const LONG_TURN: std::time::Duration = std::time::Duration::from_secs(120);
+/// How often one chat's "waiting for you" is said.
+const WAITING_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// When each chat last said it was waiting.
+static WAITING: std::sync::Mutex<Option<std::collections::HashMap<String, std::time::Instant>>> = std::sync::Mutex::new(None);
+
+/// The Team Chat's own conversation, unless `thread` is it.
+fn room_for(app: &App, thread: &str) -> Option<String> {
+    app.with_store(|store| {
+        let Some(id) = id_in(store) else { return Ok(None) };
+        let room = store.channel_conversation(&id)?.map(|c| c.id);
+        Ok(room.filter(|room| room != thread))
+    })
+    .flatten()
+}
+
+/// Where a chat is, in words: "in #Garden", "in Palette's chat", "in its chat “Seeds”".
+fn place(app: &App, thread: &str, bot: &Bot) -> String {
+    app.with_store(|store| {
+        let Some(conversation) = store.conversation(thread)? else { return Ok(String::new()) };
+        if let Some(channel) = conversation.channel_id.as_deref().and_then(|id| store.channel(id).ok().flatten()) {
+            return Ok(format!(" in #{}", channel.name));
+        }
+        let title = conversation.title.filter(|t| !t.trim().is_empty());
+        if conversation.bot_id == bot.id {
+            return Ok(match title {
+                Some(title) => format!(" in its chat “{}”", title.trim()),
+                None => " in its chat".to_string(),
+            });
+        }
+        let owner = store.bot_by_id(&conversation.bot_id)?.map(|b| b.name).unwrap_or_else(|| "another bot".into());
+        Ok(format!(" in {owner}'s chat"))
+    })
+    .unwrap_or_default()
+}
+
+/// Puts one line in the Team Chat about `bot`, opening `thread`.
+fn post(app: &App, bot: &Bot, kind: &str, thread: &str, text: &str) {
+    let Some(room) = room_for(app, thread) else { return };
+    let owner = app.with_store(|store| store.conversation(thread)).flatten().map(|c| match c.channel_id {
+        Some(channel) => channel,
+        None => c.bot_id,
+    });
+    let detail = json!({ "teamUpdate": { "botId": bot.id, "kind": kind, "threadId": thread, "chatOf": owner } });
+    turns::save_and_send(app, &room, Role::Note, text, Some(&detail));
+    if let Some(id) = app.with_store(|store| Ok(id_in(store))).flatten() {
+        channels::announce(app, &id);
+    }
+}
+
+/// A bot handed work to another, somewhere other than the Team Chat.
+pub fn handed(app: &App, thread: &str, from: &Bot, to: &str) {
+    let text = format!("{} handed work to {to}{}.", from.name, place(app, thread, from));
+    post(app, from, "handoff", thread, &text);
+}
+
+/// A turn ended: news if it failed, or took a while.
+pub fn after_turn(app: &App, bot: &Bot, thread: &str, how: &str, took: std::time::Duration, why: Option<&str>) {
+    let text = match how {
+        "failed" => format!("{} couldn't finish{}{}.", bot.name, place(app, thread, bot), why.map(|w| format!(": {}", short(w))).unwrap_or_default()),
+        "done" if took >= LONG_TURN => format!("{} finished{} (after {} min).", bot.name, place(app, thread, bot), took.as_secs().div_ceil(60)),
+        _ => return,
+    };
+    post(app, bot, if how == "failed" { "failed" } else { "finished" }, thread, &text);
+}
+
+/// A trigger's run ended.
+pub fn trigger_ran(app: &App, bot: &Bot, thread: &str, name: &str, ok: bool) {
+    let text = if ok { format!("{} ran the trigger “{name}”{}.", bot.name, place(app, thread, bot)) } else { format!("{}'s trigger “{name}” failed{}.", bot.name, place(app, thread, bot)) };
+    post(app, bot, if ok { "finished" } else { "failed" }, thread, &text);
+}
+
+/// A bot asks the person's approval: said once per chat in a while.
+pub fn waiting(app: &App, bot: &Bot, thread: &str, what: &str) {
+    {
+        let mut said = WAITING.lock().unwrap_or_else(|p| p.into_inner());
+        let said = said.get_or_insert_with(Default::default);
+        if said.get(thread).is_some_and(|at| at.elapsed() < WAITING_EVERY) {
+            return;
+        }
+        said.insert(thread.to_string(), std::time::Instant::now());
+    }
+    let text = format!("{} is waiting for you{}: {}.", bot.name, place(app, thread, bot), short(what));
+    post(app, bot, "waiting", thread, &text);
+}
+
+/// The start of a long text, on one line.
+fn short(text: &str) -> String {
+    let line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() > 100 { format!("{}…", line.chars().take(99).collect::<String>()) } else { line }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -149,5 +251,11 @@ mod tests {
         assert_eq!(rest, "Updated the plan.\n\nShout if not.");
         assert_eq!(notes.as_deref(), Some("- Kiwi: seeds\n- Scout: beds"));
         assert_eq!(take("No notes here."), ("No notes here.".to_string(), None));
+    }
+
+    #[test]
+    fn long_texts_are_cut_short() {
+        assert_eq!(short("Run\n  the tests"), "Run the tests");
+        assert_eq!(short(&"a".repeat(150)).chars().count(), 100);
     }
 }

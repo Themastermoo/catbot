@@ -213,6 +213,7 @@ async fn run(
     let thread = conversation.id.as_str();
     // What happens is kept as it's sent, for the bot panel's Activity and Inspector.
     let record = super::runs::Recorder::new();
+    let began = std::time::Instant::now();
     let emit = |event: Value| {
         record.push(&event);
         app.hub.send(runtime(thread, turn_id, event))
@@ -408,6 +409,8 @@ async fn run(
     let how = if result.stopped { "stopped" } else if outcome.ok && result.errors.is_empty() { "done" } else { "failed" };
     let tools = result.steps.iter().filter(|s| matches!(s, Step::Tool { .. })).count();
     record.finish(app, bot, thread, turn_id, how, &model, tools, result.errors.len(), outcome.cost_usd);
+    // News for the Team Chat: a turn that failed, or took a while (stage 30.2).
+    super::team_chat::after_turn(app, bot, thread, how, began.elapsed(), result.errors.first().map(String::as_str));
     (!result.stopped && !result.reply.trim().is_empty()).then_some(result.reply)
 }
 
@@ -555,6 +558,7 @@ async fn drive(
                     app.turns.add_card(thread, &id, message_id);
                     app.announce_bot(&bot.id);
                     super::inbox::changed(app);
+                    super::team_chat::waiting(app, bot, thread, &summary);
                 }
             }
             Event::Error { message } => {

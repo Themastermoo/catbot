@@ -185,6 +185,8 @@ fn hand(app: &App, thread: &str, rules: &Rules, queue: &mut VecDeque<Turn>, done
     // The Team map draws who hands work to whom.
     if let Some(giver) = app.with_store(|store| store.bot(&from)).flatten() {
         super::departments::handed(app, &giver.id, &turn.bot.id, thread);
+        // And the Team Chat hears of it (stage 30.2).
+        super::team_chat::handed(app, thread, &giver, &turn.bot.name);
     }
     queue.push_back(turn);
 }

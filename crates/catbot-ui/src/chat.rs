@@ -61,6 +61,9 @@ pub enum Body {
     Step { name: String, ok: Option<bool> },
     /// One bot handing the work to another (stage 29.12), by name: drawn as a chip with both.
     Handoff { from: String, to: String },
+    /// A line about the team in the Team Chat (stage 30.2): whose, what kind ("handoff",
+    /// "finished", "failed", "waiting"), and the chat it opens (`chat_of` owns `thread`).
+    TeamUpdate { bot_id: String, kind: String, thread: String, chat_of: String, text: String },
     /// A picture being asked for and drawn (`pictures.rs`).
     Picture(Box<crate::pictures::Card>),
     TeamChange(Box<crate::team::Change>),
@@ -105,6 +108,12 @@ impl Msg {
                 None => Body::Person(text()),
             },
             ("text", _) => Body::Reply(text()),
+            ("activity", _) if wire["teamUpdate"].is_object() => {
+                let update = &wire["teamUpdate"];
+                let field = |k: &str| update[k].as_str().unwrap_or_default().to_string();
+                let name = wire["tool"]["name"].as_str().unwrap_or_default();
+                Body::TeamUpdate { bot_id: field("botId"), kind: field("kind"), thread: field("threadId"), chat_of: field("chatOf"), text: name.strip_prefix("notice: ").unwrap_or(name).to_string() }
+            }
             ("activity", _) if wire["handoff"].is_object() => Body::Handoff {
                 from: wire["handoff"]["from"].as_str().unwrap_or_default().to_string(),
                 to: wire["handoff"]["to"].as_str().unwrap_or_default().to_string(),
@@ -1287,6 +1296,9 @@ fn Row(
         }
         Body::Step { name, ok } => rsx! { Step { name: name.clone(), ok: *ok } },
         Body::Handoff { from, to } => rsx! { HandoffChip { from: from.clone(), to: to.clone(), going: handing, at: full_time.clone() } },
+        Body::TeamUpdate { bot_id: whose, kind, thread: there, chat_of, text } => rsx! {
+            TeamUpdateLine { bot_id: whose.clone(), kind: kind.clone(), thread: there.clone(), chat_of: chat_of.clone(), text: text.clone(), at: full_time.clone(), when: when.clone() }
+        },
         Body::Picture(card) => rsx! {
             crate::pictures::PictureCard { thread: thread.clone(), message: message.id.clone(), card: (**card).clone() }
         },
@@ -1445,6 +1457,40 @@ fn SpeakerTag(who: Speaker, #[props(default)] to: Vec<Speaker>, #[props(default)
                     span { key: "{one.id}", class: "inline-flex items-center",
                         SpeakerName { who: one }
                         if i < last { span { class: "text-ink-tertiary", "," } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A line about the team in the Team Chat: the bot's face, what happened, and Open for the chat
+/// it happened in (stage 30.2).
+#[component]
+fn TeamUpdateLine(bot_id: String, kind: String, thread: String, chat_of: String, text: String, at: String, when: String) -> Element {
+    let state = use_context::<Signal<State>>();
+    let ui = use_context::<crate::settings::Ui>();
+    let who = speaker(&state.read(), &bot_id);
+    let dot = match kind.as_str() {
+        "waiting" => "bg-warning",
+        "failed" => "bg-danger",
+        "finished" => "bg-success",
+        _ => "bg-accent",
+    };
+    let can_open = !thread.is_empty() && !chat_of.is_empty() && state.read().bots.iter().any(|b| b.id == chat_of);
+    rsx! {
+        div { class: "flex justify-start", "data-team-update": "{kind}",
+            div { class: "flex min-w-0 max-w-full items-center gap-2 text-[13px] text-ink-secondary", title: "{at}",
+                span { "aria-hidden": "true", class: "size-1.5 shrink-0 rounded-full {dot}" }
+                if let Some(w) = &who {
+                    BotMark { picture: w.picture.clone(), color: w.color.clone(), initial: w.initial(), size: 18, mark: w.mark.clone() }
+                }
+                span { class: "min-w-0 truncate", "{text}" }
+                span { class: "shrink-0 text-[11px] tabular-nums text-ink-tertiary", "{when}" }
+                if can_open {
+                    button { r#type: "button", "data-team-update-open": true, class: "shrink-0 text-[12px] text-ink-tertiary hover:text-ink hover:underline",
+                        onclick: move |_| crate::chats::open(state, ui, &chat_of, &thread),
+                        "Open"
                     }
                 }
             }
@@ -1945,6 +1991,13 @@ mod tests {
         // It stands on its own line, between steps.
         let items = group(&[step("a", "Read", 1.0), note, step("b", "Read", 1.0)]);
         assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn a_team_update_knows_its_bot_and_chat() {
+        let line = Msg::from_wire(&json!({ "id": "n2", "at": 1.0, "role": "bot", "kind": "activity", "tool": { "name": "notice: Kiwi is waiting for you in its chat: Bash echo hi.", "ok": true }, "teamUpdate": { "botId": "k", "kind": "waiting", "threadId": "t9", "chatOf": "k" } })).unwrap();
+        assert_eq!(line.body, Body::TeamUpdate { bot_id: "k".into(), kind: "waiting".into(), thread: "t9".into(), chat_of: "k".into(), text: "Kiwi is waiting for you in its chat: Bash echo hi.".into() });
+        assert!(!line.is_step());
     }
 
     #[test]

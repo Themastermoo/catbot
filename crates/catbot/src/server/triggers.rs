@@ -810,6 +810,7 @@ pub fn start(app: &Arc<App>, trigger: &Trigger, source: &str, scheduled_for: Opt
         let name = list(&app).into_iter().find(|t| t.id == trigger_id).map(|t| t.name).unwrap_or_else(|| "A trigger".into());
         let said = reply.as_deref().ok_or("it stopped without a reply (the chat shows why)");
         super::inbox::trigger_ran(&app, &trigger_id, &name, &bot.id, &thread, said);
+        super::team_chat::trigger_ran(&app, &bot, &thread, &name, said.is_ok());
         change_run(&app, &run_id, |r| {
             r.finished_at = Some(now());
             match &reply {
