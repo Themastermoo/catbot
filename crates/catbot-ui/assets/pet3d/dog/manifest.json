@@ -1,0 +1,421 @@
+{
+  "version": 1,
+  "species": "dog",
+  "frame": {
+    "width": 192,
+    "height": 160,
+    "scale": 2,
+    "css_width": 96,
+    "css_height": 80
+  },
+  "passes": [
+    "base",
+    "mask",
+    "gloss"
+  ],
+  "mask": "white, alpha = how much of the pixel is shell (use as a CSS alpha mask)",
+  "ground_css_y": 77.35,
+  "drag_anchor_css": [
+    55.49,
+    32.03
+  ],
+  "walk": {
+    "stride_css_px": 12.92,
+    "cycle_seconds": 1.0
+  },
+  "poses": {
+    "idle": {
+      "intro": null,
+      "animation": "idle"
+    },
+    "walk": {
+      "intro": null,
+      "animation": "walk"
+    },
+    "sit": {
+      "intro": "sit_down",
+      "animation": "sit"
+    },
+    "sleep": {
+      "intro": "lie_down",
+      "animation": "sleep"
+    },
+    "working": {
+      "intro": null,
+      "animation": "working"
+    },
+    "waiting": {
+      "intro": null,
+      "animation": "waiting"
+    },
+    "happy": {
+      "intro": null,
+      "animation": "happy"
+    },
+    "jump": {
+      "intro": "jump",
+      "animation": "air"
+    },
+    "land": {
+      "intro": null,
+      "animation": "land"
+    },
+    "drag": {
+      "intro": null,
+      "animation": "drag"
+    },
+    "stretch": {
+      "intro": "stretch",
+      "animation": "idle"
+    },
+    "groom": {
+      "intro": "head_tilt",
+      "animation": "sit"
+    },
+    "yawn": {
+      "intro": "yawn",
+      "animation": "idle"
+    },
+    "wave": {
+      "intro": "wave",
+      "animation": "idle"
+    },
+    "crouch": {
+      "intro": null,
+      "animation": "crouch"
+    },
+    "coding": {
+      "intro": null,
+      "animation": "coding"
+    },
+    "designing": {
+      "intro": null,
+      "animation": "designing"
+    },
+    "researching": {
+      "intro": null,
+      "animation": "researching"
+    },
+    "nap": {
+      "intro": "curl_up",
+      "animation": "nap"
+    },
+    "wake": {
+      "intro": "wake",
+      "animation": "idle"
+    },
+    "dangle": {
+      "intro": null,
+      "animation": "dangle"
+    },
+    "chase": {
+      "intro": "play_bow",
+      "animation": "idle"
+    },
+    "look": {
+      "intro": "look_around",
+      "animation": "sit"
+    }
+  },
+  "animations": {
+    "idle": {
+      "frames": 36,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_idle.png",
+        "mask": "mask_idle.png",
+        "gloss": "gloss_idle.png"
+      }
+    },
+    "walk": {
+      "frames": 16,
+      "fps": 16,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_walk.png",
+        "mask": "mask_walk.png",
+        "gloss": "gloss_walk.png"
+      }
+    },
+    "sit_down": {
+      "frames": 9,
+      "fps": 12,
+      "loop": false,
+      "next": "sit",
+      "sheets": {
+        "base": "base_sit_down.png",
+        "mask": "mask_sit_down.png",
+        "gloss": "gloss_sit_down.png"
+      }
+    },
+    "sit": {
+      "frames": 36,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_sit.png",
+        "mask": "mask_sit.png",
+        "gloss": "gloss_sit.png"
+      }
+    },
+    "lie_down": {
+      "frames": 11,
+      "fps": 12,
+      "loop": false,
+      "next": "sleep",
+      "sheets": {
+        "base": "base_lie_down.png",
+        "mask": "mask_lie_down.png",
+        "gloss": "gloss_lie_down.png"
+      }
+    },
+    "sleep": {
+      "frames": 32,
+      "fps": 8,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_sleep.png",
+        "mask": "mask_sleep.png",
+        "gloss": "gloss_sleep.png"
+      }
+    },
+    "working": {
+      "frames": 24,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_working.png",
+        "mask": "mask_working.png",
+        "gloss": "gloss_working.png"
+      }
+    },
+    "waiting": {
+      "frames": 24,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_waiting.png",
+        "mask": "mask_waiting.png",
+        "gloss": "gloss_waiting.png"
+      }
+    },
+    "happy": {
+      "frames": 16,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_happy.png",
+        "mask": "mask_happy.png",
+        "gloss": "gloss_happy.png"
+      }
+    },
+    "jump": {
+      "frames": 8,
+      "fps": 14,
+      "loop": false,
+      "next": "air",
+      "sheets": {
+        "base": "base_jump.png",
+        "mask": "mask_jump.png",
+        "gloss": "gloss_jump.png"
+      }
+    },
+    "air": {
+      "frames": 8,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_air.png",
+        "mask": "mask_air.png",
+        "gloss": "gloss_air.png"
+      }
+    },
+    "land": {
+      "frames": 10,
+      "fps": 14,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_land.png",
+        "mask": "mask_land.png",
+        "gloss": "gloss_land.png"
+      }
+    },
+    "drag": {
+      "frames": 24,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_drag.png",
+        "mask": "mask_drag.png",
+        "gloss": "gloss_drag.png"
+      }
+    },
+    "stretch": {
+      "frames": 30,
+      "fps": 12,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_stretch.png",
+        "mask": "mask_stretch.png",
+        "gloss": "gloss_stretch.png"
+      }
+    },
+    "yawn": {
+      "frames": 22,
+      "fps": 12,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_yawn.png",
+        "mask": "mask_yawn.png",
+        "gloss": "gloss_yawn.png"
+      }
+    },
+    "wave": {
+      "frames": 18,
+      "fps": 12,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_wave.png",
+        "mask": "mask_wave.png",
+        "gloss": "gloss_wave.png"
+      }
+    },
+    "crouch": {
+      "frames": 16,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_crouch.png",
+        "mask": "mask_crouch.png",
+        "gloss": "gloss_crouch.png"
+      }
+    },
+    "coding": {
+      "frames": 24,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_coding.png",
+        "mask": "mask_coding.png",
+        "gloss": "gloss_coding.png"
+      }
+    },
+    "designing": {
+      "frames": 32,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_designing.png",
+        "mask": "mask_designing.png",
+        "gloss": "gloss_designing.png"
+      }
+    },
+    "researching": {
+      "frames": 36,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_researching.png",
+        "mask": "mask_researching.png",
+        "gloss": "gloss_researching.png"
+      }
+    },
+    "curl_up": {
+      "frames": 14,
+      "fps": 12,
+      "loop": false,
+      "next": "nap",
+      "sheets": {
+        "base": "base_curl_up.png",
+        "mask": "mask_curl_up.png",
+        "gloss": "gloss_curl_up.png"
+      }
+    },
+    "nap": {
+      "frames": 32,
+      "fps": 8,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_nap.png",
+        "mask": "mask_nap.png",
+        "gloss": "gloss_nap.png"
+      }
+    },
+    "wake": {
+      "frames": 18,
+      "fps": 12,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_wake.png",
+        "mask": "mask_wake.png",
+        "gloss": "gloss_wake.png"
+      }
+    },
+    "dangle": {
+      "frames": 24,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_dangle.png",
+        "mask": "mask_dangle.png",
+        "gloss": "gloss_dangle.png"
+      }
+    },
+    "look_around": {
+      "frames": 36,
+      "fps": 12,
+      "loop": false,
+      "next": "sit",
+      "sheets": {
+        "base": "base_look_around.png",
+        "mask": "mask_look_around.png",
+        "gloss": "gloss_look_around.png"
+      }
+    },
+    "play_bow": {
+      "frames": 30,
+      "fps": 12,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_play_bow.png",
+        "mask": "mask_play_bow.png",
+        "gloss": "gloss_play_bow.png"
+      }
+    },
+    "head_tilt": {
+      "frames": 30,
+      "fps": 12,
+      "loop": false,
+      "next": "sit",
+      "sheets": {
+        "base": "base_head_tilt.png",
+        "mask": "mask_head_tilt.png",
+        "gloss": "gloss_head_tilt.png"
+      }
+    }
+  },
+  "blender": "5.3.0",
+  "engine": "BLENDER_EEVEE"
+}

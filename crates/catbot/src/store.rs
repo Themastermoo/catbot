@@ -160,7 +160,7 @@ pub struct ChatFolder {
 /// The colours a bot can wear: the interface's identity colours.
 pub const COLORS: [&str; 12] = ["green", "blue", "red", "orange", "purple", "cyan", "pink", "yellow", "teal", "coral", "silver", "chrome"];
 
-/// A bot's picture: one of Catbot's three cats, or the first letter of its name in a circle.
+/// A bot's picture: one of Catbot's cats or dogs, or the first letter of its name in a circle.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Mark {
     #[default]
@@ -172,10 +172,19 @@ pub enum Mark {
     RobotHead,
     /// The robot cat sitting, whole.
     RobotFull,
+    /// A dog's head, drawn flat like the cat head (Dogbot: a bot can be a dog instead).
+    DogHead,
+    /// The robot dog's head, rendered in Blender like the robot cat's.
+    RobotDogHead,
+    /// The robot dog sitting, whole.
+    RobotDogFull,
 }
 
 impl Mark {
-    pub const ALL: [Mark; 6] = [Mark::CatHead, Mark::CatSitting, Mark::CatVisor, Mark::Letter, Mark::RobotHead, Mark::RobotFull];
+    pub const ALL: [Mark; 9] = [
+        Mark::CatHead, Mark::CatSitting, Mark::CatVisor, Mark::Letter, Mark::RobotHead, Mark::RobotFull,
+        Mark::DogHead, Mark::RobotDogHead, Mark::RobotDogFull,
+    ];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -185,6 +194,9 @@ impl Mark {
             Mark::Letter => "letter",
             Mark::RobotHead => "robot-head",
             Mark::RobotFull => "robot-full",
+            Mark::DogHead => "dog-head",
+            Mark::RobotDogHead => "robot-dog-head",
+            Mark::RobotDogFull => "robot-dog-full",
         }
     }
 
@@ -1701,6 +1713,25 @@ mod tests {
         assert_eq!(Mark::parse("cat-sitting"), Some(Mark::CatSitting));
         assert_eq!(Mark::parse("robot-full"), Some(Mark::RobotFull));
         assert_eq!(Mark::parse("mouse"), None);
+    }
+
+    #[test]
+    fn a_bot_can_be_a_dog() {
+        let (_dir, store) = store();
+        let mut bot = store.create_bot(new("Rex")).unwrap();
+        for (text, mark) in [("dog-head", Mark::DogHead), ("robot-dog-head", Mark::RobotDogHead), ("robot-dog-full", Mark::RobotDogFull)] {
+            assert_eq!(Mark::parse(text), Some(mark));
+            assert_eq!(mark.as_str(), text);
+            bot.mark = mark;
+            store.update_bot(&bot).unwrap();
+            assert_eq!(store.bot("Rex").unwrap().unwrap().mark, mark, "{text} is kept");
+        }
+        // Cats are still what a new bot is, and every picture has its own name.
+        assert_eq!(Mark::default(), Mark::CatHead);
+        let mut names: Vec<&str> = Mark::ALL.iter().map(|m| m.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), Mark::ALL.len());
     }
 
     #[test]

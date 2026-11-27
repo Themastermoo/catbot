@@ -46,14 +46,43 @@ except ImportError:  # pragma: no cover - outside Blender
 
 
 # =============================================================================================
+# Species: the robot cat, or the robot dog of the same family
+# =============================================================================================
+
+def _species():
+    """Which animal this run builds: "cat" (the default) or "dog". It is read once, before
+    anything is laid out, from the config's "species" key (the --config file on Blender's
+    command line), or from the PET_SPECIES environment variable where there is no config (as in
+    soft_preview.py). The dog shares the cat's skeleton, materials, passes and LED face; what
+    differs is marked `if DOG` below: a snout, hanging ears, a collar, a sturdier body and legs,
+    a shorter tail that wags, and dog versions of some animations."""
+    name = os.environ.get("PET_SPECIES")
+    argv = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+    if "--config" in argv[:-1]:
+        with open(argv[argv.index("--config") + 1]) as fh:
+            name = json.load(fh).get("species", name)
+    name = name or "cat"
+    if name not in ("cat", "dog"):
+        raise ValueError("\"species\" must be \"cat\" or \"dog\", not %r" % name)
+    return name
+
+
+SPECIES = _species()
+DOG = SPECIES == "dog"
+
+
+# =============================================================================================
 # Frame and camera
 # =============================================================================================
 
+DOG_SHIFT = 0.30          # how far forward the dog's frame sits (world units)
 FRAME_CSS = (96, 80)      # the pet's box in the pet window, CSS px
 FRAME_UNITS_W = 10.6      # world units across the frame's width
 FRAME_UNITS_H = FRAME_UNITS_W * FRAME_CSS[1] / FRAME_CSS[0]
 GROUND_MARGIN = 0.28      # world units between the frame's bottom edge and the ground
-CAM_TARGET = (-0.62, 0.0, FRAME_UNITS_H / 2 - GROUND_MARGIN)
+# The dog's snout reaches further forward and its tail less far back, so its frame sits a little
+# further forward on it.
+CAM_TARGET = (-0.62 + (DOG_SHIFT if DOG else 0.0), 0.0, FRAME_UNITS_H / 2 - GROUND_MARGIN)
 CAM_YAW = 18.0            # the camera stands a little towards the cat's front, so the face shows
 CAM_PITCH = 6.0           # and a little above
 
@@ -135,10 +164,11 @@ def lerp(a, b, t):
 # =============================================================================================
 
 TAIL_N = 8
-TAIL_SEG = 0.42
+TAIL_SEG = 0.26 if DOG else 0.42   # the dog's tail is shorter (and thicker)
 LEGS_FRONT = ("fn", "ff")   # front near, front far
 LEGS_HIND = ("hn", "hf")
-LEG_Y = {"fn": -0.48, "ff": 0.48, "hn": -0.50, "hf": 0.50}
+LEG_Y = ({"fn": -0.53, "ff": 0.53, "hn": -0.55, "hf": 0.55} if DOG   # a wider stance
+         else {"fn": -0.48, "ff": 0.48, "hn": -0.50, "hf": 0.50})
 
 BZ = 2.92        # the height of the spine at the hips; the body is laid out from here
 WRIST_H = 0.34   # the wrist's height over the paw's contact point
@@ -155,6 +185,9 @@ BONES = {
     "ear_n": ("head", (2.40, -0.66, BZ + 1.92), (2.22, -1.05, BZ + 3.05)),
     "ear_f": ("head", (2.40, 0.66, BZ + 1.92), (2.22, 1.05, BZ + 3.05)),
 }
+if DOG:   # hanging ears: each turns about where it leaves the top of the head's side
+    BONES["ear_n"] = ("head", (2.40, -0.95, BZ + 1.92), (2.30, -1.38, BZ + 0.70))
+    BONES["ear_f"] = ("head", (2.40, 0.95, BZ + 1.92), (2.30, 1.38, BZ + 0.70))
 TAIL_BASE = (-2.50, 0.0, BZ + 0.12)
 for _i in range(TAIL_N):
     _h = (TAIL_BASE[0] - TAIL_SEG * _i, 0.0, TAIL_BASE[2])
@@ -343,7 +376,7 @@ def chain_weights(param, joints, width):
 # ---- the head is an ellipsoid; the visor and the LEDs are laid on its surface -----------------
 
 HEAD_C = np.array([2.66, 0.0, BZ + 1.40])
-HEAD_R = np.array([1.08, 1.16, 0.93])
+HEAD_R = np.array([1.10, 1.08, 0.94]) if DOG else np.array([1.08, 1.16, 0.93])
 VISOR_PHI = 10.0          # the visor's centre, degrees above straight ahead
 VISOR_HALF = (70.0, 29.0)  # half-extent: side to side, and up/down
 EYE_LAT = 37.0            # each eye's centre, degrees to the side of straight ahead
@@ -455,14 +488,26 @@ def face_part(shape, lx=0, ly=0, sweep=None, big=False):
 
 # ---- the body ---------------------------------------------------------------------------------
 
+# Where an ear's pieces change along its tube: the shell ends, the light begins, and where the
+# larger light of the smallest pictures begins.
+EAR_CUTS = (0.76, 0.78, 0.56) if DOG else (0.84, 0.86, 0.64)
+
+
 def _ear(sgn):
-    """An ear's tube: (path start, tip, profile, tube options). sgn -1 is the near ear."""
+    """An ear's tube: (path, profile, tube options). sgn -1 is the near ear. The cat's stands
+    up to a point; the dog's is a flat lobe that comes out of the top of the head's side and
+    hangs down beside it."""
+    if DOG:
+        path = [HEAD_C + [-0.22, sgn * 0.74, 0.62], HEAD_C + [-0.26, sgn * 1.14, 0.52],
+                HEAD_C + [-0.32, sgn * 1.30, -0.06], HEAD_C + [-0.38, sgn * 1.27, -0.86]]
+        prof = [(0, 0.27, 0.12), (0.3, 0.44, 0.12), (0.7, 0.50, 0.12), (1, 0.40, 0.11)]
+        return path, prof, dict(n_seg=14, round0=0.0, round1=0.22, side=(1.0, 0.0, 0.0))
     base = HEAD_C + [-0.22, sgn * 0.62, 0.52]
     tip = HEAD_C + [-0.46, sgn * 1.12, 1.92]
     ear_side = (0.66, sgn * 0.75, 0.0)   # the ear's flat faces forward and outward
     prof = [(0, 0.64, 0.25), (0.5, 0.40, 0.17), (1, 0.13, 0.09)]
     kw = dict(n_seg=14, round0=0.0, round1=0.14, side=ear_side)
-    return base - 0.22 * (tip - base), tip, prof, kw   # the path starts inside the head
+    return [base - 0.22 * (tip - base), tip], prof, kw   # the path starts inside the head
 
 
 def icon_parts():
@@ -470,8 +515,8 @@ def icon_parts():
     each ear, so they survive at 16 px. Hidden everywhere else."""
     parts = []
     for tag, sgn in (("n", -1.0), ("f", 1.0)):
-        lower, tip, prof, kw = _ear(sgn)
-        v, f = tube([lower, tip], prof, n_len=8, t0=0.64, t1=1.0, grow=0.012, **kw)
+        path, prof, kw = _ear(sgn)
+        v, f = tube(path, prof, n_len=8, t0=EAR_CUTS[2], t1=1.0, grow=0.012, **kw)
         parts.append(Part("ear_biglight_%s" % tag, v, f, ["ear_light"], rigid("ear_" + tag, len(v))))
     return parts
 
@@ -596,6 +641,9 @@ def build_parts():
                  (1.35, 0, BZ + 0.10), (2.0, 0, BZ + 0.13)]
     body_prof = [(0.0, 0.48, 0.48, 0.54), (0.22, 0.61, 0.60, 0.72), (0.46, 0.47, 0.50, 0.50),
                  (0.74, 0.66, 0.62, 0.92), (1.0, 0.52, 0.56, 0.72)]
+    if DOG:   # sturdier: a barrel chest, hardly any waist
+        body_prof = [(0.0, 0.52, 0.52, 0.58), (0.22, 0.68, 0.63, 0.76), (0.46, 0.62, 0.57, 0.66),
+                     (0.74, 0.78, 0.67, 1.00), (1.0, 0.60, 0.60, 0.80)]
     body_kw = dict(n_seg=28, round0=0.2, round1=0.2)
     spine = [("hips", -0.85), ("waist", 0.2), ("chest", None)]
     v, f = tube(body_path, body_prof, n_len=44, **body_kw)
@@ -606,20 +654,33 @@ def build_parts():
 
     # -- neck: a tapered shell sleeve from chest to head, one seam, a ball joint at the skull
     neck_path = [(1.25, 0, BZ + 0.20), (1.68, 0, BZ + 0.62), (2.3, 0, BZ + 1.12)]
-    neck_prof = [(0, 0.50, 0.50), (1, 0.40, 0.40)]
+    neck_prof = [(0, 0.58, 0.58), (1, 0.48, 0.48)] if DOG else [(0, 0.50, 0.50), (1, 0.40, 0.40)]
     neck_chain = [("chest", 0.12), ("neck", 0.70), ("head", None)]
     v, f = tube(neck_path, neck_prof, n_len=16, n_seg=18, round0=0.1, round1=0.1)
     add("neck_sleeve", (v, f), "shell", weights=chain_weights((v[:, 0] - 1.25) / 1.05, neck_chain, 0.16))
     v, f = tube(neck_path, neck_prof, n_len=2, n_seg=18, round0=0.1, round1=0.1, t0=0.44, t1=0.47, grow=0.006)
     add("neck_seam", (v, f), "graphite", weights=chain_weights((v[:, 0] - 1.25) / 1.05, neck_chain, 0.16))
     add("neck_joint", ball(head_of("head"), 0.45), "metal", "head")
+    if DOG:   # a collar: a dark band round the neck, a metal buckle ring, and a tag that glows
+        #       with the near ear light
+        v, f = tube(neck_path, neck_prof, n_len=3, n_seg=18, round0=0.1, round1=0.1, t0=0.30, t1=0.52, grow=0.045)
+        add("collar", (v, f), "graphite", weights=chain_weights((v[:, 0] - 1.25) / 1.05, neck_chain, 0.16))
+        v, f = tube(neck_path, neck_prof, n_len=1, n_seg=18, round0=0.1, round1=0.1, t0=0.395, t1=0.425, grow=0.062)
+        add("collar_ring", (v, f), "metal", weights=chain_weights((v[:, 0] - 1.25) / 1.05, neck_chain, 0.16))
+        add("collar_tag_n", ball((2.12, 0.0, BZ + 0.22), (0.10, 0.15, 0.15), n=8), "ear_light", "neck")
 
     # -- head
     add("head_shell", tube([HEAD_C - [HEAD_R[0], 0, 0], HEAD_C + [HEAD_R[0], 0, 0]],
                            [(0, HEAD_R[1], HEAD_R[2]), (1, HEAD_R[1], HEAD_R[2])],
                            n_len=22, n_seg=32, round0=0.5, round1=0.5), "shell", "head")
-    add("muzzle", ball(HEAD_C + [0.86, 0, -0.44], (0.40, 0.46, 0.30), n=12), "shell", "head")
-    add("nose", ball(HEAD_C + [1.235, 0, -0.38], (0.07, 0.11, 0.075), n=8), "graphite", "head")
+    if DOG:   # a snout: out from under the visor, a big dark nose on its end
+        add("muzzle", tube([HEAD_C + [0.40, 0, -0.42], HEAD_C + [1.62, 0, -0.50]],
+                           [(0, 0.54, 0.36, 0.36), (0.55, 0.44, 0.31, 0.31), (1, 0.38, 0.27, 0.28)],
+                           n_len=14, n_seg=20, round0=0.1, round1=0.34), "shell", "head")
+        add("nose", ball(HEAD_C + [1.60, 0, -0.38], (0.15, 0.20, 0.14), n=10), "graphite", "head")
+    else:
+        add("muzzle", ball(HEAD_C + [0.86, 0, -0.44], (0.40, 0.46, 0.30), n=12), "shell", "head")
+        add("nose", ball(HEAD_C + [1.235, 0, -0.38], (0.07, 0.11, 0.075), n=8), "graphite", "head")
     v, f = head_patch((VISOR_HALF[0] + 4.0, VISOR_HALF[1] + 3.6), 1.02)
     add("visor_bezel", (v, f), "metal", "head", closed=False)
     v, f = head_patch(VISOR_HALF, 1.04)
@@ -632,13 +693,17 @@ def build_parts():
 
     # -- ears: shell, a dark inner face, and a light at the tip
     for tag, sgn in (("n", -1.0), ("f", 1.0)):
-        lower, tip, prof, kw = _ear(sgn)
+        path, prof, kw = _ear(sgn)
         ear_side = kw["side"]
-        add("ear_%s" % tag, tube([lower, tip], prof, n_len=10, t0=0.0, t1=0.84, **kw), "shell", "ear_" + tag)
-        add("ear_ring_%s" % tag, tube([lower, tip], prof, n_len=1, t0=0.84, t1=0.86, grow=-0.012, **kw),
+        cut, lit = EAR_CUTS[0], EAR_CUTS[1]
+        add("ear_%s" % tag, tube(path, prof, n_len=14 if DOG else 10, t0=0.0, t1=cut, **kw), "shell", "ear_" + tag)
+        add("ear_ring_%s" % tag, tube(path, prof, n_len=1, t0=cut, t1=lit, grow=-0.012, **kw),
             "graphite", "ear_" + tag)
-        add("ear_light_%s" % tag, tube([lower, tip], prof, n_len=6, t0=0.86, t1=1.0, **kw),
+        add("ear_light_%s" % tag, tube(path, prof, n_len=6, t0=lit, t1=1.0, **kw),
             "ear_light", "ear_" + tag)
+        if DOG:   # a hanging ear's inner face lies against the head: nothing to show
+            continue
+        lower, tip = path
         # the inner face: a thinner dark tube pushed out through the ear's front
         add("ear_inner_%s" % tag,
             tube([lower, tip], [(0, 0.46, 0.16), (0.5, 0.27, 0.11), (1, 0.05, 0.05)], n_len=8,
@@ -646,12 +711,19 @@ def build_parts():
                  side=ear_side),
             "graphite", "ear_" + tag)
 
+    TAIL_R = (0.30, 0.15) if DOG else (0.235, 0.095)   # radius at the root and at the tip
+    LEG_K = 1.28 if DOG else 1.0    # how much thicker the dog's legs are
+    PK = 1.30 if DOG else 1.0   # and how much larger its paws
+
+    def thick(prof):
+        return [(p[0],) + tuple(r * LEG_K for r in p[1:]) for p in prof]
+
     # -- tail: a whip of short shell segments that nearly touch; the joints show only as seams
     for i in range(TAIL_N):
         b = "tail%d" % (i + 1)
         h = head_of(b)
-        r0 = lerp(0.235, 0.095, i / TAIL_N)
-        r1 = lerp(0.235, 0.095, (i + 1) / TAIL_N)
+        r0 = lerp(TAIL_R[0], TAIL_R[1], i / TAIL_N)
+        r1 = lerp(TAIL_R[0], TAIL_R[1], (i + 1) / TAIL_N)
         last = i == TAIL_N - 1
         add("tail_joint%d" % (i + 1), ball(h, r0 * 0.74, n=8), "metal", b)
         add("tail_shell%d" % (i + 1),
@@ -660,9 +732,11 @@ def build_parts():
 
     def paw(leg, x0, x1):
         y = LEG_Y[leg]
-        return tube([(x0, y, 0.165), (x1, y, 0.15)],
-                    [(0, 0.165, 0.16), (0.62, 0.20, 0.165), (1, 0.165, 0.14)], n_len=10, n_seg=14,
-                    round0=0.5, round1=0.45, floor=0.0)
+        mid = (x0 + x1) / 2
+        x0, x1 = mid + (x0 - mid) * PK, mid + (x1 - mid) * PK
+        return tube([(x0, y, 0.165 * PK), (x1, y, 0.15 * PK)],
+                    [(0, 0.165 * PK, 0.16 * PK), (0.62, 0.20 * PK, 0.165 * PK), (1, 0.165 * PK, 0.14 * PK)],
+                    n_len=10, n_seg=14, round0=0.5, round1=0.45, floor=0.0)
 
     # -- front legs: each piece wide at the top and fine at the bottom, joints sunk between them
     for leg in LEGS_FRONT:
@@ -672,11 +746,11 @@ def build_parts():
         add("scapula_" + leg, ball((0.93, y + out, BZ + 0.10), (0.50, 0.17, 0.62), n=10), "shell", "scap_" + leg)
         add("shoulder_" + leg, ball(S + [0, out * 0.6, 0], 0.22), "metal", "scap_" + leg)
         add("upper_shell_" + leg, tube([lerp(S, E, -0.06) + [0, out, 0], lerp(S, E, 0.97)],
-                                       [(0, 0.27, 0.46), (0.5, 0.24, 0.33), (1, 0.165, 0.18)], n_len=12,
+                                       thick([(0, 0.27, 0.46), (0.5, 0.24, 0.33), (1, 0.165, 0.18)]), n_len=12,
                                        n_seg=14, round0=0.36, round1=0.16), "shell", "upper_" + leg)
         add("elbow_" + leg, ball(E, 0.12, n=8), "metal", "lower_" + leg)
         add("lower_shell_" + leg, tube([lerp(E, W, 0.03), lerp(E, W, 0.97)],
-                                       [(0, 0.185, 0.215), (1, 0.11, 0.115)], n_len=10, n_seg=14,
+                                       thick([(0, 0.185, 0.215), (1, 0.11, 0.115)]), n_len=10, n_seg=14,
                                        round0=0.2, round1=0.16), "shell", "lower_" + leg)
         add("wrist_" + leg, ball(W, 0.085, n=8), "metal", "paw_" + leg)
         add("paw_shell_" + leg, paw(leg, 0.80, 1.38), "shell", "paw_" + leg)
@@ -687,7 +761,7 @@ def build_parts():
         H, K, A, Pj = (head_of(b + leg) for b in ("thigh_", "shin_", "meta_", "paw_"))
         out = -0.07 if y < 0 else 0.07
         haunch_path = [lerp(H, K, -0.42) + [0, out, 0], lerp(H, K, 0.97)]
-        haunch_prof = [(0, 0.30, 0.82), (0.4, 0.32, 0.74), (0.75, 0.24, 0.36), (1, 0.18, 0.20)]
+        haunch_prof = [(0, 0.30, 0.82), (0.4, 0.32, 0.74), (0.75, 0.24 * LEG_K, 0.36 * LEG_K), (1, 0.18 * LEG_K, 0.20 * LEG_K)]
         haunch_kw = dict(n_seg=18, round0=0.45, round1=0.14)
         add("hip_joint_" + leg, ball(H + [0, out * 0.6, 0], 0.22), "metal", "thigh_" + leg)
         add("haunch_" + leg, tube(haunch_path, haunch_prof, n_len=14, **haunch_kw), "shell", "thigh_" + leg)
@@ -695,11 +769,11 @@ def build_parts():
                                        **haunch_kw), "graphite", "thigh_" + leg)
         add("knee_" + leg, ball(K, 0.125, n=8), "metal", "shin_" + leg)
         add("shin_shell_" + leg, tube([lerp(K, A, 0.03), lerp(K, A, 0.97)],
-                                      [(0, 0.21, 0.27), (1, 0.135, 0.14)], n_len=10, n_seg=14,
+                                      thick([(0, 0.21, 0.27), (1, 0.135, 0.14)]), n_len=10, n_seg=14,
                                       round0=0.2, round1=0.16), "shell", "shin_" + leg)
         add("hock_" + leg, ball(A, 0.095, n=8), "metal", "meta_" + leg)
         add("meta_shell_" + leg, tube([lerp(A, Pj, 0.05), lerp(A, Pj, 0.95)],
-                                      [(0, 0.14, 0.15), (1, 0.115, 0.12)], n_len=8, n_seg=12,
+                                      thick([(0, 0.14, 0.15), (1, 0.115, 0.12)]), n_len=8, n_seg=12,
                                       round0=0.2, round1=0.2), "shell", "meta_" + leg)
         add("ankle_" + leg, ball(Pj, 0.08, n=8), "metal", "paw_" + leg)
         add("paw_shell_" + leg, paw(leg, -2.06, -1.48), "shell", "paw_" + leg)
@@ -730,7 +804,8 @@ def _stand():
             p[leg + "_sh"] = 0.0     # shoulder blade: how far it rides up
         else:
             p[leg + "_mp"] = 0.0     # metatarsus pitch (0 = as modelled, -70 = flat on the ground)
-    set_tail(p, [38, 58, 70, 62, 40, 14])
+    # the cat's tail stands in an S; the dog carries its tail up and back in a sickle
+    set_tail(p, [30, 46, 58, 64, 66, 64] if DOG else [38, 58, 70, 62, 40, 14])
     return p
 
 
@@ -807,8 +882,20 @@ def solve(p):
     child("neck", "chest", euler(0, p["np"], p["ny"]))
     R_k = euler(p["kr"], p["kp"], p["ky"])
     child("head", "neck", R_k)
-    child("ear_n", "head", R_k @ euler(p["en_r"], p["en_p"], 0))     # the near ear rolls out to -Y
-    child("ear_f", "head", R_k @ euler(-p["ef_r"], p["ef_p"], 0))
+    if DOG:
+        # Hanging ears read the same keys another way: pitched "forward" (pricked) they lift out
+        # from the head and swing a little forward; pitched "back" they stream back; rolled
+        # "out" (relaxed) they flop a little wider.
+        def ear(pitch, roll):
+            return 0.9 * max(pitch, 0.0) + 0.5 * roll, -pitch * (0.6 if pitch > 0 else 1.5)
+
+        lift, swing = ear(p["en_p"], p["en_r"])
+        child("ear_n", "head", R_k @ euler(-lift, swing, 0))
+        lift, swing = ear(p["ef_p"], p["ef_r"])
+        child("ear_f", "head", R_k @ euler(lift, swing, 0))
+    else:
+        child("ear_n", "head", R_k @ euler(p["en_r"], p["en_p"], 0))     # the near ear rolls out to -Y
+        child("ear_f", "head", R_k @ euler(-p["ef_r"], p["ef_p"], 0))
 
     for i in range(TAIL_N):
         b = "tail%d" % (i + 1)
@@ -942,12 +1029,15 @@ STAND = _stand()
 SIT = P(hx=0.30, hz=-1.88, hp=-34, wp=-11, cp=-9, np=30, kp=0, ky=-18,
         fn_x=0.98, ff_x=0.78, hn_x=-0.30, hf_x=-0.10, hn_mp=-74, hf_mp=-74,
         tail=[-8, -3, 0, 0, 0, 4], tail_h=[28, 64, 100, 132, 156, 168])
+if DOG:   # the dog's tail lies out behind it on the floor, a little towards the viewer
+    set_tail(SIT, [-4, 0, 3, 8, 16, 28], [8, 12, 16, 20, 24, 28])
 
 
 def _loaf():
     """The sleeping curl: the spine bent into a C that opens towards the camera, haunch high,
     head tucked down by the front paws, tail brought round the front."""
-    p = P(hx=-0.25, hz=-2.08, hp=3, hy=24, hr=-8, wp=2, wy=-26, cp=4, cy=-30, np=34, ny=-40,
+    # (the dog's deeper body and broader haunch lie a little higher off the floor)
+    p = P(hx=-0.25, hz=-2.08 + (0.14 if DOG else 0.0), hp=3, hy=24, hr=-8, wp=2, wy=-26, cp=4, cy=-30, np=34, ny=-40,
           kp=22, ky=-62, kr=10, en_p=6, ef_p=6, en_r=16, ef_r=16,
           tail=[-30, -8, 0, 0, 0, 4], tail_h=[50, 95, 135, 165, 185, 195])
     hang_leg(p, "fn", 0.80, -0.44, dy=-0.55)
@@ -1013,8 +1103,22 @@ def keys(t, frames):
     return dict(frames[-1][1])
 
 
+def wag(p, t, cycles, amount=1.0, phase=0.0):
+    """The dog's wag, added to the pose's tail: the whole tail swings from side to side from
+    its root, `cycles` times through the animation, the tip a little behind the root. Seen from
+    the side a swing is mostly foreshortening, so the tail also beats up and down with it."""
+    for i in range(TAIL_N):
+        w = 0.35 + 0.65 * (i + 1) / TAIL_N
+        late = phase - 0.30 * i / TAIL_N
+        p["th%d" % (i + 1)] += amount * 38 * w * wave(t, cycles, late)
+        p["te%d" % (i + 1)] += amount * 13 * w * wave(t, cycles, late + 0.12)
+    return p
+
+
 def sway_tail(p, t, amount=1.0, k=1, phase=0.0):
-    """A wave running down the tail, added to the pose's tail."""
+    """A wave running down the tail, added to the pose's tail. (The dog wags instead.)"""
+    if DOG:
+        return wag(p, t, 3 if k == 1 else 4, amount, phase)
     for i in range(TAIL_N):
         w = (i + 1) / TAIL_N
         p["te%d" % (i + 1)] += amount * 9 * w * wave(t, k, phase - 0.66 * i / TAIL_N)
@@ -1048,7 +1152,7 @@ def _walk_foot(ph, x0, stride, duty=0.64, lift=0.42):
     return x, z, pitch
 
 
-WALK_STRIDE = 2.0   # world units the ground moves under the cat per cycle
+WALK_STRIDE = 1.5 if DOG else 2.0   # world units the ground moves under the pet per cycle
 
 
 def anim_walk(t):
@@ -1071,9 +1175,29 @@ def anim_walk(t):
     return p, face(blink_shape(t, 0.55), lx=1), lights()
 
 
+def anim_trot(t):
+    """The dog's walk: a brisk trot, the legs in diagonal pairs (near hind with far front), the
+    body bobbing twice a stride, head up, ears bouncing, tail up and wagging."""
+    p = P(hz=-0.26 + 0.07 * wave(t, 2, 0.15), hp=1.2 * wave(t, 2, 0.05), cp=-1.5 * wave(t, 2, 0.3),
+          hy=2 * wave(t, 1), cy=-2 * wave(t, 1), np=8 + 2.0 * wave(t, 2, 0.2), kp=2 + 1.5 * wave(t, 2, 0.45),
+          ky=-12, en_p=-5 * wave(t, 2, 0.35), ef_p=-5 * wave(t, 2, 0.45), tail=[34, 48, 58, 62, 62, 60])
+    wag(p, t, 2, 0.8)
+    for leg, ph, x0 in (("hn", 0.0, -1.80), ("ff", 0.0, 1.00), ("hf", 0.5, -1.80), ("fn", 0.5, 1.00)):
+        x, z, pitch = _walk_foot(t + ph, x0, WALK_STRIDE, duty=0.54, lift=0.46)
+        p[leg + "_x"], p[leg + "_z"], p[leg + "_pp"] = x, z, pitch
+        cycle = (t + ph) % 1.0
+        if leg in LEGS_FRONT:
+            p[leg + "_sh"] = 0.12 * bump(cycle, 0.27, 0.27) - 0.03
+        else:
+            p[leg + "_mp"] = 14 * bump(cycle, 0.66, 0.16) - 6 * bump(cycle, 0.95, 0.12)
+    return p, face(blink_shape(t, 0.55), lx=1), lights()
+
+
 def _sit_idle(t, base=SIT):
     b = wave(t, 2)
     p = P(base, hp=base["hp"] - 0.5 * b, cp=base["cp"] - 0.9 * b, np=base["np"] - 1.2 * b)
+    if DOG:   # the tail sweeps the floor now and then
+        return wag(p, t, 3, 0.55 * (bump(t, 0.55, 0.30) + bump(t, 0.05, 0.12)))
     tip = bump(t, 0.55, 0.10) - bump(t, 0.68, 0.08)
     p["te" + TIP] += 26 * bump(t, 0.6, 0.12)
     p["th" + TIP] += 14 * tip
@@ -1142,6 +1266,8 @@ def anim_working(t):
 
 WAIT = P(SIT, hp=-38, hx=0.36, hz=-1.86, fn_x=0.84, ff_x=0.64, np=24, kp=-6, ky=-52, kr=0, en_p=12, ef_p=12,
          tail=[-6, -3, 0, 0, 0, 6], tail_h=[26, 60, 96, 128, 150, 160])
+if DOG:
+    set_tail(WAIT, [-2, 2, 6, 12, 22, 34], [8, 12, 16, 20, 24, 28])
 
 
 def anim_waiting(t):
@@ -1156,6 +1282,8 @@ def anim_waiting(t):
     p["te" + TIP] += 34 * bump(t, 0.80, 0.10)
     p["te" + TIP2] += 12 * bump(t, 0.80, 0.10)
     p["th" + TIP] -= 18 * bump(t, 0.86, 0.08)
+    if DOG:   # and the tail beats the floor
+        wag(p, t, 4, 0.7)
     pulse = 0.78 + 0.22 * wave(t, 2)
     return p, face("wide", color=AMBER, hi=pulse), lights(pulse, pulse, AMBER)
 
@@ -1174,6 +1302,10 @@ def anim_happy(t):
     for leg in LEGS_FRONT + LEGS_HIND:
         p[leg + "_z"] = hop * (1.55 if leg in LEGS_FRONT else 1.0)
         p[leg + "_pp"] = 24 * air
+    if DOG:   # the dog wags as hard as it can
+        set_tail(p, [36, 50, 58, 62, 62, 60])
+        wag(p, t, 4, 1.35)
+        return p, face("happy", color=CYAN), lights(0.9, 0.9)
     p["te" + TIP2] += 14 * wave(t, 2)
     p["te" + TIP] += 30 * wave(t, 2, 0.1)
     return p, face("happy", color=CYAN), lights(0.9, 0.9)
@@ -1564,6 +1696,45 @@ def anim_look_around(t):
     return p, face(shape, lx=look), lights(0.22 + 0.3 * alert, 0.22 + 0.3 * alert)
 
 
+# -- the dog's own: a play bow in place of the tail chase, a head tilt in place of the wash -------
+
+def anim_play_bow(t):
+    """Come and play: down on its elbows with the rump in the air, tail wagging as fast as it
+    goes, the rump wiggling, two little bounces of the front paws, then up again."""
+    stand = anim_idle(0.0)[0]
+    bow = P(hx=-0.30, hz=-0.12, hp=26, wp=5, cp=7, np=-36, kp=-14, ky=-18, fn_x=1.95, ff_x=1.75,
+            fn_pp=-4, ff_pp=-4, en_p=10, ef_p=10, tail=[44, 56, 62, 66, 66, 64])
+    half = mix(stand, bow, 0.5)
+    p = keys(t, [(0.0, stand), (0.10, half), (0.22, bow), (0.74, bow), (0.90, P(stand, hz=0.08, np=-6)), (1.0, stand)])
+    down = hold(t, 0.22, 0.74, 0.10)
+    p["hy"] += 6 * down * wave(t, 6)
+    hop = down * (bump(t, 0.40, 0.07) + bump(t, 0.58, 0.07))
+    p["fn_z"] += 0.30 * hop
+    p["ff_z"] += 0.30 * hop
+    p["cp"] -= 5 * hop
+    p["kp"] -= 8 * hop
+    p["kr"] += 9 * down * wave(t, 2, 0.1)
+    wag(p, t, 8, 0.5 + 0.9 * down)
+    shape = "happy" if 0.16 < t < 0.82 else "open"
+    return p, face(shape), lights(0.25 + 0.65 * down, 0.25 + 0.65 * down)
+
+
+def anim_head_tilt(t):
+    """Sitting, it cocks its head at you, one way and then the other, the upper ear lifting each
+    time, eyes wide; the tail thumps the floor between."""
+    one = hold(t, 0.14, 0.36, 0.10)
+    two = hold(t, 0.58, 0.80, 0.10)
+    p = _sit_idle(0.0)
+    p["kr"] = 24 * one - 22 * two
+    p["ky"] = SIT["ky"] - 22 * max(one, two)
+    p["ny"] = -8 * max(one, two)
+    p["kp"] = SIT["kp"] - 4 * (one + two)
+    p["en_p"], p["ef_p"] = 12 * two + 3 * one, 12 * one + 3 * two
+    wag(p, t, 5, 0.8 * (bump(t, 0.47, 0.12) + bump(t, 0.92, 0.08)))
+    shape = "wide" if max(one, two) > 0.5 else blink_shape(t, 0.47, span=0.05)
+    return p, face(shape), lights(0.22 + 0.4 * max(one, two), 0.22 + 0.4 * max(one, two))
+
+
 # What each animation shows besides the cat: the prop sets (build_props) it needs.
 ANIM_PROPS = {"coding": ("desk",), "designing": ("drafting",), "researching": ("book",)}
 
@@ -1619,13 +1790,23 @@ POSES = {
     "chase": ("tail_chase", "idle"), "look": ("look_around", "sit"),
 }
 
+if DOG:
+    # The dog trots where the cat prowls; and where the cat chases its tail or washes, the dog
+    # bows to play or cocks its head (the app's poses keep their names, so nothing else changes).
+    ANIMATIONS["walk"] = (anim_trot, 16, 16, True, None)
+    del ANIMATIONS["tail_chase"], ANIMATIONS["groom"]
+    ANIMATIONS["play_bow"] = (anim_play_bow, 30, 12, False, "idle")
+    ANIMATIONS["head_tilt"] = (anim_head_tilt, 30, 12, False, "sit")
+    POSES["chase"] = ("play_bow", "idle")
+    POSES["groom"] = ("head_tilt", "sit")
+
 # The frame of each animation shown in the preview (0..1 through it).
 KEY_FRAME = {"idle": 0.0, "walk": 0.19, "sit_down": 0.5, "sit": 0.0, "lie_down": 0.5, "sleep": 0.5,
              "working": 0.25, "waiting": 0.34, "happy": 0.25, "jump": 0.62, "air": 0.0, "land": 0.33,
              "drag": 0.25, "stretch": 0.5, "groom": 0.62, "yawn": 0.42, "wave": 0.45, "crouch": 0.0,
              "coding": 0.08, "designing": 0.30, "researching": 0.85,
              "curl_up": 0.6, "nap": 0.5, "wake": 0.45, "dangle": 0.25, "tail_chase": 0.4,
-             "look_around": 0.25}
+             "look_around": 0.25, "play_bow": 0.45, "head_tilt": 0.25}
 
 
 def frame_time(name, i):
@@ -2207,6 +2388,7 @@ def write_manifest(out_dir, anims, frame, scale, passes, engine):
 
     manifest = {
         "version": 1,
+        "species": SPECIES,
         "frame": {"width": frame[0], "height": frame[1], "scale": scale,
                   "css_width": FRAME_CSS[0], "css_height": FRAME_CSS[1]},
         "passes": passes,
@@ -2322,6 +2504,9 @@ ICON_FINE = ("head_seam", "ear_ring_n", "ear_ring_f")   # detail dropped from th
 def icon_pose(small):
     """The head for the icon: level, ears tipped outwards so the head fills the square (more so
     at the small sizes, where every pixel of head counts)."""
+    if DOG:   # hanging ears, eased out from the head a little so they read apart from it
+        out = 16 if small else 8
+        return P(ky=0, kp=0, kr=0, en_p=0, ef_p=0, en_r=out, ef_r=out)
     out = 26 if small else 14
     return P(ky=0, kp=0, kr=0, en_p=6, ef_p=6, en_r=out, ef_r=out)
 
@@ -2643,8 +2828,10 @@ def main():
     if mode not in ("preview", "full", "icon", "marks", "marklife"):
         raise ValueError("\"mode\" must be \"preview\", \"full\", \"icon\", \"marks\" or \"marklife\", not %r" % mode)
     out_dir = os.path.abspath(args["--out"])
+    if DOG:   # the dog's renders go in their own folder, so they never overwrite the cat's
+        out_dir = os.path.join(out_dir, "dog")
     os.makedirs(out_dir, exist_ok=True)
-    log("Blender %s, mode %s, output %s" % (bpy.app.version_string, mode, out_dir))
+    log("Blender %s, species %s, mode %s, output %s" % (bpy.app.version_string, SPECIES, mode, out_dir))
     if bpy.app.version < (4, 0, 0):
         raise RuntimeError("Blender 4.0 or newer is needed (this is %s)" % bpy.app.version_string)
 

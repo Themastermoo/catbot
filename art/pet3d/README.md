@@ -14,7 +14,7 @@ in the rough software renderer (`soft_preview.py`), so run the preview again bef
 | --- | --- |
 | `build_pet.py` | Builds everything and renders. Runs inside Blender 4.0 or newer. |
 | `render.json` | What to render: `{"mode": "preview"}` or `{"mode": "full"}`. |
-| `soft_preview.py` | Flat-shaded software render of the same poses (numpy + Pillow, no Blender). For checking silhouettes and framing only. |
+| `soft_preview.py` | Flat-shaded software render of the same poses (numpy + Pillow, no Blender). For checking silhouettes and framing only. `--species dog` draws the dog. |
 | `renders/` | Output (made by the script). |
 
 ## Running
@@ -28,6 +28,7 @@ blender -b --factory-startup --python-exit-code 1 -P art/pet3d/build_pet.py -- \
 
 | Key | Default | Meaning |
 | --- | --- | --- |
+| `species` | `"cat"` | `"cat"` or `"dog"`: which animal to build (see "The robot dog"). The dog's renders go to `renders/dog/`, under the cat's file names, so they never overwrite the cat's. |
 | `mode` | `"preview"` | `"preview"`: stills and a contact sheet. `"full"`: sprite sheets and `manifest.json`. `"icon"`: the app icon. `"marks"`: the in-app bot marks. |
 | `icon_tint` | `[1, 164, 146]` | Icon mode: the shell colour, RGB 0..255. The default is Catbot's teal `#01A492`. |
 | `only` | all | Full mode: a list of animation names to render. The manifest is not rewritten when this is set. |
@@ -139,6 +140,34 @@ raised 6 degrees so the face and the far legs show. The cat faces right; mirror 
 **Light.** Three sun lamps (a broad soft key from upper front, fill, rim from behind) and a pale
 even world.
 No ground and no cast shadow on the ground: the film is transparent.
+
+## The robot dog
+
+`"species": "dog"` builds a robot dog of the same family for bots that wear a dog picture
+(Dogbot): the same skeleton, materials, three passes, visor and LED face, so everything above
+holds for it. What differs (each place is marked `if DOG` in the script):
+
+- **Head.** A snout comes out from under the visor with a big dark nose on its end, and the
+  ears are flat lobes that hang down beside the head, their lower ends the ear lights. The ear
+  keys mean the same moods: pitched forward (pricked) they lift out and swing forward, pitched
+  back they stream back, rolled out they flop wider.
+- **Body.** A barrel chest with hardly any waist, legs about a quarter thicker, paws a third
+  larger, a wider stance, and a shorter, thicker tail carried up in a sickle. A dark collar with
+  a metal ring and a tag that glows with the near ear light.
+- **Animations.** The tail wags (`wag`) wherever the cat's sways. `walk` is a trot in diagonal
+  pairs with a shorter stride (`walk.stride_css_px` in its manifest says how far). Sitting, the
+  tail lies out behind and sweeps the floor. `happy` wags as hard as it can. In place of
+  `tail_chase` there is `play_bow` (down on its elbows, rump up and wiggling, two bounces of the
+  front paws) and in place of `groom` there is `head_tilt` (sitting, it cocks its head one way
+  and then the other). The app's poses keep their names: the dog's manifest maps `chase` to
+  `play_bow` and `groom` to `head_tilt`.
+- **Frame.** The dog's frame sits 0.3 units further forward on it (`DOG_SHIFT`), since the
+  snout reaches further forward and the tail less far back.
+
+Every mode works for it: `preview`, `full` (its own `manifest.json`, with `"species": "dog"`),
+`icon` (Dogbot's icon), `marks` and `marklife`. The app ships the dog's sheets in
+`crates/catbot-ui/assets/pet3d/dog/`, its mark strips in `assets/marks/dog/` and the icon as
+`assets/icon/dogbot-<size>.png`.
 
 ## Animations
 

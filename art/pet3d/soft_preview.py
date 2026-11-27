@@ -1,6 +1,6 @@
 """A rough software render of the pet's poses, for checking them where Blender is not at hand.
 
-    python3 art/pet3d/soft_preview.py OUT_DIR [animation ...]
+    python3 art/pet3d/soft_preview.py [--species dog] OUT_DIR [animation ...]
 
 Needs numpy and Pillow. It uses the same model, poses and animations as build_pet.py and draws
 them flat-shaded with a z-buffer: good for silhouettes, proportions and framing, nothing more.
@@ -15,6 +15,10 @@ import sys
 import numpy as np
 from PIL import Image
 
+if "--species" in sys.argv[:-1]:   # --species dog: the robot dog (build_pet.py reads PET_SPECIES)
+    _at = sys.argv.index("--species")
+    os.environ["PET_SPECIES"] = sys.argv[_at + 1]
+    del sys.argv[_at:_at + 2]
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import build_pet as bp  # noqa: E402
 

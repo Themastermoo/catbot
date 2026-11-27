@@ -275,9 +275,9 @@ fn lean_name(swing: i8, facing_left: bool) -> &'static str {
 }
 
 /// How long a one-shot pose plays: its way in, or two rounds of a loop (the happy hop).
-fn play_seconds(pose: &str) -> f64 {
-    let first = first_of(pose);
-    match anim(&first) {
+fn play_seconds(dog: bool, pose: &str) -> f64 {
+    let first = first_of(dog, pose);
+    match anim(dog, &first) {
         Some(a) if a.looped => a.seconds * 2.0,
         Some(a) => a.seconds,
         None => 0.0,
@@ -396,6 +396,8 @@ fn resize(desktop: &dioxus::desktop::DesktopContext, size: (f64, f64)) {
 
 #[component]
 fn Pet(pet: PetInfo, index: usize) -> Element {
+    // A bot whose picture is a dog comes out as the robot dog (Dogbot).
+    let dog = crate::mascots::is_dog(&pet.mark);
     let desktop = dioxus::desktop::window();
     let mut act = use_signal(|| Act::Walk);
     let mut facing_left = use_signal(|| index % 2 == 1);
@@ -442,7 +444,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                     if *mood.peek() != now {
                         // A job done: the happy hop.
                         if *mood.peek() == "working" && now == "idle" {
-                            flourish.set(Some(("happy", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("happy")))));
+                            flourish.set(Some(("happy", std::time::Instant::now() + Duration::from_secs_f64(play_seconds(dog, "happy")))));
                         }
                         mood.set(now.to_string());
                     }
@@ -514,7 +516,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                             let mut queue = lined_up.write();
                             if queue.is_empty() { None } else { Some(queue.remove(0)) }
                         };
-                        flourish.set(next.map(|p| (p, std::time::Instant::now() + Duration::from_secs_f64(play_seconds(p)))));
+                        flourish.set(next.map(|p| (p, std::time::Instant::now() + Duration::from_secs_f64(play_seconds(dog, p)))));
                         next.is_some()
                     }
                     None => false,
@@ -624,7 +626,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                 }
                 // Nothing to do for a long while: a yawn, and it curls up for the long nap.
                 if nap_due(quiet, now, busy, playing) {
-                    flourish.set(Some(("yawn", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("yawn")))));
+                    flourish.set(Some(("yawn", std::time::Instant::now() + Duration::from_secs_f64(play_seconds(dog, "yawn")))));
                     left_for = NAP_FOR.0 + chance(&mut seed) * (NAP_FOR.1 - NAP_FOR.0);
                     act.set(Act::Nap);
                     continue;
@@ -670,7 +672,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                 }
                 // Its bot has started work, or it has slept enough: up from the long nap.
                 if now == Act::Nap && (busy || left_for <= 0.0) {
-                    flourish.set(Some(("wake", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("wake")))));
+                    flourish.set(Some(("wake", std::time::Instant::now() + Duration::from_secs_f64(play_seconds(dog, "wake")))));
                     if !busy {
                         lined_up.set(vec!["stretch"]);
                     }
@@ -703,8 +705,8 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                     // Sitting, now and then it washes its face instead (stage 29.8) or looks around;
                     // standing about, it may chase its tail (stage 31).
                     if let Some(extra) = aside(now, chance(&mut seed)) {
-                        flourish.set(Some((extra, std::time::Instant::now() + Duration::from_secs_f64(play_seconds(extra)))));
-                        left_for = play_seconds(extra) + 1.0 + chance(&mut seed) * 3.0;
+                        flourish.set(Some((extra, std::time::Instant::now() + Duration::from_secs_f64(play_seconds(dog, extra)))));
+                        left_for = play_seconds(dog, extra) + 1.0 + chance(&mut seed) * 3.0;
                         if now == Act::Walk {
                             act.set(Act::Idle);
                         }
@@ -719,9 +721,9 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                     };
                     // A yawn before a nap; on waking, a long stretch and a yawn.
                     if next == Act::Sleep && now != Act::Sleep {
-                        flourish.set(Some(("yawn", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("yawn")))));
+                        flourish.set(Some(("yawn", std::time::Instant::now() + Duration::from_secs_f64(play_seconds(dog, "yawn")))));
                     } else if now == Act::Sleep && next != Act::Sleep {
-                        flourish.set(Some(("stretch", std::time::Instant::now() + Duration::from_secs_f64(play_seconds("stretch")))));
+                        flourish.set(Some(("stretch", std::time::Instant::now() + Duration::from_secs_f64(play_seconds(dog, "stretch")))));
                         lined_up.set(vec!["yawn"]);
                     }
                     if next == Act::Walk && chance(&mut seed) < 0.4 {
@@ -761,7 +763,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                 "wave"
             };
             act.set(Act::Chat);
-            flourish.set(Some((hello, std::time::Instant::now() + Duration::from_secs_f64(play_seconds(hello)))));
+            flourish.set(Some((hello, std::time::Instant::now() + Duration::from_secs_f64(play_seconds(dog, hello)))));
         }
     };
     let close_chat = {
@@ -893,7 +895,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                     },
                     // The lean turns the picture about the scruff while it's carried (pet.css).
                     div { class: "pet-lean", "data-lean": "{lean}",
-                        PetSprite { color: pet.color.clone(), pose: shown_pose.to_string(), name: pet.name.clone() }
+                        PetSprite { color: pet.color.clone(), pose: shown_pose.to_string(), name: pet.name.clone(), dog }
                     }
                     // Asleep for the long nap: three small z's drift up (turned back the right
                     // way round when the cat faces left).
@@ -915,10 +917,21 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
 /// through the strip.
 const PET3D: Asset = crate::cat_anim::PET3D;
 const MANIFEST: &str = include_str!("../assets/pet3d/manifest.json");
+/// The robot dog (Dogbot): the same script's dog, in `assets/pet3d/dog/`, with its own list. A
+/// bot whose picture is a dog (`mascots::is_dog`) walks the desktop as the dog.
+const DOG_MANIFEST: &str = include_str!("../assets/pet3d/dog/manifest.json");
 
-fn manifest() -> &'static Value {
-    static PARSED: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
-    PARSED.get_or_init(|| serde_json::from_str(MANIFEST).unwrap_or(Value::Null))
+/// The sheets' list: the robot cat's, or the robot dog's.
+fn manifest(dog: bool) -> &'static Value {
+    static CAT: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    static DOG: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    let (parsed, text) = if dog { (&DOG, DOG_MANIFEST) } else { (&CAT, MANIFEST) };
+    parsed.get_or_init(|| serde_json::from_str(text).unwrap_or(Value::Null))
+}
+
+/// Where a pet's sheets are: the cat's in the folder itself, the dog's in `dog/` inside it.
+fn sheets(dog: bool) -> String {
+    if dog { format!("{PET3D}/dog") } else { PET3D.to_string() }
 }
 
 /// One animation: how many frames, at what speed, whether it loops, and what follows it.
@@ -930,12 +943,12 @@ struct Anim {
     next: Option<String>,
 }
 
-fn anim(name: &str) -> Option<Anim> {
-    let a = &manifest()["animations"][name];
+fn anim(dog: bool, name: &str) -> Option<Anim> {
+    let a = &manifest(dog)["animations"][name];
     let frames = a["frames"].as_u64()? as u32;
     let fps = a["fps"].as_f64().filter(|f| *f > 0.0)?;
     // Walking: the strip plays at the speed the window moves, so the paws don't slide.
-    let seconds = match (name, manifest()["walk"]["stride_css_px"].as_f64()) {
+    let seconds = match (name, manifest(dog)["walk"]["stride_css_px"].as_f64()) {
         ("walk", Some(stride)) if stride > 0.0 => stride / WALK,
         _ => frames as f64 / fps,
     };
@@ -945,37 +958,39 @@ fn anim(name: &str) -> Option<Anim> {
 /// What plays when the pose becomes `pose` while `now` is playing: a pose named for its own loop
 /// (sit, idle, nap) that is already playing carries on, as when a one-shot (washing, a look
 /// around, waking) has just led back into it; anything else starts from its way in.
-fn start_of(pose: &str, now: &str) -> String {
-    if pose == now && manifest()["poses"][pose]["animation"].as_str() == Some(now) { now.to_string() } else { first_of(pose) }
+fn start_of(dog: bool, pose: &str, now: &str) -> String {
+    if pose == now && manifest(dog)["poses"][pose]["animation"].as_str() == Some(now) { now.to_string() } else { first_of(dog, pose) }
 }
 
 /// What a pose plays first: its one-shot way in, if it has one, else its loop.
-fn first_of(pose: &str) -> String {
-    let p = &manifest()["poses"][pose];
-    p["intro"].as_str().or(p["animation"].as_str()).filter(|n| anim(n).is_some()).unwrap_or(if anim(pose).is_some() { pose } else { "idle" }).to_string()
+fn first_of(dog: bool, pose: &str) -> String {
+    let p = &manifest(dog)["poses"][pose];
+    p["intro"].as_str().or(p["animation"].as_str()).filter(|n| anim(dog, n).is_some()).unwrap_or(if anim(dog, pose).is_some() { pose } else { "idle" }).to_string()
 }
 
 #[component]
-fn PetSprite(color: String, pose: String, name: String) -> Element {
-    let mut playing = use_signal(|| first_of(&pose));
+fn PetSprite(color: String, pose: String, name: String, #[props(default)] dog: bool) -> Element {
+    let mut playing = use_signal(|| first_of(dog, &pose));
     use_effect(use_reactive!(|pose| {
-        let next = start_of(&pose, &playing.peek());
+        let next = start_of(dog, &pose, &playing.peek());
         playing.set(next);
     }));
     let now = playing();
-    let Some(a) = anim(&now) else { return rsx! {} };
+    let Some(a) = anim(dog, &now) else { return rsx! {} };
+    let folder = sheets(dog);
     let style = format!(
-        "--frames: {}; --dur: {:.3}s; --tint: var(--identity-{color}); --base: url({PET3D}/base_{now}.png); --mask: url({PET3D}/mask_{now}.png); --gloss: url({PET3D}/gloss_{now}.png)",
+        "--frames: {}; --dur: {:.3}s; --tint: var(--identity-{color}); --base: url({folder}/base_{now}.png); --mask: url({folder}/mask_{now}.png); --gloss: url({folder}/gloss_{now}.png)",
         a.frames, a.seconds
     );
     let strip = if a.looped { "pet3d-strip pet3d-loop" } else { "pet3d-strip pet3d-once" };
     let next = a.next.clone();
-    let ground = manifest()["ground_css_y"].as_f64().map(|y| 80.0 - y).unwrap_or(0.0);
+    let ground = manifest(dog)["ground_css_y"].as_f64().map(|y| 80.0 - y).unwrap_or(0.0);
     rsx! {
         div {
             class: "pet3d absolute bottom-0 left-1/2",
             style: "{style}; transform: translate(-50%, {ground:.1}px)",
             "data-pet": "{pose}",
+            "data-pet-kind": if dog { "dog" } else { "cat" },
             "data-playing": "{now}",
             "aria-label": "{name}",
             // Keyed, so a new animation starts from its first frame.
@@ -1013,17 +1028,17 @@ mod tests {
         }
         assert_eq!(pose(Act::Nap, "idle", None), "nap");
         // It curls up on the way in, sleeps in a loop, and waking leads to standing.
-        assert_eq!(first_of("nap"), "curl_up");
-        assert_eq!(anim("curl_up").unwrap().next.as_deref(), Some("nap"));
-        assert!(anim("nap").unwrap().looped);
-        assert_eq!(anim("wake").unwrap().next.as_deref(), Some("idle"));
+        assert_eq!(first_of(false, "nap"), "curl_up");
+        assert_eq!(anim(false, "curl_up").unwrap().next.as_deref(), Some("nap"));
+        assert!(anim(false, "nap").unwrap().looped);
+        assert_eq!(anim(false, "wake").unwrap().next.as_deref(), Some("idle"));
         assert!(NAP_FOR.0 < NAP_FOR.1);
     }
 
     #[test]
     fn a_carried_pet_dangles_and_swings_behind_the_hand() {
         assert_eq!(pose(Act::Carried(10, 10, 0.2), "idle", None), "dangle");
-        assert!(anim("dangle").unwrap().looped);
+        assert!(anim(false, "dangle").unwrap().looped);
         assert_eq!((swing(9, 4), swing(-9, 4), swing(3, 4), swing(0, 0)), (1, -1, 0, 0));
         // Going the way it faces, the body trails back; the other way, it swings fore.
         assert_eq!(lean_name(1, false), "back");
@@ -1044,8 +1059,8 @@ mod tests {
         assert_eq!(aside(Act::Sleep, 0.0), None);
         assert_eq!(aside(Act::Nap, 0.0), None);
         // Both one-shots lead back to where they began.
-        assert_eq!(anim(&first_of("chase")).unwrap().next.as_deref(), Some("idle"));
-        assert_eq!(anim(&first_of("look")).unwrap().next.as_deref(), Some("sit"));
+        assert_eq!(anim(false, &first_of(false, "chase")).unwrap().next.as_deref(), Some("idle"));
+        assert_eq!(anim(false, &first_of(false, "look")).unwrap().next.as_deref(), Some("sit"));
     }
 
     #[test]
@@ -1083,16 +1098,45 @@ mod tests {
         for p in ["idle", "walk", "sit", "sleep", "working", "waiting", "jump", "air", "land", "drag",
                   "happy", "stretch", "groom", "yawn", "wave", "crouch", "coding", "designing", "researching",
                   "nap", "wake", "dangle", "chase", "look"] {
-            assert!(anim(&first_of(p)).is_some(), "{p}");
+            assert!(anim(false, &first_of(false, p)).is_some(), "{p}");
         }
-        assert_eq!(first_of("sit"), "sit_down");
-        assert_eq!(anim("sit_down").unwrap().next.as_deref(), Some("sit"));
-        assert!(anim("walk").unwrap().looped && !anim("land").unwrap().looped);
+        assert_eq!(first_of(false, "sit"), "sit_down");
+        assert_eq!(anim(false, "sit_down").unwrap().next.as_deref(), Some("sit"));
+        assert!(anim(false, "walk").unwrap().looped && !anim(false, "land").unwrap().looped);
         // A one-shot that led back into the loop doesn't sit down (or lie down) all over again.
-        assert_eq!(start_of("sit", "sit"), "sit");
-        assert_eq!(start_of("sit", "idle"), "sit_down");
-        assert_eq!(start_of("look", "sit"), "look_around", "a look around still plays from sitting");
-        assert_eq!(start_of("idle", "idle"), "idle");
+        assert_eq!(start_of(false, "sit", "sit"), "sit");
+        assert_eq!(start_of(false, "sit", "idle"), "sit_down");
+        assert_eq!(start_of(false, "look", "sit"), "look_around", "a look around still plays from sitting");
+        assert_eq!(start_of(false, "idle", "idle"), "idle");
         assert_eq!(PetInfo::from_wire(&json!({ "botId": "b1", "name": "Kiwi", "color": "purple", "mark": "cat-visor" })).unwrap().mark, "cat-visor");
+    }
+
+    #[test]
+    fn a_dog_bot_walks_the_desktop_as_the_dog() {
+        // Its own sheets, in their own folder, listed by its own manifest.
+        assert_eq!(manifest(true)["species"].as_str(), Some("dog"));
+        assert!(sheets(true).ends_with("/dog") && !sheets(false).ends_with("/dog"));
+        // Every pose the window can ask for has something to play, as the cat's do; one-shots lead on.
+        for p in ["idle", "walk", "sit", "sleep", "working", "waiting", "jump", "air", "land", "drag",
+                  "happy", "stretch", "groom", "yawn", "wave", "crouch", "coding", "designing", "researching",
+                  "nap", "wake", "dangle", "chase", "look"] {
+            let first = first_of(true, p);
+            let a = anim(true, &first).unwrap_or_else(|| panic!("{p}"));
+            if let Some(next) = &a.next {
+                assert!(anim(true, next).is_some_and(|n| n.looped), "{p}: {first} leads to {next}");
+            }
+            assert!(play_seconds(true, p) > 0.0, "{p}");
+        }
+        // Where the cat chases its tail and washes, the dog bows to play and cocks its head.
+        assert_eq!((first_of(true, "chase"), first_of(true, "groom")), ("play_bow".to_string(), "head_tilt".to_string()));
+        assert_eq!((first_of(false, "chase"), first_of(false, "groom")), ("tail_chase".to_string(), "groom".to_string()));
+        assert_eq!(anim(true, "head_tilt").unwrap().next.as_deref(), Some("sit"));
+        // It trots at the speed the window moves, so its paws don't slide either.
+        let stride = manifest(true)["walk"]["stride_css_px"].as_f64().unwrap();
+        assert!((anim(true, "walk").unwrap().seconds - stride / WALK).abs() < 1e-9);
+        // The two have the same frame and stand on the same ground.
+        assert_eq!(manifest(true)["frame"], manifest(false)["frame"]);
+        let ground = |dog: bool| manifest(dog)["ground_css_y"].as_f64().unwrap();
+        assert!((ground(true) - ground(false)).abs() < 0.25, "within a quarter of a pixel");
     }
 }

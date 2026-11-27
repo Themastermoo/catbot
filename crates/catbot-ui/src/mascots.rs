@@ -18,9 +18,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use dioxus::prelude::*;
 
-/// The four pictures, as stored on a bot.
-pub const MARKS: [(&str, &str); 6] =
-    [("cat-head", "Cat head"), ("cat-sitting", "Sitting cat"), ("cat-visor", "Visor cat"), ("robot-head", "Robot cat head"), ("robot-full", "Robot cat"), ("letter", "Letter")];
+/// The pictures, as stored on a bot: the cats, the letter, and the dogs (Dogbot, Moo's ask on
+/// 2026-11-27: a bot is a cat or a dog by the picture it wears; cats stay the default).
+pub const MARKS: [(&str, &str); 9] = [
+    ("cat-head", "Cat head"), ("cat-sitting", "Sitting cat"), ("cat-visor", "Visor cat"), ("robot-head", "Robot cat head"), ("robot-full", "Robot cat"), ("letter", "Letter"),
+    ("dog-head", "Dog head"), ("robot-dog-head", "Robot dog head"), ("robot-dog-full", "Robot dog"),
+];
+
+/// Whether a picture makes its bot a dog: its small animations in the window are the robot
+/// dog's, and as a desktop pet it walks about as the dog.
+pub fn is_dog(mark: &str) -> bool {
+    mark == "dog-head" || mark.starts_with("robot-dog-")
+}
+
+/// Dogbot's icon: the robot dog's head in teal, as Catbot's own icon is the robot cat's (which
+/// stays the app's icon). It heads the dogs among the pictures in a bot's Look tab.
+pub const DOGBOT_ICON: Asset = asset!("/assets/icon/dogbot-64.png");
 
 /// The colours a bot can wear, as the stylesheet names them.
 pub const COLORS: [&str; 12] = ["green", "blue", "red", "orange", "purple", "cyan", "pink", "yellow", "teal", "coral", "silver", "chrome"];
@@ -235,7 +248,8 @@ pub fn BotMark(
         "cat-sitting" => rsx! { CatSitting { color, size, state, hop } },
         "cat-visor" => rsx! { CatVisor { color, size, state, hop } },
         "channel" => rsx! { ChannelMark { color, size, state } },
-        "robot-head" | "robot-full" => rsx! { RobotMark { mark, color, size, state, hop } },
+        "robot-head" | "robot-full" | "robot-dog-head" | "robot-dog-full" => rsx! { RobotMark { mark, color, size, state, hop } },
+        "dog-head" => rsx! { DogHead { color, size, state, hop } },
         _ => rsx! { CatHead { color, size, state, hop } },
     }
 }
@@ -288,10 +302,12 @@ const ROBOT_MARKS: Asset = asset!("/assets/marks", AssetOptions::folder());
 
 /// The robot-cat picture for `mark` at `size`: which renders, by name. Each is a strip of
 /// `ROBOT_LOOKS` looks side by side (`marklife` mode of the art script).
+/// The robot dog's are in `dog/` inside the folder, under the same names.
 fn robot_files(mark: &str, size: u32) -> (String, String, String) {
-    let kind = if mark == "robot-full" { "full" } else { "head" };
+    let kind = if mark.ends_with("-full") { "full" } else { "head" };
     let px = if size <= 40 { 64 } else { 256 };
-    let at = |pass: &str| format!("{ROBOT_MARKS}/marklife_{kind}_{pass}_{px}.png");
+    let dog = if is_dog(mark) { "dog/" } else { "" };
+    let at = |pass: &str| format!("{ROBOT_MARKS}/{dog}marklife_{kind}_{pass}_{px}.png");
     (at("base"), at("mask"), at("gloss"))
 }
 
@@ -441,6 +457,54 @@ fn CatHead(color: String, size: u32, state: String, #[props(default)] hop: bool)
     }
 }
 
+/// The dog (Dogbot): a round head with hanging ears, a pale muzzle and a big nose, drawn flat
+/// like the cat head and alive the same way: round pupils that look aside while working and go
+/// wide while waiting, and ears that lift from their roots (both at work, one when it asks).
+#[component]
+fn DogHead(color: String, size: u32, state: String, #[props(default)] hop: bool) -> Element {
+    let (id, vary) = use_hook(|| new_id("doghead"));
+    const HEAD: &str = "M32 7Q49 7 52 24Q54.5 39 49 49Q43 60 32 60Q21 60 15 49Q9.5 39 12 24Q15 7 32 7Z";
+    const EAR_L: &str = "M19 9.5Q8.5 6.5 5 18Q2 30 5.5 40Q8.5 46.5 12.5 41Q15.5 31 21.5 16Z";
+    const EAR_R: &str = "M45 9.5Q55.5 6.5 59 18Q62 30 58.5 40Q55.5 46.5 51.5 41Q48.5 31 42.5 16Z";
+    const NOSE: &str = "M27.2 41.6Q32 39.8 36.8 41.6Q38.4 42.5 37.2 44.3L33.7 47.6Q32 48.8 30.3 47.6L26.8 44.3Q25.6 42.5 27.2 41.6Z";
+    const MOUTH: &str = "M32 48.5L32 51.2M32 51.2Q29.4 54.8 25.8 52.8M32 51.2Q34.6 54.8 38.2 52.8";
+    // (eye rx, eye ry, pupil dx, pupil dy, pupil r)
+    let (eye_rx, eye_ry, dx, dy, pupil) = match state.as_str() {
+        "working" => (5.6, 6.4, 2.0, 1.0, 3.3),
+        "waiting" => (6.0, 7.0, 0.0, 0.0, 4.4),
+        _ => (5.6, 6.4, 0.0, 0.0, 3.3),
+    };
+    let (left_x, right_x, eye_y) = (23.5, 40.5, 30.0);
+    rsx! {
+        svg { "aria-hidden": "true", class: "catbot-mark shrink-0 select-none", "data-mark": "dog-head", "data-state": "{state}", "data-hop": hop.then_some("true"), style: "{vary}", width: "{size}", height: "{size}", view_box: "0 0 64 64",
+            Gradient { id: id.clone(), color: color.clone() }
+            path { fill: "url(#{id})", d: HEAD }
+            ellipse { cx: "32", cy: "47.5", rx: "11.5", ry: "9.5", fill: "#ffffff", fill_opacity: "0.3" }
+            // Whites and pupils blink together; only the pupils look about, within the whites.
+            g { class: "cat-blink",
+                ellipse { cx: "{left_x}", cy: "{eye_y}", rx: "{eye_rx}", ry: "{eye_ry}", fill: "#ffffff" }
+                ellipse { cx: "{right_x}", cy: "{eye_y}", rx: "{eye_rx}", ry: "{eye_ry}", fill: "#ffffff" }
+                g { class: "cat-look", g { class: "cat-glance",
+                    circle { cx: "{left_x + dx}", cy: "{eye_y + dy}", r: "{pupil}", fill: INK }
+                    circle { cx: "{right_x + dx}", cy: "{eye_y + dy}", r: "{pupil}", fill: INK }
+                } }
+            }
+            path { fill: INK, d: NOSE }
+            path { fill: "none", stroke: INK, stroke_width: "1.7", stroke_linecap: "round", d: MOUTH }
+            // The ears hang over the sides of the head, a shade darker than it.
+            g { class: "cat-ear cat-ear-l",
+                path { fill: "url(#{id})", d: EAR_L }
+                path { fill: "#000000", fill_opacity: "0.22", d: EAR_L }
+            }
+            g { class: "cat-ear cat-ear-r",
+                path { fill: "url(#{id})", d: EAR_R }
+                path { fill: "#000000", fill_opacity: "0.22", d: EAR_R }
+            }
+            Ask { size }
+        }
+    }
+}
+
 /// Concept B: a whole cat sitting, tail curled round.
 #[component]
 fn CatSitting(color: String, size: u32, state: String, #[props(default)] hop: bool) -> Element {
@@ -491,7 +555,7 @@ fn CatVisor(color: String, size: u32, state: String, #[props(default)] hop: bool
 
 #[cfg(test)]
 mod tests {
-    use super::{ask_width, finished, robot_files, vary};
+    use super::{ask_width, finished, is_dog, robot_files, vary};
 
     #[test]
     fn the_question_mark_reads_small_and_stays_modest_large() {
@@ -536,6 +600,25 @@ mod tests {
         assert!(robot_files("robot-head", 64).0.ends_with("/marklife_head_base_256.png"));
         for (mark, _) in super::MARKS {
             assert!(!mark.is_empty());
+        }
+    }
+
+    #[test]
+    fn a_dog_picture_makes_a_dog_and_cats_stay_cats() {
+        let dogs: Vec<&str> = super::MARKS.iter().map(|(mark, _)| *mark).filter(|m| is_dog(m)).collect();
+        assert_eq!(dogs, ["dog-head", "robot-dog-head", "robot-dog-full"]);
+        assert!(!is_dog("cat-head") && !is_dog("robot-head") && !is_dog("robot-full") && !is_dog("letter") && !is_dog(""));
+        // The robot dog's renders are the robot cat's names, in their own folder.
+        let (base, mask, gloss) = robot_files("robot-dog-full", 28);
+        assert!(base.ends_with("/dog/marklife_full_base_64.png") && mask.ends_with("/dog/marklife_full_mask_64.png") && gloss.ends_with("/dog/marklife_full_gloss_64.png"));
+        assert!(robot_files("robot-dog-head", 64).0.ends_with("/dog/marklife_head_base_256.png"));
+        assert!(!robot_files("robot-full", 28).0.contains("/dog/") && !robot_files("robot-head", 64).0.contains("/dog/"));
+        // The drawn dog has its eye line and ear roots in the stylesheet, as each cat has.
+        let css = include_str!("../assets/mascots.css");
+        assert!(css.contains(".catbot-mark[data-mark=\"dog-head\"] { --gx:") && css.contains(".catbot-mark[data-mark=\"dog-head\"] { --ear-y:"));
+        // Every picture is listed once.
+        for (i, (mark, label)) in super::MARKS.iter().enumerate() {
+            assert!(!label.is_empty() && !super::MARKS[..i].iter().any(|(m, l)| m == mark || l == label), "{mark}");
         }
     }
 

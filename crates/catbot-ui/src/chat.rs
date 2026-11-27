@@ -449,7 +449,7 @@ pub fn Chat(bot: Bot) -> Element {
                     if let Some(live) = live {
                         LiveTurn { live, room, bot_id: bot.id.clone(), speakers: bot.channel.clone() }
                     } else if working {
-                        Working { color: bot.color.clone() }
+                        Working { color: bot.color.clone(), mark: bot.mark.clone() }
                     }
                 }
             }
@@ -479,15 +479,16 @@ fn LiveTurn(
         let state = consume_context::<Signal<State>>();
         let state = state.read();
         let id = live.bot_id.as_deref().unwrap_or(bot_id.as_str());
-        state.bots.iter().find(|b| b.id == id).map(|b| b.color.clone())
+        state.bots.iter().find(|b| b.id == id).map(|b| (b.color.clone(), b.mark.clone()))
     };
+    let (tint, mark) = tint.unzip();
     rsx! {
         div { class: "contents", "data-live-turn": true,
             for step in live.steps {
                 Step { key: "{step.id}", name: step.name, ok: step.ok, live: true }
             }
             if live.text.is_empty() {
-                Working { who, color: tint }
+                Working { who, color: tint, mark: mark.unwrap_or_default() }
             } else {
                 Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: live.bot_id, scheduled: None, held: Held::No }, bot_id, speakers, room, live: true }
             }
@@ -497,10 +498,11 @@ fn LiveTurn(
 
 /// Their working pill, while the bot thinks: the robot cat typing at its laptop, in the bot's
 /// colour (`color`, or the named bot's), where their three dots were (stage 31). In a chat with
+/// `mark` is that bot's picture: a dog's makes it the robot dog. In a chat with
 /// several bots, `who` (a bot's id) puts that bot's face and name on it: "Kiwi is working…"
 /// (stage 29.12). With no colour known it falls back to the three dots.
 #[component]
-fn Working(#[props(default)] who: Option<String>, #[props(default)] color: Option<String>) -> Element {
+fn Working(#[props(default)] who: Option<String>, #[props(default)] color: Option<String>, #[props(default)] mark: String) -> Element {
     let who = who.and_then(|id| speaker(&consume_context::<Signal<State>>().read(), &id));
     let color = who.as_ref().map(|w| w.color.clone()).or(color);
     let label = who.as_ref().map_or("Working…".to_string(), |w| format!("{} is working…", w.name));
@@ -515,7 +517,8 @@ fn Working(#[props(default)] who: Option<String>, #[props(default)] color: Optio
                     }
                 }
                 if let Some(color) = color {
-                    crate::cat_anim::TypingCat { color }
+                    // A dog bot's is the robot dog (Dogbot).
+                    crate::cat_anim::TypingCat { color, mark: who.as_ref().map(|w| w.mark.clone()).unwrap_or(mark) }
                 } else {
                     span { class: "flex items-center gap-1", "aria-hidden": "true",
                         for i in 0..3 {
@@ -1211,7 +1214,7 @@ fn EmptyChat(bot: Bot) -> Element {
     rsx! {
         div { class: "flex flex-col items-center gap-3 py-24 text-center", "data-empty-chat": true,
             // Hello: the robot cat in the bot's colour, waving (stage 31).
-            crate::cat_anim::WavingCat { color: bot.color.clone() }
+            crate::cat_anim::WavingCat { color: bot.color.clone(), mark: bot.mark.clone() }
             p { class: "flex items-center gap-2 text-[15px] font-semibold text-ink",
                 BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone(), state: bot.activity.mood() }
                 "{bot.name}"
@@ -1644,7 +1647,7 @@ fn HandoffChip(from: String, to: String, going: bool, #[props(default)] at: Stri
             div { class: "ui-pill text-[13px] text-ink-secondary", role: "status", title: "{from} handed this to {to} · {at}",
                 {face(&giver, &from, "idle")}
                 // Where their arrow was: a paw print passing from one to the other (stage 31).
-                crate::cat_anim::PawPass { going, color: giver.as_ref().map(|w| w.color.clone()) }
+                crate::cat_anim::PawPass { going, color: giver.as_ref().map(|w| w.color.clone()), dog: giver.as_ref().is_some_and(|w| crate::mascots::is_dog(&w.mark)) }
                 {face(&taker, &to, if going { "working" } else { "idle" })}
                 span { class: "inline-flex items-center gap-1.5 text-[12px] text-ink-tertiary",
                     span { "aria-hidden": "true", class: "size-1.5 shrink-0 rounded-full {dot}" }

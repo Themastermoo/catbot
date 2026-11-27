@@ -11,7 +11,7 @@ use serde_json::{Value, json};
 use crate::api;
 use crate::bots::Bot;
 use crate::live::State;
-use crate::mascots::{BotMark, COLORS, MARKS};
+use crate::mascots::{BotMark, COLORS, DOGBOT_ICON, MARKS, is_dog};
 
 /// The Windows app's two places, and a word about a switch it had to make (`link.rs`).
 #[derive(Clone, Copy, PartialEq)]
@@ -396,7 +396,7 @@ pub fn NewBotDialog(on_close: EventHandler<()>) -> Element {
                 div { class: "mb-4 flex items-center gap-3",
                     BotMark { color: color(), initial, size: 64, mark: mark() }
                     div { class: "flex flex-1 flex-col gap-2",
-                        div { class: "flex gap-1",
+                        div { class: "flex flex-wrap gap-1",
                             for (m, label) in MARKS {
                                 button {
                                     key: "{m}",
@@ -615,26 +615,37 @@ fn Colours(bot: Bot, change: Callback<Value>) -> Element {
 }
 
 /// A bot's picture and colour (its panel's Look tab, Moo's ask on 2026-11-27): the cat
-/// pictures, its own picture, and the colours.
+/// pictures, the dog pictures (a bot that wears one is a dog), its own picture, and the colours.
 #[component]
 pub fn LookSettings(bot: Bot) -> Element {
     let (change, _, problem) = use_change(bot.id.clone());
     rsx! {
         div { "data-panel-tabpanel": "look", class: "flex flex-col gap-3 px-2 pt-2",
             p { class: "text-[13px] text-ink-secondary", "How {bot.name} looks in the list, its chats and on your desktop." }
-            div { role: "radiogroup", "aria-label": "Picture", class: "grid grid-cols-4 gap-2",
-                for (mark, label) in MARKS {
-                    button {
-                        key: "{mark}",
-                        r#type: "button",
-                        role: "radio",
-                        "aria-checked": "{bot.mark == mark}",
-                        "aria-label": "{label}",
-                        title: "{label}",
-                        class: if bot.mark == mark { "flex items-center justify-center rounded-xl bg-raised p-2 ring-2 ring-accent" } else { "flex items-center justify-center rounded-xl p-2 hover:bg-raised" },
-                        "data-cat-follow": true,
-                        onclick: move |_| change(json!({ "mark": mark })),
-                        BotMark { color: bot.color.clone(), initial: bot.initial(), size: 44, mark: mark.to_string() }
+            // One choice among them all; the dogs stand under their own heading (Dogbot).
+            div { role: "radiogroup", "aria-label": "Picture", class: "flex flex-col gap-2",
+                for dogs in [false, true] {
+                    if dogs {
+                        div { class: "flex items-center gap-1.5 text-[12px] font-medium text-ink-secondary", "data-look-dogs": true,
+                            img { src: "{DOGBOT_ICON}", alt: "", width: "18", height: "18" }
+                            "Dogs"
+                        }
+                    }
+                    div { class: "grid grid-cols-4 gap-2",
+                        for (mark, label) in MARKS.into_iter().filter(|(m, _)| is_dog(m) == dogs) {
+                            button {
+                                key: "{mark}",
+                                r#type: "button",
+                                role: "radio",
+                                "aria-checked": "{bot.mark == mark}",
+                                "aria-label": "{label}",
+                                title: "{label}",
+                                class: if bot.mark == mark { "flex items-center justify-center rounded-xl bg-raised p-2 ring-2 ring-accent" } else { "flex items-center justify-center rounded-xl p-2 hover:bg-raised" },
+                                "data-cat-follow": true,
+                                onclick: move |_| change(json!({ "mark": mark })),
+                                BotMark { color: bot.color.clone(), initial: bot.initial(), size: 44, mark: mark.to_string() }
+                            }
+                        }
                     }
                 }
             }

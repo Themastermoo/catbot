@@ -33,6 +33,8 @@
 .catbot-mark[data-mark="cat-head"][data-state="waiting"] { --gx: 2.3px; --gy: 1.6px; }
 .catbot-mark[data-mark="cat-sitting"] { --gx: 1.3px; --gy: 0.9px; --eye-y: 22.5px; --scan-a: 1.3px; --scan-b: -1.3px; }
 .catbot-mark[data-mark="cat-visor"] { --gx: 2.2px; --gy: 1.3px; --eye-y: 35.5px; --scan-a: 2.2px; --scan-b: -2.2px; }
+.catbot-mark[data-mark="dog-head"] { --gx: 2.2px; --gy: 1.8px; --eye-y: 30px; --scan-a: 0px; --scan-b: -4px; }
+.catbot-mark[data-mark="dog-head"][data-state="waiting"] { --gx: 1.5px; --gy: 1.6px; }
 
 /* The eyes shut about the eye line. */
 .cat-blink { transform-origin: 32px var(--eye-y, 32px); }
@@ -46,6 +48,7 @@
 }
 /* The working cat head is drawn with its pupils aside; following the pointer starts from centre. */
 .catbot-mark[data-mark="cat-head"][data-state="working"][data-look] .cat-look { --look-rest-x: -3px; --look-rest-y: -1.5px; }
+.catbot-mark[data-mark="dog-head"][data-state="working"][data-look] .cat-look { --look-rest-x: -2px; --look-rest-y: -1px; }
 
 @media (prefers-reduced-motion: no-preference) {
   .cat-look { transition: translate 160ms ease-out; }
@@ -155,6 +158,12 @@
 .catbot-mark[data-state="working"] .cat-ear-r { scale: 1 1.26; rotate: -3deg; }
 /* Waiting: one ear up, as a cat asks. */
 .catbot-mark[data-state="waiting"] .cat-ear-l { scale: 1 1.3; rotate: -5deg; }
+/* The dog's ears hang from their roots at the top of its head: they lift out sideways instead
+   (both at work, one when it asks). */
+.catbot-mark[data-mark="dog-head"] { --ear-y: 11px; --ear-lx: 19px; --ear-rx: 45px; }
+.catbot-mark[data-mark="dog-head"][data-state="working"] .cat-ear-l { scale: 1; rotate: 15deg; }
+.catbot-mark[data-mark="dog-head"][data-state="working"] .cat-ear-r { scale: 1; rotate: -15deg; }
+.catbot-mark[data-mark="dog-head"][data-state="waiting"] .cat-ear-l { scale: 1; rotate: 24deg; }
 
 /* ---- The "?": a dark "?" on an amber disc (one fixed amber: a skin's own warning colour can
    be too dark to carry it) with a rim in the app's own ground, so it stands out on light and dark skins and off the cat. mascots.rs sizes it in

@@ -77,6 +77,8 @@ pub fn PetSwitch(bot: Bot, #[props(default)] listed: bool) -> Element {
     });
     let on = bot.pet;
     let name = bot.name.clone();
+    // A bot whose picture is a dog comes out as the robot dog.
+    let animal = if crate::mascots::is_dog(&bot.mark) { "dog" } else { "cat" };
     rsx! {
         div { class: "flex items-center gap-3", "data-pet-switch": true,
             if listed {
@@ -86,7 +88,7 @@ pub fn PetSwitch(bot: Bot, #[props(default)] listed: bool) -> Element {
                 div { class: "min-w-0 flex-1",
                     div { class: "text-[15px] font-medium text-ink", "Desktop pet" }
                     div { class: "mt-0.5 text-[12px] leading-relaxed text-ink-secondary",
-                        if on { "{name}'s cat comes out onto your desktop when Catbot's window closes." } else { "Let {name}'s cat walk about your desktop when Catbot's window closes." }
+                        if on { "{name}'s {animal} comes out onto your desktop when Catbot's window closes." } else { "Let {name}'s {animal} walk about your desktop when Catbot's window closes." }
                     }
                 }
             }
