@@ -94,6 +94,26 @@
     "researching": {
       "intro": null,
       "animation": "researching"
+    },
+    "nap": {
+      "intro": "curl_up",
+      "animation": "nap"
+    },
+    "wake": {
+      "intro": "wake",
+      "animation": "idle"
+    },
+    "dangle": {
+      "intro": null,
+      "animation": "dangle"
+    },
+    "chase": {
+      "intro": "tail_chase",
+      "animation": "idle"
+    },
+    "look": {
+      "intro": "look_around",
+      "animation": "sit"
     }
   },
   "animations": {
@@ -326,6 +346,72 @@
         "base": "base_researching.png",
         "mask": "mask_researching.png",
         "gloss": "gloss_researching.png"
+      }
+    },
+    "curl_up": {
+      "frames": 14,
+      "fps": 12,
+      "loop": false,
+      "next": "nap",
+      "sheets": {
+        "base": "base_curl_up.png",
+        "mask": "mask_curl_up.png",
+        "gloss": "gloss_curl_up.png"
+      }
+    },
+    "nap": {
+      "frames": 32,
+      "fps": 8,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_nap.png",
+        "mask": "mask_nap.png",
+        "gloss": "gloss_nap.png"
+      }
+    },
+    "wake": {
+      "frames": 18,
+      "fps": 12,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_wake.png",
+        "mask": "mask_wake.png",
+        "gloss": "gloss_wake.png"
+      }
+    },
+    "dangle": {
+      "frames": 24,
+      "fps": 12,
+      "loop": true,
+      "next": null,
+      "sheets": {
+        "base": "base_dangle.png",
+        "mask": "mask_dangle.png",
+        "gloss": "gloss_dangle.png"
+      }
+    },
+    "tail_chase": {
+      "frames": 40,
+      "fps": 16,
+      "loop": false,
+      "next": "idle",
+      "sheets": {
+        "base": "base_tail_chase.png",
+        "mask": "mask_tail_chase.png",
+        "gloss": "gloss_tail_chase.png"
+      }
+    },
+    "look_around": {
+      "frames": 36,
+      "fps": 12,
+      "loop": false,
+      "next": "sit",
+      "sheets": {
+        "base": "base_look_around.png",
+        "mask": "mask_look_around.png",
+        "gloss": "gloss_look_around.png"
       }
     }
   },

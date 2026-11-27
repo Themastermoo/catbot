@@ -439,7 +439,7 @@ pub fn Chat(bot: Bot) -> Element {
                     if let Some(live) = live {
                         LiveTurn { live, room, bot_id: bot.id.clone(), speakers: bot.channel.clone() }
                     } else if working {
-                        Working {}
+                        Working { color: bot.color.clone() }
                     }
                 }
             }
@@ -464,13 +464,20 @@ fn LiveTurn(
     #[props(default)] speakers: Option<crate::bots::ChannelInfo>,
 ) -> Element {
     let who = live.bot_id.clone().filter(|_| room);
+    // The working pill's cat wears the colour of the bot at work (or of the chat's own bot).
+    let tint = {
+        let state = consume_context::<Signal<State>>();
+        let state = state.read();
+        let id = live.bot_id.as_deref().unwrap_or(bot_id.as_str());
+        state.bots.iter().find(|b| b.id == id).map(|b| b.color.clone())
+    };
     rsx! {
         div { class: "contents", "data-live-turn": true,
             for step in live.steps {
                 Step { key: "{step.id}", name: step.name, ok: step.ok, live: true }
             }
             if live.text.is_empty() {
-                Working { who }
+                Working { who, color: tint }
             } else {
                 Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: live.bot_id, scheduled: None, held: Held::No }, bot_id, speakers, room, live: true }
             }
@@ -478,11 +485,14 @@ fn LiveTurn(
     }
 }
 
-/// Their working pill: three dots, while the bot thinks. In a chat with several bots, `who`
-/// (a bot's id) puts that bot's face and name on it: "Kiwi is working…" (stage 29.12).
+/// Their working pill, while the bot thinks: the robot cat typing at its laptop, in the bot's
+/// colour (`color`, or the named bot's), where their three dots were (stage 31). In a chat with
+/// several bots, `who` (a bot's id) puts that bot's face and name on it: "Kiwi is working…"
+/// (stage 29.12). With no colour known it falls back to the three dots.
 #[component]
-fn Working(#[props(default)] who: Option<String>) -> Element {
+fn Working(#[props(default)] who: Option<String>, #[props(default)] color: Option<String>) -> Element {
     let who = who.and_then(|id| speaker(&consume_context::<Signal<State>>().read(), &id));
+    let color = who.as_ref().map(|w| w.color.clone()).or(color);
     let label = who.as_ref().map_or("Working…".to_string(), |w| format!("{} is working…", w.name));
     rsx! {
         div { class: "flex justify-start",
@@ -494,9 +504,13 @@ fn Working(#[props(default)] who: Option<String>) -> Element {
                         " is working"
                     }
                 }
-                span { class: "flex items-center gap-1", "aria-hidden": "true",
-                    for i in 0..3 {
-                        span { key: "{i}", class: "size-1.5 animate-pulse rounded-full bg-ink-secondary", style: "animation-delay: {i * 200}ms" }
+                if let Some(color) = color {
+                    crate::cat_anim::TypingCat { color }
+                } else {
+                    span { class: "flex items-center gap-1", "aria-hidden": "true",
+                        for i in 0..3 {
+                            span { key: "{i}", class: "size-1.5 animate-pulse rounded-full bg-ink-secondary", style: "animation-delay: {i * 200}ms" }
+                        }
                     }
                 }
             }
@@ -1185,9 +1199,13 @@ fn ComputerButton(bot_id: String, name: String) -> Element {
 #[component]
 fn EmptyChat(bot: Bot) -> Element {
     rsx! {
-        div { class: "flex flex-col items-center gap-3 py-24 text-center",
-            BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
-            p { class: "text-[15px] font-semibold text-ink", "{bot.name}" }
+        div { class: "flex flex-col items-center gap-3 py-24 text-center", "data-empty-chat": true,
+            // Hello: the robot cat in the bot's colour, waving (stage 31).
+            crate::cat_anim::WavingCat { color: bot.color.clone() }
+            p { class: "flex items-center gap-2 text-[15px] font-semibold text-ink",
+                BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 24, mark: bot.mark.clone(), state: bot.activity.mood() }
+                "{bot.name}"
+            }
             p { class: "text-[13px] text-ink-secondary", "Send a message to start the conversation." }
         }
     }
@@ -1309,7 +1327,7 @@ fn Row(
             rsx! {
                 div { class: "group flex w-full flex-col items-start",
                     if let Some(who) = speaker {
-                        SpeakerTag { who, to, working: live }
+                        SpeakerTag { who, to, working: live, hop: !live && crate::cat_anim::just_arrived(message.at, js_now()) }
                     }
                     div { class: "flex w-full items-center justify-start gap-1.5",
                         div { class: "{shape}", title: "{full_time}",
@@ -1514,11 +1532,18 @@ fn SpeakerName(who: Speaker) -> Element {
 /// Over a reply in a chat with several bots: the speaker's face and name, and "→ Kiwi" when it
 /// hands to someone (their `ClusterLabel`).
 #[component]
-fn SpeakerTag(who: Speaker, #[props(default)] to: Vec<Speaker>, #[props(default)] working: bool) -> Element {
+fn SpeakerTag(
+    who: Speaker,
+    #[props(default)] to: Vec<Speaker>,
+    #[props(default)] working: bool,
+    /// The reply has only just arrived: its speaker's picture gives a small hop (stage 31).
+    #[props(default)]
+    hop: bool,
+) -> Element {
     let last = to.len().saturating_sub(1);
     rsx! {
         div { class: "mb-1 flex flex-wrap items-center gap-1.5 text-[13px] text-ink-secondary", "data-speaker": "{who.name}",
-            BotMark { picture: who.picture.clone(), color: who.color.clone(), initial: who.initial(), size: 20, mark: who.mark.clone(), state: if working { "working" } else { "idle" } }
+            BotMark { picture: who.picture.clone(), color: who.color.clone(), initial: who.initial(), size: 20, mark: who.mark.clone(), state: if working { "working" } else { "idle" }, hop }
             SpeakerName { who: who.clone() }
             if !to.is_empty() {
                 span { class: "text-ink-tertiary", "data-hands-to": true, "→" }
@@ -1588,7 +1613,8 @@ fn HandoffChip(from: String, to: String, going: bool, #[props(default)] at: Stri
         div { class: "flex justify-start", "data-handoff": "{from}→{to}", "data-handoff-state": if going { "working" } else { "done" },
             div { class: "ui-pill text-[13px] text-ink-secondary", role: "status", title: "{from} handed this to {to} · {at}",
                 {face(&giver, &from, "idle")}
-                span { class: "text-ink-tertiary", "aria-label": "handed this to", "→" }
+                // Where their arrow was: a paw print passing from one to the other (stage 31).
+                crate::cat_anim::PawPass { going, color: giver.as_ref().map(|w| w.color.clone()) }
                 {face(&taker, &to, if going { "working" } else { "idle" })}
                 span { class: "inline-flex items-center gap-1.5 text-[12px] text-ink-tertiary",
                     span { "aria-hidden": "true", class: "size-1.5 shrink-0 rounded-full {dot}" }

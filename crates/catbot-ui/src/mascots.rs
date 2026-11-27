@@ -6,6 +6,9 @@
 //! OpenMausBot's mascot shapes.
 //!
 //! They are alive: the body moves by state, the eyes blink, glance about and follow the pointer.
+//! Since stage 31 the ears prick up while the bot works, a "?" shows (with one ear cocked) while
+//! it waits on the person, a bot that has just finished gives one small hop, and the robot cat's
+//! pictures blink and glance too (as rendered looks, see `RobotMark`).
 //! All of that runs in the page (`assets/mascots.css` and `MASCOT_LIFE` below), never as a Rust
 //! render per frame. The motion approach is after OpenMausBot's mascot-motion.ts, CursorAvatar.tsx
 //! and Avatar.tsx (Apache-2.0, see NOTICE); the groups here (`cat-blink`, `cat-look`,
@@ -34,7 +37,8 @@ const INK: &str = "#14171d";
 ///
 /// - Blinks and glances: four times a second it looks over the cats on the page and starts
 ///   whatever is due on each one's own random clock, by setting `data-blink` on the picture or
-///   `--glance-x` / `--glance-y` (-1..1) on its `.cat-glance` groups. Glances are for idle cats:
+///   `--glance-x` / `--glance-y` (-1..1) on its `.cat-glance` groups (and `data-glance`, "near"
+///   or "far", on a robot cat, whose looks are rendered pictures). Glances are for idle cats:
 ///   a working cat scans (CSS) and a waiting cat keeps its eyes on the person.
 /// - Following the pointer: the cat under the pointer, or the one inside the `[data-cat-follow]`
 ///   area under it (a sidebar row, a picker tile), gets `data-look`, and `--look-x` / `--look-y`
@@ -68,6 +72,7 @@ pub const MASCOT_LIFE: &str = r#"
         if (!clock.glancing) return;
         clock.glancing = false;
         set(cat, ".cat-glance", { "--glance-x": null, "--glance-y": null });
+        cat.removeAttribute("data-glance");
     };
     // Resting: while the window isn't the one in use (another window has focus, or it is
     // minimised or on another desktop) the cats hold still. `mascots.css` pauses the body under
@@ -134,6 +139,8 @@ pub const MASCOT_LIFE: &str = r#"
             } else if (!clock.glancing && now >= clock.glanceAt) {
                 const side = Math.random() < 0.5 ? -1 : 1;
                 set(cat, ".cat-glance", { "--glance-x": (side * between(0.55, 1)).toFixed(2), "--glance-y": between(-0.8, 0.5).toFixed(2) });
+                // The robot cat has no eyes to slide: its picture steps to a rendered glance.
+                if (cat.classList.contains("catbot-robot")) cat.dataset.glance = side < 0 ? "near" : "far";
                 clock.glancing = true;
                 clock.backAt = now + between(700, 2200);
                 // Often a second look elsewhere soon after, then a longer rest.
@@ -205,17 +212,55 @@ pub fn BotMark(
     /// The bot's own picture (stage 23): shown instead of its mark.
     #[props(default)]
     picture: Option<Picture>,
+    /// Give one small hop now (a reply of this bot's has just arrived). A picture also hops by
+    /// itself when its `state` goes from "working" to "idle".
+    #[props(default)]
+    hop: bool,
 ) -> Element {
+    // What the state was at the last draw, and whether the hop it earned is still showing.
+    let seen = use_hook(|| std::rc::Rc::new(std::cell::RefCell::new((state.clone(), false))));
+    let hop = {
+        let mut seen = seen.borrow_mut();
+        if seen.0 != state {
+            seen.1 = finished(&seen.0, &state);
+            seen.0 = state.clone();
+        }
+        hop || seen.1
+    };
     if let Some(picture) = picture {
-        return rsx! { PictureMark { picture, size, color } };
+        return rsx! { PictureMark { picture, size, color, hop } };
     }
     match mark.as_str() {
-        "letter" => rsx! { LetterMark { color, initial, size, state } },
-        "cat-sitting" => rsx! { CatSitting { color, size, state } },
-        "cat-visor" => rsx! { CatVisor { color, size, state } },
+        "letter" => rsx! { LetterMark { color, initial, size, state, hop } },
+        "cat-sitting" => rsx! { CatSitting { color, size, state, hop } },
+        "cat-visor" => rsx! { CatVisor { color, size, state, hop } },
         "channel" => rsx! { ChannelMark { color, size, state } },
-        "robot-head" | "robot-full" => rsx! { RobotMark { mark, color, size, state } },
-        _ => rsx! { CatHead { color, size, state } },
+        "robot-head" | "robot-full" => rsx! { RobotMark { mark, color, size, state, hop } },
+        _ => rsx! { CatHead { color, size, state, hop } },
+    }
+}
+
+/// Whether a picture going from one state to the next has just finished its work (and hops).
+fn finished(before: &str, now: &str) -> bool {
+    before == "working" && now == "idle"
+}
+
+/// The "?" over a cat that waits on the person. Always in the picture; `mascots.css` shows it
+/// in the waiting state only.
+#[component]
+fn Ask(color: String) -> Element {
+    rsx! {
+        text { class: "cat-ask", x: "56", y: "19", font_size: "25", font_weight: "800", text_anchor: "middle", fill: "var(--identity-{color})", "?" }
+    }
+}
+
+/// A cat's ears again, behind its head and in its colour: at rest the head hides them; pricked
+/// (`mascots.css` stretches them from their roots) they stand taller than the head's own.
+#[component]
+fn Ears(id: String, left: &'static str, right: &'static str) -> Element {
+    rsx! {
+        path { class: "cat-ear cat-ear-l", fill: "url(#{id})", d: left }
+        path { class: "cat-ear cat-ear-r", fill: "url(#{id})", d: right }
     }
 }
 
@@ -225,16 +270,23 @@ pub fn BotMark(
 /// (screened back on top). Small pictures use the 64-pixel renders, drawn simpler to read small.
 const ROBOT_MARKS: Asset = asset!("/assets/marks", AssetOptions::folder());
 
-/// The robot-cat picture for `mark` at `size`: which renders, by name.
+/// The robot-cat picture for `mark` at `size`: which renders, by name. Each is a strip of
+/// `ROBOT_LOOKS` looks side by side (`marklife` mode of the art script).
 fn robot_files(mark: &str, size: u32) -> (String, String, String) {
     let kind = if mark == "robot-full" { "full" } else { "head" };
     let px = if size <= 40 { 64 } else { 256 };
-    let at = |pass: &str| format!("{ROBOT_MARKS}/mark_{kind}_{pass}_{px}.png");
+    let at = |pass: &str| format!("{ROBOT_MARKS}/marklife_{kind}_{pass}_{px}.png");
     (at("base"), at("mask"), at("gloss"))
 }
 
+/// The robot cat's looks, in the order they stand in a strip: resting (eyes open, a blink, a
+/// glance to each side), at work (ears pricked, eyes narrowed; and its blink), and waiting on
+/// the person (head tipped, an ear cocked, wide amber eyes; and its blink). `mascots.css` slides
+/// the strip to the look for the picture's state, and to the blink beside it for a moment.
+pub const ROBOT_LOOKS: [&str; 8] = ["idle", "idle_blink", "glance_near", "glance_far", "working", "working_blink", "waiting", "waiting_blink"];
+
 #[component]
-fn RobotMark(mark: String, color: String, size: u32, state: String) -> Element {
+fn RobotMark(mark: String, color: String, size: u32, state: String, #[props(default)] hop: bool) -> Element {
     let vary = use_hook(|| new_id("robot").1);
     let (base, mask, gloss) = robot_files(&mark, size);
     let layer = "position:absolute;inset:0;background-size:100% 100%";
@@ -248,10 +300,14 @@ fn RobotMark(mark: String, color: String, size: u32, state: String) -> Element {
             class: "catbot-mark catbot-robot relative shrink-0 select-none",
             "data-mark": "{mark}",
             "data-state": "{state}",
-            style: "{vary};width:{size}px;height:{size}px;isolation:isolate;-webkit-mask:url({base}) 0 0/100% 100% no-repeat;mask:url({base}) 0 0/100% 100% no-repeat",
-            div { style: "{layer};background-image:url({base})" }
-            div { style: "{layer};background:var(--identity-{color});mix-blend-mode:multiply;-webkit-mask:url({mask}) 0 0/100% 100% no-repeat;mask:url({mask}) 0 0/100% 100% no-repeat" }
-            div { style: "{layer};background-image:url({gloss});mix-blend-mode:screen" }
+            "data-hop": hop.then_some("true"),
+            style: "{vary};width:{size}px;height:{size}px;overflow:hidden",
+            div { class: "robot-looks", style: "width:{ROBOT_LOOKS.len() * 100}%;isolation:isolate;-webkit-mask:url({base}) 0 0/100% 100% no-repeat;mask:url({base}) 0 0/100% 100% no-repeat",
+                div { style: "{layer};background-image:url({base})" }
+                div { style: "{layer};background:var(--identity-{color});mix-blend-mode:multiply;-webkit-mask:url({mask}) 0 0/100% 100% no-repeat;mask:url({mask}) 0 0/100% 100% no-repeat" }
+                div { style: "{layer};background-image:url({gloss});mix-blend-mode:screen" }
+            }
+            span { class: "cat-ask", style: "color:var(--identity-{color});font-size:{size * 2 / 5}px", "?" }
         } }
     }
 }
@@ -307,7 +363,7 @@ fn ChannelMark(color: String, size: u32, state: String) -> Element {
 
 /// The letter in a circle: the stand-in from before the cats, kept as a choice.
 #[component]
-fn LetterMark(color: String, initial: String, size: u32, state: String) -> Element {
+fn LetterMark(color: String, initial: String, size: u32, state: String, #[props(default)] hop: bool) -> Element {
     let (light, fill, dark) = stops(&color);
     let background = format!("linear-gradient(160deg, {light}, {fill} 55%, {dark})");
     let font = size * 2 / 5;
@@ -317,6 +373,7 @@ fn LetterMark(color: String, initial: String, size: u32, state: String) -> Eleme
             class: "catbot-mark flex shrink-0 select-none items-center justify-center rounded-full font-semibold text-white",
             "data-mark": "letter",
             "data-state": "{state}",
+            "data-hop": hop.then_some("true"),
             // One property each: Dioxus updates a changed property in place, where a changed
             // `style` string left the old background cleared and no new one set.
             width: "{size}px",
@@ -331,7 +388,7 @@ fn LetterMark(color: String, initial: String, size: u32, state: String) -> Eleme
 /// Concept A: a chunky cat head with slit-pupil eyes that look aside while working and go wide
 /// while waiting for the person.
 #[component]
-fn CatHead(color: String, size: u32, state: String) -> Element {
+fn CatHead(color: String, size: u32, state: String, #[props(default)] hop: bool) -> Element {
     let (id, vary) = use_hook(|| new_id("cathead"));
     const HEAD: &str = "M8 11Q8 6 12.5 8L25 15.5Q32 13.5 39 15.5L51.5 8Q56 6 56 11L57 30Q60 37 58 44Q54 59 32 59Q10 59 6 44Q4 37 7 30Z";
     const INNER_EARS: &str = "M12 13.5L20.5 18.5Q15.5 21 13 25.5ZM52 13.5L43.5 18.5Q48.5 21 51 25.5Z";
@@ -344,8 +401,9 @@ fn CatHead(color: String, size: u32, state: String) -> Element {
     };
     let (left_x, right_x, eye_y) = (20.5, 43.5, 37.0);
     rsx! {
-        svg { "aria-hidden": "true", class: "catbot-mark shrink-0 select-none", "data-mark": "cat-head", "data-state": "{state}", style: "{vary}", width: "{size}", height: "{size}", view_box: "0 0 64 64",
-            Gradient { id: id.clone(), color }
+        svg { "aria-hidden": "true", class: "catbot-mark shrink-0 select-none", "data-mark": "cat-head", "data-state": "{state}", "data-hop": hop.then_some("true"), style: "{vary}", width: "{size}", height: "{size}", view_box: "0 0 64 64",
+            Gradient { id: id.clone(), color: color.clone() }
+            Ears { id: id.clone(), left: "M8 11Q8 6 12.5 8L25 15.5L7.4 26Z", right: "M56 11Q56 6 51.5 8L39 15.5L56.6 26Z" }
             path { fill: "url(#{id})", d: HEAD }
             path { fill: "#000000", fill_opacity: "0.2", d: INNER_EARS }
             // Whites and pupils blink together; only the pupils look about, within the whites.
@@ -358,17 +416,19 @@ fn CatHead(color: String, size: u32, state: String) -> Element {
                 } }
             }
             path { fill: INK, d: NOSE }
+            Ask { color }
         }
     }
 }
 
 /// Concept B: a whole cat sitting, tail curled round.
 #[component]
-fn CatSitting(color: String, size: u32, state: String) -> Element {
+fn CatSitting(color: String, size: u32, state: String, #[props(default)] hop: bool) -> Element {
     let (id, vary) = use_hook(|| new_id("catsit"));
     rsx! {
-        svg { "aria-hidden": "true", class: "catbot-mark shrink-0 select-none", "data-mark": "cat-sitting", "data-state": "{state}", style: "{vary}", width: "{size}", height: "{size}", view_box: "0 0 64 64",
-            Gradient { id: id.clone(), color }
+        svg { "aria-hidden": "true", class: "catbot-mark shrink-0 select-none", "data-mark": "cat-sitting", "data-state": "{state}", "data-hop": hop.then_some("true"), style: "{vary}", width: "{size}", height: "{size}", view_box: "0 0 64 64",
+            Gradient { id: id.clone(), color: color.clone() }
+            Ears { id: id.clone(), left: "M12.5 5.5Q12.2 2.5 15.2 3.5L24.5 8L12.2 15Z", right: "M43.5 5.5Q43.8 2.5 40.8 3.5L31.5 8L43.8 15Z" }
             path { fill: "none", stroke: "url(#{id})", stroke_width: "7.5", stroke_linecap: "round", d: "M42 56Q57 58 57.5 46Q57.8 40 53 37" }
             ellipse { cx: "28", cy: "45", rx: "19", ry: "16.5", fill: "url(#{id})" }
             path { fill: "url(#{id})", d: "M12.5 5.5Q12.2 2.5 15.2 3.5L24.5 8Q28 7 31.5 8L40.8 3.5Q43.8 2.5 43.5 5.5L43.8 16Q45 19 45 22Q45 36 28 36Q11 36 11 22Q11 19 12.2 16Z" }
@@ -380,17 +440,19 @@ fn CatSitting(color: String, size: u32, state: String) -> Element {
                 circle { cx: "21.7", cy: "20.7", r: "1.3", fill: "#ffffff" }
                 circle { cx: "36.7", cy: "20.7", r: "1.3", fill: "#ffffff" }
             } } }
+            Ask { color }
         }
     }
 }
 
 /// Concept C: a rounded-square head whose corners rise into ears, with a dark visor.
 #[component]
-fn CatVisor(color: String, size: u32, state: String) -> Element {
+fn CatVisor(color: String, size: u32, state: String, #[props(default)] hop: bool) -> Element {
     let (id, vary) = use_hook(|| new_id("catvisor"));
     rsx! {
-        svg { "aria-hidden": "true", class: "catbot-mark shrink-0 select-none", "data-mark": "cat-visor", "data-state": "{state}", style: "{vary}", width: "{size}", height: "{size}", view_box: "0 0 64 64",
-            Gradient { id: id.clone(), color }
+        svg { "aria-hidden": "true", class: "catbot-mark shrink-0 select-none", "data-mark": "cat-visor", "data-state": "{state}", "data-hop": hop.then_some("true"), style: "{vary}", width: "{size}", height: "{size}", view_box: "0 0 64 64",
+            Gradient { id: id.clone(), color: color.clone() }
+            Ears { id: id.clone(), left: "M7 9Q7 4 11.5 6.2L24 13L7 21Z", right: "M57 9Q57 4 52.5 6.2L40 13L57 21Z" }
             path { fill: "url(#{id})", d: "M7 9Q7 4 11.5 6.2L24 13L40 13L52.5 6.2Q57 4 57 9L57 46Q57 60 43 60L21 60Q7 60 7 46Z" }
             rect { x: "13", y: "24", width: "38", height: "24", rx: "10", fill: INK }
             // The face on the visor shifts as one (so the eyes never run into the nose); only
@@ -402,19 +464,43 @@ fn CatVisor(color: String, size: u32, state: String) -> Element {
                 }
                 path { fill: "#ffffff", d: "M30 40.5L34 40.5Q34.8 40.7 34.3 41.5L32.6 43.3Q32 43.8 31.4 43.3L29.7 41.5Q29.2 40.7 30 40.5Z" }
             } }
+            Ask { color }
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{robot_files, vary};
+    use super::{finished, robot_files, vary};
+
+    #[test]
+    fn a_picture_hops_when_its_bot_finishes() {
+        assert!(finished("working", "idle"));
+        assert!(!finished("idle", "idle") && !finished("idle", "working"));
+        assert!(!finished("working", "waiting"), "it still needs the person: no hop yet");
+        assert!(!finished("waiting", "idle"));
+    }
+
+    #[test]
+    fn the_robot_cats_looks_come_in_pairs_with_their_blinks() {
+        // mascots.css slides the strip by eighths: a state's look, and its blink one further on.
+        let at = |name: &str| super::ROBOT_LOOKS.iter().position(|l| *l == name).unwrap();
+        for state in ["idle", "working", "waiting"] {
+            assert_eq!(at(&format!("{state}_blink")), at(state) + 1, "{state}");
+        }
+        assert_eq!((at("idle"), at("working"), at("waiting")), (0, 4, 6));
+        assert_eq!((at("glance_near"), at("glance_far")), (2, 3));
+        let css = include_str!("../assets/mascots.css");
+        for (state, slide) in [("working", "--look: -50%"), ("waiting", "--look: -75%")] {
+            assert!(css.contains(&format!(".catbot-robot[data-state=\"{state}\"] .robot-looks {{ {slide}; }}")), "{state}");
+        }
+    }
 
     #[test]
     fn robot_cats_use_the_small_renders_when_small() {
         let (base, mask, gloss) = robot_files("robot-full", 28);
-        assert!(base.ends_with("/mark_full_base_64.png") && mask.ends_with("/mark_full_mask_64.png") && gloss.ends_with("/mark_full_gloss_64.png"));
-        assert!(robot_files("robot-head", 64).0.ends_with("/mark_head_base_256.png"));
+        assert!(base.ends_with("/marklife_full_base_64.png") && mask.ends_with("/marklife_full_mask_64.png") && gloss.ends_with("/marklife_full_gloss_64.png"));
+        assert!(robot_files("robot-head", 64).0.ends_with("/marklife_head_base_256.png"));
         for (mark, _) in super::MARKS {
             assert!(!mark.is_empty());
         }
@@ -477,12 +563,12 @@ pub async fn picture_source(url: &str) -> Option<String> {
 
 /// The picture in its circle, on the bot's colour while it loads.
 #[component]
-fn PictureMark(picture: Picture, size: u32, color: String) -> Element {
+fn PictureMark(picture: Picture, size: u32, color: String, #[props(default)] hop: bool) -> Element {
     let url = picture.url.clone();
     let source = use_resource(use_reactive!(|url| async move { picture_source(&url).await }));
     let style = picture.style();
     rsx! {
-        span { "data-bot-picture": true, class: "inline-flex shrink-0 overflow-hidden rounded-full", style: "width:{size}px;height:{size}px;background:var(--identity-{color})",
+        span { "data-bot-picture": true, "data-hop": hop.then_some("true"), class: "inline-flex shrink-0 overflow-hidden rounded-full", style: "width:{size}px;height:{size}px;background:var(--identity-{color})",
             if let Some(Some(src)) = source() {
                 img { src: "{src}", alt: "", draggable: "false", style: "{style}" }
             }

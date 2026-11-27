@@ -398,3 +398,40 @@
 .pet3d-gloss { background-image: var(--gloss); mix-blend-mode: screen; }
 @keyframes pet3d-loop { to { transform: translateX(-100%); } }
 @keyframes pet3d-once { to { transform: translateX(calc(-100% + 96px)); } }
+
+/* Carried (stage 31): the picture turns about the scruff, trailing behind the hand, and swings
+   back when the hand stops. src/pet_window.rs sets data-lean; the scruff is the manifest's
+   drag_anchor_css (58, 32 in the cat's box), here in the 104×88 box round it. */
+.pet-lean { position: absolute; inset: 0; transform-origin: 62px 43px; pointer-events: none; }
+.pet-lean[data-lean="back"] { rotate: 13deg; }
+.pet-lean[data-lean="fore"] { rotate: -13deg; }
+
+/* The long nap (stage 31): three z's drift up from the sleeping cat's head, once it has curled
+   up. Opacity and transform only. */
+.pet-nap-zzz {
+  position: absolute; left: 62px; top: 26px; width: 30px; height: 30px;
+  pointer-events: none; font: 700 11px/1 ui-rounded, system-ui, sans-serif;
+  text-shadow: 0 0 2px rgba(255, 255, 255, 0.9), 0 0 1px rgba(0, 0, 0, 0.5);
+}
+.pet-nap-zzz > span { position: absolute; left: 0; bottom: 0; opacity: 0; }
+.pet-nap-zzz > span:nth-child(2) { font-size: 9px; }
+.pet-nap-zzz > span:nth-child(3) { font-size: 7px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .pet-lean { transition: rotate 0.3s cubic-bezier(0.3, 1.5, 0.6, 1); }
+  .pet-nap-zzz > span { animation: pet-nap-z 3.6s ease-out 1.6s infinite both; }
+  .pet-nap-zzz > span:nth-child(2) { animation-delay: 2.8s; }
+  .pet-nap-zzz > span:nth-child(3) { animation-delay: 4s; }
+}
+@keyframes pet-nap-z {
+  0%   { opacity: 0; transform: translate(0, 0) scale(0.6); }
+  18%  { opacity: 0.95; }
+  70%  { opacity: 0.8; }
+  100% { opacity: 0; transform: translate(11px, -20px) scale(1.15); }
+}
+/* With reduced motion asked for, the sleeping cat shows one still z and the carried cat hangs
+   straight. */
+@media (prefers-reduced-motion: reduce) {
+  .pet-nap-zzz > span:first-child { opacity: 0.9; }
+  .pet-lean[data-lean] { rotate: none; }
+}

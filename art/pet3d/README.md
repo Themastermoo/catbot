@@ -83,6 +83,16 @@ square from its top left (`near` is the eye on the viewer's side, `far` the othe
 `marks_preview.png` shows both marks tinted at 256, 64, 32 and 16 px on a dark and a light
 ground, with the 256 one shrunk to 32 beside the simplified 32 for comparison.
 
+## The marks alive
+
+`{"mode": "marklife"}` renders each mark again as a strip of eight looks side by side, in the
+three passes: `marklife_<head|full>_<pass>_<256|64>.png`. The looks, left to right (`MARK_LOOKS`):
+resting, its blink, a glance to the near side, a glance to the far side, at work (ears pricked,
+eyes narrowed), its blink, waiting on the person (head tipped, one ear cocked, wide amber eyes),
+its blink. All eight share one framing, fitted round every look, so nothing jumps when the app
+steps between them (`mascots.css`, `.robot-looks`). `marklife.json` lists the files and
+`marklife_preview.png` shows them tinted.
+
 ## The design
 
 **Shape.** A long, low cat: deep chest, tucked waist, round hips, long tapering legs with small
@@ -150,6 +160,12 @@ All in place; the window does the travelling. Frames are 192 x 160 (2x).
 | `land` | 10 | 14 | once, then `idle` | Front paws first, deep soft crouch, up to standing. |
 | `drag` | 24 | 12 | loop | Held by the scruff: body hangs and swings, legs dangle, tail curls and swishes, eyes wide. |
 | `stretch` | 30 | 12 | once, then `idle` | Front paws out, chest to the floor, rump and tail high, a shiver, back up. An idle extra. |
+| `curl_up` | 14 | 12 | once, then `nap` | Stage 31. Standing to the long nap's curl: a low crouch, round and down, eyes closing. |
+| `nap` | 32 | 8 | loop | The long nap: curled tighter than `sleep`, nose on the paws, tail round to the nose; one slow breath, a tail-tip twitch, an ear flick. |
+| `wake` | 18 | 12 | once, then `idle` | An ear flicks, the head comes up half awake, the ears prick, up to standing. |
+| `dangle` | 24 | 12 | loop | Carried by the scruff: the whole cat swings under the hand, legs limp and a beat behind, tail streaming. The pet window also leans it behind the hand. |
+| `tail_chase` | 40 | 16 | once, then `idle` | Notices its tail and goes twice round on the spot after it (the pose key `spin` turns the whole cat), then a dizzy wobble. |
+| `look_around` | 36 | 12 | once, then `sit` | Sitting: a look round to the viewer, then away to the far side, eyes leading, each ear flicking once. |
 
 One-shots end exactly on the first frame's pose of what follows where that is `sit`, `sleep`
 or standing, so nothing snaps. `sit_down` and `lie_down` can be played backwards to get up.

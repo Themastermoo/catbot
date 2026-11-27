@@ -41,6 +41,7 @@ mod pair;
 mod events;
 mod live;
 mod mascots;
+mod cat_anim;
 mod notify;
 mod pictures;
 mod markdown;

@@ -720,6 +720,9 @@ def _stand():
         "np": 0.0, "ny": 0.0, "kp": 0.0, "ky": -16.0, "kr": 0.0,
         # ears, relative to the head: pitch (forward +) and roll (outward +)
         "en_p": 0.0, "en_r": 0.0, "ef_p": 0.0, "ef_r": 0.0,
+        # the whole cat, paws and all, turned about an upright line through its middle
+        # (SPIN_AT): 0 faces right, 360 is once round (the tail chase)
+        "spin": 0.0,
     }
     for leg, x in (("fn", 1.06), ("ff", 0.84), ("hn", -1.96), ("hf", -1.72)):
         p[leg + "_x"], p[leg + "_y"], p[leg + "_z"], p[leg + "_pp"] = x, 0.0, 0.0, 0.0
@@ -763,6 +766,7 @@ def mix(a, b, t):
     return {k: lerp(a[k], b[k], t) for k in a}
 
 
+SPIN_AT = -0.50                 # where the cat turns about when it spins (world x)
 ELBOW_POLE = (-1.0, 0.0, 0.8)   # elbows point back, and up when the leg is folded forward
 KNEE_POLE = (1.0, 0.0, 0.5)     # knees point forward
 
@@ -838,6 +842,11 @@ def solve(p):
         out[sh] = (basis(hock2 - K) @ basis(head_of(me) - head_of(sh)).T, K)
         out[me] = (R_me, hock2)
         out[paw] = (R_paw, hock2 + R_me @ (head_of(paw) - head_of(me)))
+
+    if p.get("spin"):   # the finished pose, turned as one piece
+        turn, about = RZ(p["spin"]), np.array([SPIN_AT, 0.0, 0.0])
+        out = {b: ((R, pos) if b == "root" else (turn @ R, turn @ (pos - about) + about))
+               for b, (R, pos) in out.items()}
     return out
 
 
@@ -1383,6 +1392,146 @@ def anim_researching(t):
     return p, face(blink_shape(t, 0.62), lx=look, ly=-2), lights(0.3, 0.3)
 
 
+# -- stage 31: a long nap, a dangle, a tail chase and a look around ------------------------------
+
+def hold(t, start, end, ramp):
+    """0, rising to 1 by `start`, staying until `end`, back to 0: each change takes `ramp`."""
+    return smooth((t - start + ramp) / ramp) * (1 - smooth((t - end) / ramp))
+
+
+def _curl():
+    """The long nap's curl: tighter than the loaf, nose down on the front paws, the tail brought
+    all the way round to the nose, ears eased out."""
+    p = P(LOAF, hy=30, wy=-32, cy=-36, ny=-52, np=40, kp=30, ky=-84, kr=16, hr=-10,
+          en_p=2, ef_p=2, en_r=24, ef_r=24,
+          tail=[-30, -10, -2, 0, 0, 2], tail_h=[55, 100, 142, 174, 198, 214])
+    hang_leg(p, "fn", 0.78, -0.44, dy=-0.62)
+    hang_leg(p, "ff", 0.92, -0.44, dy=-0.84)
+    hang_leg(p, "hn", 1.05, -0.52, mp=-74, dy=-0.14)
+    hang_leg(p, "hf", 1.00, -0.52, mp=-74, dy=0.08)
+    for leg in LEGS_FRONT + LEGS_HIND:
+        p[leg + "_z"] = 0.0
+    return p
+
+
+CURL = _curl()
+
+
+def anim_nap(t):
+    """The long nap: curled tight, one slow deep breath a loop, eyes dim arcs, ear lights all
+    but out; the tail tip twitches once and an ear flicks at a dream."""
+    b = 0.5 - 0.5 * math.cos(2 * math.pi * t)
+    p = P(CURL, hz=CURL["hz"] + 0.06 * b, cp=CURL["cp"] - 2.0 * b, wp=CURL["wp"] - 1.0 * b,
+          kp=CURL["kp"] - 1.0 * b, np=CURL["np"] - 0.8 * b)
+    p["ef_p"] = CURL["ef_p"] - 12 * bump(t, 0.70, 0.05)
+    p["te" + TIP] += 12 * bump(t, 0.34, 0.08)
+    p["th" + TIP] -= 10 * bump(t, 0.40, 0.08)
+    glow = 0.05 + 0.07 * b
+    return p, face("sleepy", hi=0.34 + 0.14 * b), lights(glow, glow)
+
+
+def anim_curl_up(t):
+    """Standing to the nap's curl: a low crouch, the rump goes down and round, the head follows
+    the tail in and the eyes close."""
+    low = mix(CROUCH, CURL, 0.5)
+    low = P(low, kp=low["kp"] - 8, hz=low["hz"] + 0.10)
+    nearly = P(mix(CROUCH, CURL, 0.88), kp=CURL["kp"] - 12)
+    p = keys(t, [(0.0, STAND), (0.28, CROUCH), (0.58, low), (0.84, nearly), (1.0, CURL)])
+    shape = "open" if t < 0.45 else ("squint" if t < 0.80 else "sleepy")
+    dim = 1.0 if t < 0.80 else 0.34
+    return p, face(shape, hi=dim), lights(0.22 * (1 - t) + 0.05, 0.22 * (1 - t) + 0.05)
+
+
+def anim_wake(t):
+    """Out of the nap: an ear flicks, the head comes up with the eyes half open, the ears prick,
+    and it pushes up to standing."""
+    up = P(CURL, np=CURL["np"] - 22, kp=-4, ky=-40, kr=4, ny=-24, en_p=10, ef_p=10, en_r=6, ef_r=6)
+    rise = P(mix(CROUCH, up, 0.35), kp=0, kr=0, en_p=8, ef_p=8)
+    p = keys(t, [(0.0, CURL), (0.12, CURL), (0.40, up), (0.52, up), (0.80, rise), (1.0, anim_idle(0.0)[0])])
+    p["en_p"] -= 14 * bump(t, 0.08, 0.06)
+    shape = "sleepy" if t < 0.16 else ("squint" if t < 0.34 else blink_shape(t, 0.46))
+    glow = 0.05 + 0.6 * bump(t, 0.50, 0.30) + 0.17 * smooth((t - 0.6) / 0.4)
+    return p, face(shape, hi=0.4 + 0.6 * smooth((t - 0.10) / 0.25)), lights(glow, glow)
+
+
+def anim_dangle(t):
+    """Carried about by the scruff: the whole cat swings like a pendulum under the hand, hind
+    end furthest, legs limp and a beat behind, tail streaming after them, ears back, eyes wide."""
+    sw = wave(t, 1)
+    lag = wave(t, 1, -0.16)
+    late = wave(t, 1, -0.30)
+    p = P(hp=-58 + 11 * sw, wp=7 + 5 * lag, cp=9 + 3 * lag, np=-14 + 4 * lag, kp=-6 + 3 * lag,
+          ky=-26, kr=6 * sw, en_p=-16 + 4 * late, ef_p=-16 + 4 * late, en_r=14, ef_r=14,
+          tail=[-74 + 12 * late, -54 + 18 * late, -26 + 24 * late, 6 + 26 * late, 36 + 24 * late, 58 + 20 * late])
+    for i in range(TAIL_N):
+        p["th%d" % (i + 1)] = 12 * (i + 1) / TAIL_N * wave(t, 1, 0.3)
+    pin(p, "chest", SCRUFF, DRAG_ANCHOR)
+    hang_leg(p, "fn", 0.62 + 0.26 * lag, -1.50, pp=50 + 12 * lag)
+    hang_leg(p, "ff", 0.40 + 0.26 * late, -1.62, pp=44 + 12 * late)
+    hang_leg(p, "hn", 0.78 + 0.36 * lag, -1.46, pp=46 + 14 * lag, mp=14 + 12 * lag)
+    hang_leg(p, "hf", 0.50 + 0.36 * late, -1.58, pp=40 + 14 * late, mp=10 + 12 * late)
+    return p, face(blink_shape(t, 0.72, base="wide"), lx=int(round(sw)), ly=1), lights(0.45, 0.45)
+
+
+def _chase_pose(u, steps):
+    """The tail chase's running pose, `u` 0..1 through the spin: the spine bent in a C towards
+    the near side, head round after the tail, the tail curled just out of reach, and the paws
+    pattering in diagonal pairs, `steps` each."""
+    p = P(hz=-0.30, hp=4, hy=16, wy=-24, cy=-28, ny=-46, np=14, kp=10, ky=-96, kr=8,
+          en_p=12, ef_p=12, tail=[6, 10, 14, 18, 22, 26], tail_h=[30, 62, 92, 118, 138, 150])
+    patter = wave(u, steps)
+    for leg, dx, dy, side in (("fn", 0.10, -0.52, 1), ("ff", 0.22, -0.40, -1),
+                              ("hn", 0.20, 0.12, -1), ("hf", 0.10, 0.20, 1)):
+        hang_leg(p, leg, dx, -2.0, dy=dy)
+        lift = max(0.0, side * patter)
+        p[leg + "_z"] = 0.34 * lift
+        p[leg + "_pp"] = 20 * lift
+        if leg in LEGS_HIND:
+            p[leg + "_mp"] = 10 * lift
+    p["te" + TIP] += 16 * wave(u, steps, 0.2)
+    p["th" + TIP] += 14 * wave(u, steps, 0.45)
+    p["hz"] += 0.05 * wave(u, steps * 2)
+    return p
+
+
+def anim_tail_chase(t):
+    """It notices its tail, and goes after it: twice round on the spot, paws pattering, then a
+    stop, a dizzy wobble of the head and back to standing."""
+    stand = anim_idle(0.0)[0]
+    into = smooth(t / 0.16)
+    out = 1 - smooth((t - 0.84) / 0.16)
+    u = min(1.0, max(0.0, (t - 0.12) / 0.72))
+    p = mix(stand, _chase_pose(u, 6), min(into, out))
+    turn = u * u * (3 - 2 * u)
+    p["spin"] = -720.0 * turn
+    dizzy = bump(t, 0.92, 0.09)
+    p["kr"] += 12 * dizzy * wave(t, 8)
+    p["ky"] += 8 * dizzy * wave(t, 8, 0.25)
+    shape = "wide" if 0.06 < t < 0.84 else ("squint" if t < 0.95 and t >= 0.84 else "open")
+    return p, face(shape, lx=-1 if t < 0.84 else 0), lights(0.7 * min(into, out) + 0.22, 0.7 * min(into, out) + 0.22)
+
+
+def anim_look_around(t):
+    """Sitting, it looks about: round towards the viewer, back, then away to the far side, the
+    eyes leading the head each time; the ears prick and each flicks once."""
+    near = hold(t, 0.16, 0.34, 0.12)
+    far = hold(t, 0.56, 0.74, 0.12)
+    p = _sit_idle(t)
+    p["ky"] = SIT["ky"] - 46 * near + 27 * far
+    p["ny"] = -14 * near + 8 * far
+    p["kr"] = -7 * near + 6 * far
+    p["kp"] = SIT["kp"] - 5 * (near + far)
+    alert = max(near, far)
+    flick_n, flick_f = bump(t, 0.30, 0.045), bump(t, 0.68, 0.045)
+    p["en_p"], p["en_r"] = 9 * alert - 16 * flick_n, 10 * flick_n
+    p["ef_p"], p["ef_r"] = 9 * alert - 16 * flick_f, 10 * flick_f
+    look = -1 if 0.03 < t < 0.20 else (1 if 0.42 < t < 0.60 else 0)
+    shape = blink_shape(t, 0.455, span=0.04)
+    if shape == "open":
+        shape = blink_shape(t, 0.90, span=0.04)
+    return p, face(shape, lx=look), lights(0.22 + 0.3 * alert, 0.22 + 0.3 * alert)
+
+
 # What each animation shows besides the cat: the prop sets (build_props) it needs.
 ANIM_PROPS = {"coding": ("desk",), "designing": ("drafting",), "researching": ("book",)}
 
@@ -1415,6 +1564,13 @@ ANIMATIONS = {
     "coding": (anim_coding, 24, 12, True, None),
     "designing": (anim_designing, 32, 12, True, None),
     "researching": (anim_researching, 36, 12, True, None),
+    # stage 31
+    "curl_up": (anim_curl_up, 14, 12, False, "nap"),
+    "nap": (anim_nap, 32, 8, True, None),
+    "wake": (anim_wake, 18, 12, False, "idle"),
+    "dangle": (anim_dangle, 24, 12, True, None),
+    "tail_chase": (anim_tail_chase, 40, 16, False, "idle"),
+    "look_around": (anim_look_around, 36, 12, False, "sit"),
 }
 
 # What the app's poses (data-pet) play: an optional one-shot intro, then the animation.
@@ -1426,13 +1582,18 @@ POSES = {
     "stretch": ("stretch", "idle"), "groom": ("groom", "sit"), "yawn": ("yawn", "idle"),
     "wave": ("wave", "idle"), "crouch": (None, "crouch"), "coding": (None, "coding"),
     "designing": (None, "designing"), "researching": (None, "researching"),
+    # stage 31
+    "nap": ("curl_up", "nap"), "wake": ("wake", "idle"), "dangle": (None, "dangle"),
+    "chase": ("tail_chase", "idle"), "look": ("look_around", "sit"),
 }
 
 # The frame of each animation shown in the preview (0..1 through it).
 KEY_FRAME = {"idle": 0.0, "walk": 0.19, "sit_down": 0.5, "sit": 0.0, "lie_down": 0.5, "sleep": 0.5,
              "working": 0.25, "waiting": 0.34, "happy": 0.25, "jump": 0.62, "air": 0.0, "land": 0.33,
              "drag": 0.25, "stretch": 0.5, "groom": 0.62, "yawn": 0.42, "wave": 0.45, "crouch": 0.0,
-             "coding": 0.08, "designing": 0.30, "researching": 0.85}
+             "coding": 0.08, "designing": 0.30, "researching": 0.85,
+             "curl_up": 0.6, "nap": 0.5, "wake": 0.45, "dangle": 0.25, "tail_chase": 0.4,
+             "look_around": 0.25}
 
 
 def frame_time(name, i):
@@ -2296,6 +2457,115 @@ def render_marks(pet, rnd, cfg, out_dir):
     log("wrote marks.json, marks_preview.png and %d mark images" % (len(MARK_VIEWS) * len(MARK_SIZES) * 3))
 
 
+# The marks alive (stage 31): each mark again as a strip of eight looks, so the app can make a
+# bot's picture blink, glance, prick its ears at work and look a question while it waits.
+MARK_LOOKS = ("idle", "idle_blink", "glance_near", "glance_far", "working", "working_blink",
+              "waiting", "waiting_blink")
+
+
+def mark_look(kind, small, look):
+    """One look of a mark: (pose, face, ear lights)."""
+    base = mark_pose(kind, small)
+    out = base["en_r"]
+    blink = look.endswith("_blink")
+    if look.startswith("working"):     # ears pricked up and forward, eyes narrowed on the job
+        pose = P(base, en_p=base["en_p"] + 9, ef_p=base["ef_p"] + 9, en_r=out - 9, ef_r=out - 9)
+        return pose, face("blink" if blink else "half", sweep=None if blink else 0, lo=0.5, big=small), lights(1.0, 1.0)
+    if look.startswith("waiting"):     # head tipped, one ear cocked, eyes wide and amber
+        pose = P(base, kr=base["kr"] + 9, en_p=base["en_p"] + 8, en_r=out - 8, ef_p=base["ef_p"] - 6, ef_r=out + 8)
+        return pose, face("blink" if blink else "wide", color=AMBER, big=small), lights(1.0, 1.0, AMBER)
+    shift = {"glance_near": -2, "glance_far": 2}.get(look, 0)
+    return base, face("blink" if blink else "open", lx=shift, big=small), lights(1.0, 1.0)
+
+
+def _all_points(parts, poses, pick=lambda part: True):
+    return np.vstack([skinned(p, solve(pose)) for pose in poses for p in parts if len(p.verts) and pick(p)])
+
+
+def render_marklife(pet, rnd, cfg, out_dir):
+    """The marks as strips of looks (MARK_LOOKS), left to right, in the three passes:
+    `marklife_<head|full>_<pass>_<256|64>.png`. Every look of a mark shares one framing, fitted
+    round all of them, so nothing jumps when the app steps from one to the next."""
+    passes = ["base", "mask", "gloss"]
+    listing = {"passes": passes, "looks": list(MARK_LOOKS), "files": {}}
+    for kind, (yaw, pitch) in MARK_VIEWS.items():
+        listing["files"][kind] = {}
+        for size in MARK_SIZES:
+            small = size < 128
+
+            def wanted(part, small=small, kind=kind):
+                if kind == "head" and (not set(part.weights) <= ICON_HEAD_BONES or part.name == "neck_joint"):
+                    return False
+                return not (small and part.name in MARK_FINE)
+
+            pet.show(wanted, extras=small)
+            looks = [mark_look(kind, small, look) for look in MARK_LOOKS]
+            poses = [pose for pose, _, _ in looks]
+            seen = [part for _, part in pet.parts if wanted(part) and (small or part.name not in pet.extras)]
+            right, up, _ = camera_axes(yaw, pitch)
+            if kind == "full":
+                # as fit_head_crop, but round the head in every look
+                head = _all_points(seen, poses, lambda p: set(p.weights) <= {"head", "ear_n", "ear_f"})
+                body = _all_points(seen, poses, lambda p: not any(b.startswith("tail") for b in p.weights))
+                hu, hv = head @ right, head @ up
+                units = (hv.max() - hv.min()) / MARK_FULL_HEAD
+                top = hv.max() + 0.03 * units
+                bu, bv = body @ right, body @ up
+                inside = bu[bv >= top - units]
+                cu = (inside.min() + inside.max()) / 2
+                lo, hi = hu.max() + 0.03 * units - units / 2, hu.min() - 0.03 * units + units / 2
+                cu = min(max(cu, lo), hi) if lo <= hi else (hu.min() + hu.max()) / 2
+                centre = body.mean(axis=0)
+                target = centre + right * (cu - centre @ right) + up * (top - units / 2 - centre @ up)
+            else:
+                pts = _all_points(seen, poses)
+                u, v = pts @ right, pts @ up
+                centre = pts.mean(axis=0)
+                target = centre + right * ((u.min() + u.max()) / 2 - centre @ right) + up * ((v.min() + v.max()) / 2 - centre @ up)
+                units = max(u.max() - u.min(), v.max() - v.min()) * 1.06
+            over_sample = 8 if small else 1
+            aim_camera(pet.scene, (size * over_sample, size * over_sample), yaw, pitch, units_w=units,
+                       target=tuple(target))
+            sheets = {p: np.zeros((size, size * len(MARK_LOOKS), 4)) for p in passes}
+            for i, (pose, face_spec, light_spec) in enumerate(looks):
+                got = render_passes(pet, rnd, pose, face_spec, light_spec, passes)
+                mask = np.dstack([np.ones(got["mask"].shape + (3,)), got["mask"]])
+                images = {"base": got["base"], "mask": mask, "gloss": got["gloss"]}
+                for _ in range(3 if small else 0):
+                    images = {p: halve(img) for p, img in images.items()}
+                if kind == "head" and touches_edge(images["base"][..., 3]):
+                    log("WARNING: the %s mark's %s look at %d px touches the edge" % (kind, MARK_LOOKS[i], size))
+                for p in passes:
+                    sheets[p][:, i * size:(i + 1) * size] = images[p]
+            listing["files"][kind][str(size)] = {}
+            for p in passes:
+                name = "marklife_%s_%s_%d.png" % (kind, p, size)
+                write_png(os.path.join(out_dir, name), to_bytes(sheets[p]))
+                listing["files"][kind][str(size)][p] = name
+            log("marklife: %s %3d px, %d looks" % (kind, size, len(MARK_LOOKS)))
+    pet.show(lambda part: True)
+    with open(os.path.join(out_dir, "marklife.json"), "w") as fh:
+        json.dump(listing, fh, indent=2)
+        fh.write("\n")
+
+    # a look at them tinted: the big strips, and the small ones at twice their size
+    tint = np.array(PREVIEW_TINTS["purple"], float) / 255.0
+    sheet = np.zeros((2 * (256 + 128 + 24), 256 * len(MARK_LOOKS), 3))
+    sheet[:] = PREVIEW_BG
+    for row, kind in enumerate(MARK_VIEWS):
+        y = row * (256 + 128 + 24)
+        for size in MARK_SIZES:
+            got = {p: rnd.read(os.path.join(out_dir, listing["files"][kind][str(size)][p])) for p in passes}
+            img = tinted(got["base"], got["mask"][..., 3], got["gloss"], tint)
+            if size == 64:
+                img = np.repeat(np.repeat(img, 2, axis=0), 2, axis=1)
+                over(sheet, img, 0, y + 256 + 8)
+            else:
+                over(sheet, img, 0, y)
+    write_png(os.path.join(out_dir, "marklife_preview.png"), to_bytes(np.dstack([sheet, np.ones(sheet.shape[:2])])))
+    log("wrote marklife.json, marklife_preview.png and %d strips" % (len(MARK_VIEWS) * len(MARK_SIZES) * 3))
+
+
 def bake_actions(pet, out_dir):
     """Key every animation into its own Action and save the scene, so the rig can be opened and
     played in Blender. The sprite renders do not depend on this."""
@@ -2338,8 +2608,8 @@ def main():
         with open(args["--config"]) as fh:
             cfg = json.load(fh)
     mode = cfg.get("mode", "preview")
-    if mode not in ("preview", "full", "icon", "marks"):
-        raise ValueError("\"mode\" must be \"preview\", \"full\", \"icon\" or \"marks\", not %r" % mode)
+    if mode not in ("preview", "full", "icon", "marks", "marklife"):
+        raise ValueError("\"mode\" must be \"preview\", \"full\", \"icon\", \"marks\" or \"marklife\", not %r" % mode)
     out_dir = os.path.abspath(args["--out"])
     os.makedirs(out_dir, exist_ok=True)
     log("Blender %s, mode %s, output %s" % (bpy.app.version_string, mode, out_dir))
@@ -2369,6 +2639,8 @@ def main():
         render_icon(pet, rnd, cfg, out_dir)
     elif mode == "marks":
         render_marks(pet, rnd, cfg, out_dir)
+    elif mode == "marklife":
+        render_marklife(pet, rnd, cfg, out_dir)
     else:
         anims, frame, scale, passes = render_full(pet, rnd, cfg, out_dir)
         if cfg.get("only"):

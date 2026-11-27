@@ -129,3 +129,143 @@
   50%, 80% { translate: var(--scan-b) 0; }
   100% { translate: var(--scan-a) 0; }
 }
+
+/* ==== Stage 31: ears, the "?", the hop, the robot cat's looks, and the small sprite cats. ====
+ *
+ *   .cat-ear-l / .cat-ear-r     a drawn cat's ears again, behind its head: stretched from their
+ *                               roots while the bot works (both) or waits (one, cocked)
+ *   .cat-ask                    the "?" beside a cat that waits on the person
+ *   [data-hop]                  set by mascots.rs when the bot has just finished: one small hop
+ *   .catbot-robot .robot-looks  the robot cat's eight rendered looks side by side; slid to the
+ *                               one for the state, a glance (data-glance) or a blink
+ *   .cat-strip-box / .cat-strip a pet sprite sheet drawn small (src/cat_anim.rs)
+ *   .paw-pass                   the paw print that crosses a hand-off chip
+ *
+ * As above, nothing loops that doesn't have to: the ears and the "?" move once when the state
+ * changes; the hop and a blink are one-shot; only the typing cat, the waving cat and a hand-off
+ * still at work keep running, and they pause with the rest under data-cats-rest. */
+
+/* ---- Ears. Each cat's ear roots, in its 64-unit drawing. ---- */
+.catbot-mark[data-mark="cat-head"] { --ear-y: 23px; --ear-lx: 15px; --ear-rx: 49px; }
+.catbot-mark[data-mark="cat-sitting"] { --ear-y: 13px; --ear-lx: 17px; --ear-rx: 39px; }
+.catbot-mark[data-mark="cat-visor"] { --ear-y: 18px; --ear-lx: 14px; --ear-rx: 50px; }
+.cat-ear-l { transform-origin: var(--ear-lx, 16px) var(--ear-y, 20px); }
+.cat-ear-r { transform-origin: var(--ear-rx, 48px) var(--ear-y, 20px); }
+.catbot-mark[data-state="working"] .cat-ear-l { scale: 1 1.26; rotate: 3deg; }
+.catbot-mark[data-state="working"] .cat-ear-r { scale: 1 1.26; rotate: -3deg; }
+/* Waiting: one ear up, as a cat asks. */
+.catbot-mark[data-state="waiting"] .cat-ear-l { scale: 1 1.3; rotate: -5deg; }
+
+/* ---- The "?". Drawn cats: a letter in the picture's top corner, edged so it reads on any
+   skin. The robot cat: the same, as a label over its picture. ---- */
+.cat-ask { opacity: 0; pointer-events: none; }
+svg.catbot-mark { overflow: visible; }
+svg.catbot-mark .cat-ask {
+  font-family: ui-rounded, system-ui, sans-serif;
+  stroke: var(--color-app, #ffffff); stroke-width: 4px; paint-order: stroke; stroke-linejoin: round;
+  transform-origin: 56px 12px;
+}
+.catbot-robot > .cat-ask {
+  position: absolute; top: -4%; right: 2%; line-height: 1; font-weight: 800;
+  font-family: ui-rounded, system-ui, sans-serif;
+  -webkit-text-stroke: 0.14em var(--color-app, #ffffff); paint-order: stroke;
+  transform-origin: 50% 60%;
+}
+.catbot-mark[data-state="waiting"] .cat-ask { opacity: 1; }
+
+/* ---- The robot cat's looks: a strip eight pictures wide; an eighth of it is one look. ---- */
+.robot-looks { position: absolute; top: 0; left: 0; width: 800%; height: 100%; translate: var(--look, 0%) 0; }
+.catbot-robot[data-state="working"] .robot-looks { --look: -50%; }
+.catbot-robot[data-state="waiting"] .robot-looks { --look: -75%; }
+.catbot-robot[data-state="idle"][data-glance="near"] .robot-looks { --look: -25%; }
+.catbot-robot[data-state="idle"][data-glance="far"] .robot-looks { --look: -37.5%; }
+
+/* ---- A pet sprite sheet, small: the box shows part of one frame, the strip steps under it. ---- */
+.cat-strip-box { position: relative; display: inline-block; flex: none; overflow: hidden; width: var(--bw); height: var(--bh); pointer-events: none; }
+.cat-strip {
+  position: absolute; display: block; left: var(--ox, 0px); top: var(--oy, 0px);
+  width: calc(var(--frames) * var(--fw)); height: var(--fh);
+  isolation: isolate;
+  -webkit-mask: var(--base) 0 0 / 100% 100% no-repeat;
+          mask: var(--base) 0 0 / 100% 100% no-repeat;
+  /* The frame held when nothing may move. */
+  transform: translateX(calc(var(--still, 0) * var(--fw) * -1));
+}
+.cat-strip > span { position: absolute; display: block; inset: 0; background-size: 100% 100%; }
+.cat-strip-base { background-image: var(--base); }
+.cat-strip-tint {
+  background: var(--tint); mix-blend-mode: multiply;
+  -webkit-mask: var(--mask) 0 0 / 100% 100% no-repeat;
+          mask: var(--mask) 0 0 / 100% 100% no-repeat;
+}
+.cat-strip-gloss { background-image: var(--gloss); mix-blend-mode: screen; }
+
+/* ---- The paw that passes a hand-off along. ---- */
+.paw-pass { position: relative; display: inline-block; flex: none; width: 26px; height: 12px; color: var(--color-ink-tertiary, currentColor); }
+.paw-pass-paw { position: absolute; top: 0; left: 0; rotate: 90deg; translate: 7px 0; opacity: 0.85; }
+.paw-pass[data-going="false"] .paw-pass-paw { translate: 14px 0; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .cat-ear { transition: scale 220ms cubic-bezier(0.3, 1.6, 0.6, 1), rotate 220ms ease-out; }
+  .catbot-mark[data-state="waiting"] .cat-ask { animation: cat-ask-pop 420ms cubic-bezier(0.3, 1.5, 0.6, 1) both; }
+
+  /* One hop for a job done, then the slow breath again. */
+  .catbot-mark[data-hop] {
+    animation: cat-done-hop 640ms linear 1, cat-breathe calc(2600ms * var(--cat-k)) 640ms infinite alternate;
+  }
+  .catbot-mark[data-mark="letter"][data-hop] { animation-name: cat-done-hop, cat-pulse; }
+  [data-bot-picture][data-hop] { animation: cat-done-hop 640ms linear 1; transform-origin: 50% 100%; }
+
+  /* The robot cat's blink: to the look next along (the same look, eyes shut) and back. */
+  .catbot-robot[data-blink] .robot-looks { animation: robot-blink 320ms step-end; }
+  .catbot-robot[data-state="idle"][data-glance][data-blink] .robot-looks { animation-name: robot-blink-idle; }
+
+  .cat-strip[data-play="loop"] { animation: cat-strip-loop var(--dur) steps(var(--frames)) infinite; }
+  .cat-strip[data-play="once"] { animation: cat-strip-once var(--dur) steps(var(--frames), jump-none) 1 forwards; }
+  [data-cats-rest] .cat-strip { animation-play-state: paused !important; }
+
+  .paw-pass[data-going="true"] .paw-pass-paw { animation: paw-pass 1500ms ease-in-out infinite; }
+  .paw-pass[data-going="false"] .paw-pass-paw { animation: paw-pass-once 700ms ease-out 1 both; }
+  [data-cats-rest] .paw-pass-paw { animation-play-state: paused !important; }
+}
+
+@keyframes cat-ask-pop {
+  0% { opacity: 0; scale: 0.3; rotate: -20deg; }
+  100% { opacity: 1; scale: 1; rotate: 0deg; }
+}
+/* Down a little, up, down, a small second bounce (the squash only below rest, as cat-bob). */
+@keyframes cat-done-hop {
+  0% { translate: 0 0; scale: 1 1; animation-timing-function: ease-out; }
+  14% { translate: 0 0; scale: 1.06 0.9; animation-timing-function: cubic-bezier(0.2, 0.7, 0.4, 1); }
+  42% { translate: 0 -16%; scale: 0.97 1.04; animation-timing-function: cubic-bezier(0.6, 0, 0.8, 0.4); }
+  66% { translate: 0 0; scale: 1.05 0.93; animation-timing-function: ease-out; }
+  82% { translate: 0 -4%; scale: 1 1; animation-timing-function: ease-in; }
+  100% { translate: 0 0; scale: 1 1; }
+}
+@keyframes robot-blink {
+  0%, 70%, 100% { translate: var(--look, 0%) 0; }
+  15% { translate: calc(var(--look, 0%) - 12.5%) 0; }
+}
+@keyframes robot-blink-idle {
+  0%, 70%, 100% { translate: var(--look, 0%) 0; }
+  15% { translate: -12.5% 0; }
+}
+@keyframes cat-strip-loop {
+  from { transform: translateX(0); }
+  to { transform: translateX(-100%); }
+}
+@keyframes cat-strip-once {
+  from { transform: translateX(0); }
+  to { transform: translateX(calc(-100% + var(--fw))); }
+}
+/* In at the giver's side, across, out at the taker's. */
+@keyframes paw-pass {
+  0% { translate: 0 0; opacity: 0; }
+  20% { opacity: 0.9; }
+  75% { opacity: 0.9; }
+  100% { translate: 14px 0; opacity: 0; }
+}
+@keyframes paw-pass-once {
+  0% { translate: 0 0; opacity: 0; }
+  100% { translate: 14px 0; opacity: 0.85; }
+}
