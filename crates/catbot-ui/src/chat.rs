@@ -1414,6 +1414,7 @@ fn PinnedNotes(text: String) -> Element {
 /// it into the running turn when its AI can take it (stage 29.14).
 #[component]
 fn HeldNote(thread: String, message: String, steerable: bool) -> Element {
+    let (unsend_thread, unsend_message) = (thread.clone(), message.clone());
     let mut busy = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
     rsx! {
@@ -1439,6 +1440,25 @@ fn HeldNote(thread: String, message: String, steerable: bool) -> Element {
                         },
                         if busy() { "Steering…" } else { "Steer now" }
                     }
+                }
+                // Taken back before the bot reads it (Moo, 2026-11-27).
+                button {
+                    r#type: "button",
+                    "data-unsend": true,
+                    disabled: busy(),
+                    title: "Delete this message before it's sent",
+                    "aria-label": "Delete this message before it's sent",
+                    class: "flex size-5 items-center justify-center rounded-full text-ink-tertiary hover:bg-raised hover:text-danger disabled:opacity-40",
+                    onclick: move |_| {
+                        let (thread, message) = (unsend_thread.clone(), unsend_message.clone());
+                        spawn(async move {
+                            busy.set(true);
+                            let body = serde_json::json!({ "messageId": message });
+                            problem.set(api::call("POST", &format!("/api/threads/{thread}/unsend"), Some(&body)).await.err());
+                            busy.set(false);
+                        });
+                    },
+                    crate::sidebar::Icon { name: "x", size: 12 }
                 }
             }
             if let Some(err) = problem() {

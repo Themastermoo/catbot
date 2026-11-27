@@ -222,6 +222,15 @@ impl State {
                     entry.since.drain(..extra);
                 }
             }
+            // A waiting message taken back before it went (Moo, 2026-11-27).
+            Some("message.removed") => {
+                let thread = frame["threadId"].as_str().unwrap_or_default();
+                let id = frame["messageId"].as_str().unwrap_or_default();
+                if let Some(entry) = self.threads.get_mut(thread) {
+                    entry.messages.retain(|m| m.id != id);
+                    entry.since.retain(|m| m.id != id);
+                }
+            }
             Some("runtime") => {
                 let event = &frame["event"];
                 let thread = event["threadId"].as_str().unwrap_or_default();
@@ -401,6 +410,15 @@ mod tests {
         // Loaded: frames go straight in.
         s.apply(&said("cb-4", "fourth"));
         assert_eq!(s.threads["t1"].messages.len(), 4);
+    }
+
+    #[test]
+    fn a_message_taken_back_leaves_the_chat() {
+        let mut s = state();
+        let page = |id: &str, text: &str| crate::chat::Msg::from_wire(&json!({ "id": id, "at": 1.0, "role": "user", "kind": "text", "text": text })).unwrap();
+        s.loaded("t1", vec![page("cb-1", "keep"), page("cb-2", "take back")], false, false);
+        s.apply(&json!({ "kind": "message.removed", "threadId": "t1", "messageId": "cb-2" }));
+        assert_eq!(s.threads["t1"].messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["cb-1"]);
     }
 
     #[test]

@@ -420,6 +420,37 @@ async fn a_waiting_message_can_be_steered_into_the_running_turn() {
 }
 
 #[tokio::test]
+async fn a_waiting_message_can_be_taken_back_before_it_goes() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Palette" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "approve", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+
+    // Sent while it works, then taken back: out of the chat, everywhere, and only once.
+    let (_, sent) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "never mind this", "threadId": thread }))).await;
+    let id = sent["message"]["id"].as_str().unwrap().to_string();
+    let (status, answer) = s.call("POST", &format!("/api/threads/{thread}/unsend"), Some(json!({ "messageId": id }))).await;
+    assert_eq!(status, 200, "{answer}");
+    until(&mut events, "removed", |f| f["kind"] == "message.removed" && f["messageId"] == id.as_str()).await;
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/unsend"), Some(json!({ "messageId": id }))).await.0, 409, "once");
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/steer"), Some(json!({ "messageId": id }))).await.0, 409, "and it can't be steered in");
+
+    // The turn ends with nothing waiting: no second turn, and the words are gone.
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == bot.as_str() && f["bot"]["activity"] == "idle").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=20"), None).await;
+    let messages = page["messages"].as_array().unwrap();
+    assert!(!messages.iter().any(|m| m["text"] == "never mind this"), "{page}");
+    assert_eq!(messages.iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").count(), 1, "{page}");
+}
+
+#[tokio::test]
 async fn bots_become_desktop_pets_when_ticked() {
     let s = setup().await;
     let (_, pets) = s.call("GET", "/api/pets", None).await;

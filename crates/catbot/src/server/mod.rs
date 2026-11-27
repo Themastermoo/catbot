@@ -1193,23 +1193,35 @@ pub fn mark_held(app: &App, thread: &str, id: i64, steered: Option<bool>) {
     }
 }
 
+/// Takes a message out of those waiting in a chat (held under the chat, or for a channel under
+/// the channel): the key it was under, where it was, and its words. None once it has gone.
+fn take_held(app: &App, thread: &str, id: i64) -> Option<(String, usize, String)> {
+    let channel = app.with_store(|store| store.conversation(thread)).flatten().and_then(|c| c.channel_id);
+    let key = channel.unwrap_or_else(|| thread.to_string());
+    let mut held = app.held.lock().expect("held lock");
+    let list = held.get_mut(&key)?;
+    let at = list.iter().position(|(m, _)| *m == id)?;
+    let (_, text) = list.remove(at);
+    Some((key, at, text))
+}
+
+/// `POST /api/threads/:thread/unsend` `{ messageId }` (Moo, 2026-11-27): a message still waiting
+/// for the turn to end is taken back, out of the chat, before the bot reads it.
+fn unsend(app: &Arc<App>, thread: &str, body: &Value) -> Answer {
+    let id = body["messageId"].as_str().and_then(wire::parse_message_id).ok_or_else(|| bad("which message?"))?;
+    if take_held(app, thread, id).is_none() {
+        return Err((StatusCode::CONFLICT, "that message has gone to the bot already".into()));
+    }
+    app.try_store(|store| store.delete_message(thread, id)).map_err(fail)?;
+    app.hub.send(json!({ "kind": "message.removed", "threadId": thread, "messageId": wire::message_id(id) }));
+    Ok((StatusCode::OK, json!({ "ok": true })))
+}
+
 /// `POST /api/threads/:thread/steer` `{ messageId }` (stage 29.14): a message waiting for the
 /// turn to end goes into the running turn now, if its AI can take it. If not, it keeps waiting.
 async fn steer(app: &Arc<App>, thread: &str, body: &Value) -> Answer {
     let id = body["messageId"].as_str().and_then(wire::parse_message_id).ok_or_else(|| bad("which message?"))?;
-    // Held under the chat, or for a channel under the channel.
-    let channel = app.with_store(|store| store.conversation(thread)).flatten().and_then(|c| c.channel_id);
-    let key = channel.unwrap_or_else(|| thread.to_string());
-    let taken = {
-        let mut held = app.held.lock().expect("held lock");
-        let list = held.get_mut(&key);
-        let at = list.as_ref().and_then(|l| l.iter().position(|(m, _)| *m == id));
-        match (list, at) {
-            (Some(list), Some(at)) => Some((at, list.remove(at))),
-            _ => None,
-        }
-    };
-    let Some((at, (_, text))) = taken else {
+    let Some((key, at, text)) = take_held(app, thread, id) else {
         return Err((StatusCode::CONFLICT, "that message isn't waiting any more".into()));
     };
     let put_back = |why: String| {
@@ -1458,6 +1470,10 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
         (Method::POST, ["steer"]) => {
             let body = json_body(req).await?;
             steer(app, thread, &body).await
+        }
+        (Method::POST, ["unsend"]) => {
+            let body = json_body(req).await?;
+            unsend(app, thread, &body)
         }
         (Method::POST, ["respond"]) => {
             let body = json_body(req).await?;

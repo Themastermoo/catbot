@@ -1399,6 +1399,11 @@ impl Store {
     }
 
     /// Replaces a message's detail (a card being answered).
+    /// Takes a message out of its conversation. Whether it was there.
+    pub fn delete_message(&self, conversation_id: &str, id: i64) -> Result<bool, BoxError> {
+        Ok(self.conn.execute("DELETE FROM messages WHERE conversation_id = ?1 AND id = ?2", params![conversation_id, id])? > 0)
+    }
+
     pub fn update_detail(&self, id: i64, detail: &Value) -> Result<(), BoxError> {
         self.conn.execute("UPDATE messages SET detail = ?2 WHERE id = ?1", params![id, detail.to_string()])?;
         Ok(())
