@@ -287,6 +287,8 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
                     for thread in state.threads.values_mut() {
                         thread.loaded = false;
                         thread.live = None;
+                        // What was set aside may be missing what came while disconnected: the fetch brings it.
+                        thread.since.clear();
                     }
                     problem.set(None);
                     listed.set(true);

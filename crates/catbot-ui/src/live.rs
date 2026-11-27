@@ -18,9 +18,13 @@ pub struct Thread {
     pub messages: Vec<Msg>,
     /// Whether there are earlier messages to load.
     pub more: bool,
-    /// Whether its messages have been fetched. Until then, saved-message frames are skipped
-    /// (the fetch brings them), but a running turn is still followed.
+    /// Whether its messages have been fetched. Until then, saved-message frames wait in `since`
+    /// (a running turn is still followed).
     pub loaded: bool,
+    /// Messages and changes that came while it wasn't loaded. The fetch may have been answered
+    /// before they were saved, so they're laid over it when it comes (a chat used to open with
+    /// its newest lines missing).
+    pub since: Vec<Msg>,
     /// The turn running now, if one is.
     pub live: Option<Live>,
 }
@@ -105,7 +109,24 @@ impl State {
             all.append(&mut entry.messages);
             entry.messages = all;
         } else {
-            entry.messages = page;
+            let mut all = page;
+            // What came while it loaded: a newer version of a message in the page, or a message
+            // newer than any in it. (Older ones the page has, as it stands now.)
+            let newest = all.iter().filter_map(|m| order(&m.id)).max().unwrap_or(0);
+            for late in std::mem::take(&mut entry.since) {
+                match all.iter_mut().find(|m| same_message(m, &late)) {
+                    Some(there) => *there = late,
+                    None if order(&late.id).is_none_or(|n| n > newest) => all.push(late),
+                    None => {}
+                }
+            }
+            // The person's messages still on their way stay in view.
+            for sending in entry.messages.drain(..).filter(|m| m.id.starts_with("optimistic-")) {
+                if !all.iter().any(|m| same_message(m, &sending)) {
+                    all.push(sending);
+                }
+            }
+            entry.messages = all;
         }
         entry.more = more;
         entry.loaded = true;
@@ -170,15 +191,17 @@ impl State {
                     bot.note_message(&frame["message"]);
                 }
                 let Some(message) = Msg::from_wire(&frame["message"]) else { return After::Nothing };
-                let Some(entry) = self.threads.get_mut(thread).filter(|t| t.loaded) else { return After::Nothing };
-                let same = |m: &Msg| {
-                    m.id == message.id
-                        || (m.id.starts_with("optimistic-") && message.send_id.is_some() && m.send_id == message.send_id)
-                };
-                match entry.messages.iter_mut().find(|m| same(m)) {
+                let entry = self.threads.entry(thread.to_string()).or_default();
+                // Not loaded (yet): kept for when its fetch comes.
+                let list = if entry.loaded { &mut entry.messages } else { &mut entry.since };
+                match list.iter_mut().find(|m| same_message(m, &message)) {
                     Some(existing) => *existing = message,
-                    None if kind == "message" => entry.messages.push(message),
+                    None if kind == "message" || !entry.loaded => list.push(message),
                     None => {}
+                }
+                if !entry.loaded && entry.since.len() > SINCE_MAX {
+                    let extra = entry.since.len() - SINCE_MAX;
+                    entry.since.drain(..extra);
                 }
             }
             Some("runtime") => {
@@ -227,6 +250,21 @@ impl State {
         }
         After::Nothing
     }
+}
+
+/// How many changes a chat that isn't loaded keeps for its fetch.
+const SINCE_MAX: usize = 200;
+
+/// The same message: by id, or the saved one for a message still on its way (by its sendId).
+fn same_message(m: &Msg, other: &Msg) -> bool {
+    m.id == other.id
+        || (m.id.starts_with("optimistic-") && other.send_id.is_some() && m.send_id == other.send_id)
+        || (other.id.starts_with("optimistic-") && m.send_id.is_some() && m.send_id == other.send_id)
+}
+
+/// A saved message's place in its chat ("cb-12" is 12); none for one still on its way.
+fn order(id: &str) -> Option<i64> {
+    id.strip_prefix("cb-")?.parse().ok()
 }
 
 /// A sendId for a message: a version 4 UUID, as the reference server wants. Made from
@@ -325,6 +363,25 @@ mod tests {
         s.apply(&json!({ "kind": "runtime", "event": { "type": "turn.started", "threadId": "their-thread" } }));
         assert_eq!(s.bots.len(), 1);
         assert!(!s.threads.contains_key("their-thread"));
+    }
+
+    #[test]
+    fn what_comes_while_a_chat_loads_isnt_lost() {
+        let mut s = State::default();
+        s.bots.push(Bot::from_wire(&json!({ "id": "b1", "threadId": "t1", "catbot": true, "name": "Kiwi", "messages": [] })).unwrap());
+        let said = |id: &str, text: &str| json!({ "kind": "message", "threadId": "t1", "message": { "id": id, "at": 1.0, "role": "bot", "kind": "text", "text": text } });
+        // The chat is being fetched: its newest line, and a change to one it'll have, come meanwhile.
+        s.apply(&said("cb-3", "third"));
+        s.apply(&json!({ "kind": "message.patch", "threadId": "t1", "message": { "id": "cb-2", "at": 1.0, "role": "bot", "kind": "text", "text": "second, changed" } }));
+        // The fetch was answered before they were saved.
+        let page = |id: &str, text: &str| crate::chat::Msg::from_wire(&json!({ "id": id, "at": 1.0, "role": "bot", "kind": "text", "text": text })).unwrap();
+        s.loaded("t1", vec![page("cb-1", "first"), page("cb-2", "second")], false, false);
+        let texts: Vec<String> = s.threads["t1"].messages.iter().map(|m| match &m.body { crate::chat::Body::Reply(t) => t.clone(), _ => String::new() }).collect();
+        assert_eq!(texts, ["first", "second, changed", "third"]);
+        assert!(s.threads["t1"].since.is_empty());
+        // Loaded: frames go straight in.
+        s.apply(&said("cb-4", "fourth"));
+        assert_eq!(s.threads["t1"].messages.len(), 4);
     }
 
     #[test]
