@@ -1,7 +1,8 @@
 //! The Team map (stage 19.6): every bot in its department's box on a canvas you pan and zoom,
 //! as OpenMausBot's `TeamMapPage.tsx` and `TeamCanvas.tsx` (Apache-2.0, see NOTICE).
 //!
-//! Drag the background to pan (the wheel pans, Ctrl+wheel zooms), drag a box's heading to put it
+//! Drag the background to pan (the wheel zooms around the pointer, as Moo asked on 2026-11-27;
+//! Shift+wheel and a touchpad's sideways swipe pan), drag a box's heading to put it
 //! somewhere else (kept on the server, so every device sees the same map), drag a bot into
 //! another box to move it there (after a confirm: it changes its department, not just its
 //! place). A box's menu has the department's shared instructions, memory, bots and lead. Under
@@ -143,6 +144,21 @@ pub fn fit(tiles: &[Tile], width: f64, height: f64) -> View {
 }
 
 /// Zooms keeping a point of the viewport still.
+/// A wheel's turn in pixels, whatever it counted in (a mouse wheel often counts lines).
+fn wheel_pixels(delta: dioxus::html::geometry::WheelDelta) -> (f64, f64) {
+    use dioxus::html::geometry::WheelDelta;
+    match delta {
+        WheelDelta::Pixels(v) => (v.x, v.y),
+        WheelDelta::Lines(v) => (v.x * 40.0, v.y * 40.0),
+        WheelDelta::Pages(v) => (v.x * 400.0, v.y * 400.0),
+    }
+}
+
+/// How much a wheel's turn zooms: about a fifth per notch, in for a turn away from you.
+pub fn wheel_zoom(dy: f64) -> f64 {
+    (-dy * 0.002).exp()
+}
+
 pub fn zoom_at(view: View, scale: f64, px: f64, py: f64) -> View {
     let scale = scale.clamp(0.3, 1.5);
     let ratio = scale / view.scale;
@@ -424,14 +440,14 @@ pub fn TeamMap() -> Element {
                     onpointerleave: move |_| { gesture.set(None); dragged.set(None); over.set(None); },
                     onwheel: move |e| {
                         e.prevent_default();
-                        let d = e.delta().strip_units();
+                        let (dx, dy) = wheel_pixels(e.delta());
                         let (left, top, _, _) = *rect.peek();
                         let p = e.client_coordinates();
                         let now = *view.peek();
-                        if e.modifiers().ctrl() || e.modifiers().meta() {
-                            view.set(zoom_at(now, now.scale * (-d.y * 0.006).exp(), p.x - left, p.y - top));
+                        if e.modifiers().shift() || dx.abs() > dy.abs() {
+                            view.set(View { x: now.x - dx, y: now.y - dy, scale: now.scale });
                         } else {
-                            view.set(View { x: now.x - d.x, y: now.y - d.y, scale: now.scale });
+                            view.set(zoom_at(now, now.scale * wheel_zoom(dy), p.x - left, p.y - top));
                         }
                     },
                     onkeydown: move |e| {
@@ -749,6 +765,19 @@ mod tests {
         b.department = dept.into();
         b.department_chief = lead;
         b
+    }
+
+    #[test]
+    fn the_wheel_zooms_about_a_fifth_a_notch_around_the_pointer() {
+        // A notch towards you (100 px down) zooms out; away, in; by the same step.
+        let out = wheel_zoom(100.0);
+        assert!((0.8..0.85).contains(&out), "{out}");
+        assert!((wheel_zoom(-100.0) * out - 1.0).abs() < 1e-9);
+        // The point under the pointer stays put.
+        let v = View { x: 10.0, y: 20.0, scale: 1.0 };
+        let z = zoom_at(v, v.scale * wheel_zoom(-100.0), 300.0, 200.0);
+        assert!(((300.0 - z.x) / z.scale - (300.0 - v.x) / v.scale).abs() < 1e-9);
+        assert_eq!(wheel_pixels(dioxus::html::geometry::WheelDelta::lines(0.0, 3.0, 0.0)), (0.0, 120.0));
     }
 
     #[test]
