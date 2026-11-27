@@ -206,6 +206,12 @@ pub fn page(store: &Store, conversation_id: &str, before: Option<i64>, limit: us
 }
 
 /// One stored message as a `WireMessage`.
+/// Who handed to whom, from the note a hand-off leaves ("Scout handed this to Kiwi.").
+pub fn handoff_of(note: &str) -> Option<(&str, &str)> {
+    let (from, to) = note.strip_suffix('.')?.split_once(" handed this to ")?;
+    (!from.is_empty() && !to.is_empty() && !to.contains(" handed this to ")).then_some((from, to))
+}
+
 pub fn message(m: &Message, parent: Option<i64>) -> Value {
     let detail = m.detail.clone().unwrap_or(Value::Null);
     let mut wire = json!({
@@ -306,7 +312,14 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
             };
             json!({ "role": "bot", "kind": "activity", "tool": { "name": m.body, "ok": ok } })
         }
-        Role::Note => json!({ "role": "bot", "kind": "activity", "tool": { "name": format!("notice: {}", m.body), "ok": true } }),
+        Role::Note => {
+            let mut note = json!({ "role": "bot", "kind": "activity", "tool": { "name": format!("notice: {}", m.body), "ok": true } });
+            // A hand-off, for the chip with both bots' faces (stage 29.12).
+            if let Some((from, to)) = handoff_of(&m.body) {
+                note["handoff"] = json!({ "from": from, "to": to });
+            }
+            note
+        }
         Role::Card => json!({ "role": "bot", "kind": "options", "card": detail["card"] }),
     };
     if let (Value::Object(wire), Value::Object(fields)) = (&mut wire, fields) {
@@ -322,6 +335,13 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
 mod tests {
     use super::*;
     use crate::store::NewBot;
+
+    #[test]
+    fn a_hand_off_note_names_both_bots() {
+        assert_eq!(handoff_of("Palette handed this to Game Wright."), Some(("Palette", "Game Wright")));
+        assert_eq!(handoff_of("Stopped."), None);
+        assert_eq!(handoff_of("Palette asked Kiwi to help, but hand-offs go only 3 deep."), None);
+    }
 
     #[test]
     fn a_bot_on_the_wire() {

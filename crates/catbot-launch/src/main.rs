@@ -120,6 +120,18 @@ fn when(at: &str) -> String {
 /// Starts the current version until it closes for good; returns the exit code. `args` go to the
 /// first start only (`--hidden` from starting at login, stage 29.2); a restart into another
 /// version opens its window.
+/// Starts the program and waits for it. On Linux a program file just written can be "busy" for
+/// a moment (another program starting then holds it open), so that is tried again, briefly.
+fn start_and_wait(command: impl Fn() -> Command) -> std::io::Result<std::process::ExitStatus> {
+    for _ in 0..20 {
+        match command().status() {
+            Err(err) if err.kind() == std::io::ErrorKind::ExecutableFileBusy => std::thread::sleep(std::time::Duration::from_millis(50)),
+            other => return other,
+        }
+    }
+    command().status()
+}
+
 pub fn run(dir: &Path, home: &Path, args: &[String], ask: &mut impl Ask) -> i32 {
     for attempt in 0..10 {
         let kept = read_json(&dir.join("versions.json")).unwrap_or_else(|| json!({}));
@@ -129,7 +141,11 @@ pub fn run(dir: &Path, home: &Path, args: &[String], ask: &mut impl Ask) -> i32 
         };
         let program = dir.join("versions").join(&version).join("Catbot.exe");
         let first: &[String] = if attempt == 0 { args } else { &[] };
-        let started = Command::new(&program).args(first).current_dir(program.parent().unwrap_or(dir)).env("CATBOT_INSTALL_DIR", dir).status();
+        let started = start_and_wait(|| {
+            let mut command = Command::new(&program);
+            command.args(first).current_dir(program.parent().unwrap_or(dir)).env("CATBOT_INSTALL_DIR", dir);
+            command
+        });
         let (code, err) = match &started {
             Ok(status) => (status.code(), None),
             Err(err) => (None, Some(err)),

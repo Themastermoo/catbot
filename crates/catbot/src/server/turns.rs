@@ -233,7 +233,8 @@ async fn run(
     let open = super::bot_tools::open(app, &dressed, thread);
     let bot = &dressed;
     app.announce_bot(&bot.id);
-    emit(json!({ "type": "turn.started" }));
+    // Which bot answers, for "Kiwi is working…" in a chat with several (stage 29.12).
+    emit(json!({ "type": "turn.started", "botId": bot.id }));
 
     let codex = chat::codex_dir(bot, &app.codex);
     app.seed_memory(bot);

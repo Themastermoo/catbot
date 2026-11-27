@@ -31,6 +31,9 @@ pub struct Thread {
 pub struct Live {
     pub steps: Vec<LiveStep>,
     pub text: String,
+    /// The bot answering, when the server says (stage 29.12): in a chat with several bots, who
+    /// is working.
+    pub bot_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -183,7 +186,7 @@ impl State {
                 }
                 let entry = self.threads.entry(thread.to_string()).or_default();
                 match event["type"].as_str() {
-                    Some("turn.started") => entry.live = Some(Live::default()),
+                    Some("turn.started") => entry.live = Some(Live { bot_id: event["botId"].as_str().map(str::to_string), ..Live::default() }),
                     Some("turn.completed") => entry.live = None,
                     Some(kind) => {
                         let live = entry.live.get_or_insert_with(Live::default);
@@ -329,7 +332,8 @@ mod tests {
             e["threadId"] = json!("t1");
             json!({ "kind": "runtime", "event": e })
         };
-        s.apply(&ev(json!({ "type": "turn.started" })));
+        s.apply(&ev(json!({ "type": "turn.started", "botId": "b1" })));
+        assert_eq!(s.threads["t1"].live.as_ref().unwrap().bot_id.as_deref(), Some("b1"));
         s.apply(&ev(json!({ "type": "item.started", "itemType": "tool", "itemId": "tu1", "title": "Read", "summary": "notes.txt" })));
         s.apply(&ev(json!({ "type": "content.delta", "streamKind": "assistant_text", "delta": "Hel", "itemId": "i" })));
         s.apply(&ev(json!({ "type": "content.delta", "streamKind": "reasoning_text", "delta": "(thinking)", "itemId": "i-t" })));

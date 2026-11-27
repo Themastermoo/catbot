@@ -362,6 +362,9 @@ async fn a_message_sent_while_the_bot_works_shows_at_once_and_is_read_when_it_s_
     let bot = made["bot"]["id"].as_str().unwrap().to_string();
     let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
     s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "approve", "threadId": thread }))).await;
+    // Which bot is answering, for "Palette is working…" (stage 29.12).
+    let started = until(&mut events, "turn.started", |f| runtime(f, "turn.started")).await;
+    assert_eq!(started["event"]["botId"], bot.as_str());
     let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
     let request = asked["event"]["requestId"].as_str().unwrap().to_string();
 
@@ -1814,6 +1817,9 @@ async fn a_bot_hands_work_on_within_the_limits_set() {
     let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=50"), None).await;
     assert_eq!(replies(&page), [ids[0].as_str(), &ids[1], &ids[0], &ids[1]], "{page}");
     assert_eq!(notes(&page)[0], "Scout handed this to Kiwi.");
+    // The chat's chip knows who handed to whom (stage 29.12).
+    let chip = page["messages"].as_array().unwrap().iter().find(|m| m["handoff"].is_object()).unwrap();
+    assert_eq!(chip["handoff"], json!({ "from": "Scout", "to": "Kiwi" }));
     let texts: Vec<&str> = page["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").filter_map(|m| m["text"].as_str()).collect();
     assert!(texts[1].contains("Scout: Hello, Plan the beds"), "Kiwi is shown the chat: {}", texts[1]);
     assert!(texts[2].contains("[Kiwi]: Hello,") && texts[2].contains("handed this back"), "Scout is told what Kiwi said: {}", texts[2]);

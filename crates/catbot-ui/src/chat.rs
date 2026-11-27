@@ -59,6 +59,8 @@ pub enum Body {
     Reply(String),
     /// A step of the bot's work: a tool it used, or a note. `ok` is None while it runs.
     Step { name: String, ok: Option<bool> },
+    /// One bot handing the work to another (stage 29.12), by name: drawn as a chip with both.
+    Handoff { from: String, to: String },
     /// A picture being asked for and drawn (`pictures.rs`).
     Picture(Box<crate::pictures::Card>),
     TeamChange(Box<crate::team::Change>),
@@ -103,6 +105,10 @@ impl Msg {
                 None => Body::Person(text()),
             },
             ("text", _) => Body::Reply(text()),
+            ("activity", _) if wire["handoff"].is_object() => Body::Handoff {
+                from: wire["handoff"]["from"].as_str().unwrap_or_default().to_string(),
+                to: wire["handoff"]["to"].as_str().unwrap_or_default().to_string(),
+            },
             ("activity", _) => {
                 let name = wire["tool"]["name"].as_str().unwrap_or_default();
                 Body::Step { name: name.strip_prefix("notice: ").unwrap_or(name).to_string(), ok: wire["tool"]["ok"].as_bool() }
@@ -328,6 +334,17 @@ pub fn Chat(bot: Bot) -> Element {
         })
         .collect();
     let working = bot.activity != Activity::Idle || live.is_some();
+    // A chat where more than one bot talks (a channel, or guests a hand-off brought in): every
+    // reply is named, and the header shows who's in it (stage 29.12).
+    let guests = guests_of(&messages, &bot.id);
+    let room = bot.channel.is_some() || !guests.is_empty();
+    let faces: Vec<String> = match &bot.channel {
+        Some(info) => info.members.iter().map(|m| m.0.clone()).collect(),
+        None if room => std::iter::once(bot.id.clone()).chain(guests).collect(),
+        None => Vec::new(),
+    };
+    // The newest hand-off is still going while the chat works.
+    let handing = messages.iter().rev().find(|m| matches!(m.body, Body::Handoff { .. })).map(|m| m.id.clone()).filter(|_| working);
     let replies: Vec<(String, String)> = messages.iter().filter_map(|m| match &m.body {
         Body::Reply(text) => Some((m.id.clone(), text.clone())),
         _ => None,
@@ -338,7 +355,7 @@ pub fn Chat(bot: Bot) -> Element {
     let pending: Vec<Pending> = if asking { pending_approvals(&messages) } else { Vec::new() };
     rsx! {
         main { class: "relative flex h-full min-w-0 flex-1 flex-col bg-app",
-            ChatHead { bot: bot.clone() }
+            ChatHead { bot: bot.clone(), faces }
             FindBar { key: "{bot.thread_id}" }
             div {
                 id: "chat-scroll",
@@ -378,14 +395,17 @@ pub fn Chat(bot: Bot) -> Element {
                             }
                             {
                                 match item {
-                                    Item::One(m) => rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone(), bot_id: bot.id.clone(), working, speakers: bot.channel.clone() } },
+                                    Item::One(m) => {
+                                        let handing = handing.as_deref() == Some(m.id.as_str());
+                                        rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone(), bot_id: bot.id.clone(), working, speakers: bot.channel.clone(), room, handing } }
+                                    }
                                     Item::Run(steps) => rsx! { Run { steps, bot_name: bot.name.clone(), asking } },
                                 }
                             }
                         }
                     }
                     if let Some(live) = live {
-                        LiveTurn { live }
+                        LiveTurn { live, room, bot_id: bot.id.clone(), speakers: bot.channel.clone() }
                     } else if working {
                         Working {}
                     }
@@ -403,27 +423,45 @@ pub fn Chat(bot: Bot) -> Element {
 
 /// The turn as it happens: its steps, then the reply streaming in.
 #[component]
-fn LiveTurn(live: Live) -> Element {
+fn LiveTurn(
+    live: Live,
+    /// A chat with several bots: the reply is named, and so is who's working.
+    #[props(default)]
+    room: bool,
+    #[props(default)] bot_id: String,
+    #[props(default)] speakers: Option<crate::bots::ChannelInfo>,
+) -> Element {
+    let who = live.bot_id.clone().filter(|_| room);
     rsx! {
         div { class: "contents", "data-live-turn": true,
             for step in live.steps {
                 Step { key: "{step.id}", name: step.name, ok: step.ok, live: true }
             }
             if live.text.is_empty() {
-                Working {}
+                Working { who }
             } else {
-                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None } }
+                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: live.bot_id, scheduled: None }, bot_id, speakers, room, live: true }
             }
         }
     }
 }
 
-/// Their working pill: three dots, while the bot thinks.
+/// Their working pill: three dots, while the bot thinks. In a chat with several bots, `who`
+/// (a bot's id) puts that bot's face and name on it: "Kiwi is working…" (stage 29.12).
 #[component]
-fn Working() -> Element {
+fn Working(#[props(default)] who: Option<String>) -> Element {
+    let who = who.and_then(|id| speaker(&consume_context::<Signal<State>>().read(), &id));
+    let label = who.as_ref().map_or("Working…".to_string(), |w| format!("{} is working…", w.name));
     rsx! {
         div { class: "flex justify-start",
-            div { class: "ui-pill", role: "status", "aria-label": "Working…",
+            div { class: "ui-pill", role: "status", "aria-label": "{label}", "data-working-bot": who.as_ref().map(|w| w.name.clone()),
+                if let Some(w) = &who {
+                    BotMark { picture: w.picture.clone(), color: w.color.clone(), initial: w.initial(), size: 18, mark: w.mark.clone(), state: "working" }
+                    span { class: "text-[13px] text-ink-secondary",
+                        span { class: "bot-identity font-semibold", "data-bot-color": "{w.color}", "{w.name}" }
+                        " is working"
+                    }
+                }
                 span { class: "flex items-center gap-1", "aria-hidden": "true",
                     for i in 0..3 {
                         span { key: "{i}", class: "size-1.5 animate-pulse rounded-full bg-ink-secondary", style: "animation-delay: {i * 200}ms" }
@@ -435,8 +473,8 @@ fn Working() -> Element {
 }
 
 /// The typing box, as their full-layout composer: a floating rounded box, Enter sends,
-/// Shift+Enter starts a new line. While the bot works the box stays open; what's sent then
-/// waits and goes when the turn ends, as theirs does. Stop ends the turn.
+/// Shift+Enter starts a new line. While the bot works the box stays open; what's sent then goes
+/// in the chat at once and the bot reads it when its turn ends (stage 29.11). Stop ends the turn.
 #[component]
 fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandler<()>) -> Element {
     let mut state = use_context::<Signal<State>>();
@@ -888,9 +926,18 @@ fn page_messages(page: &Value) -> Vec<Msg> {
 /// The bar above the conversation: the bot's picture and name, in their floating pill.
 /// Clicking it opens the bot's settings, as theirs opens the profile.
 #[component]
-fn ChatHead(bot: Bot) -> Element {
+fn ChatHead(
+    bot: Bot,
+    /// Who's in a chat with several bots (stage 29.12): their faces sit beside the name.
+    #[props(default)]
+    faces: Vec<String>,
+) -> Element {
     let mut ui = use_context::<crate::settings::Ui>();
     let state = use_context::<Signal<State>>();
+    let faces: Vec<Speaker> = faces.iter().filter_map(|id| speaker(&state.read(), id)).collect();
+    let shown = faces.len().min(FACES_SHOWN);
+    let more = faces.len() - shown;
+    let who = faces.iter().map(|f| f.name.as_str()).collect::<Vec<_>>().join(", ");
     let open = (ui.settings_open)();
     // Which chat this is, once the bot has more than one (their `ChatHeadPill`).
     let conversation = (bot.chats.len() > 1).then(|| bot.open_chat().map(|c| c.title.clone()).unwrap_or_else(|| "New chat".into()));
@@ -918,6 +965,18 @@ fn ChatHead(bot: Bot) -> Element {
                             path { d: "m9 18 6-6-6-6" }
                         }
                         span { "data-chathead-conversation": true, dir: "auto", class: "min-w-0 max-w-[180px] truncate text-[14px] font-medium leading-5 text-ink-secondary", "{chat}" }
+                    }
+                    if !faces.is_empty() {
+                        span { "data-chathead-faces": true, class: "ml-1 flex shrink-0 items-center", title: "In this chat: {who}", "aria-label": "In this chat: {who}",
+                            for (i, face) in faces.into_iter().take(shown).enumerate() {
+                                span { key: "{face.id}", class: "inline-flex rounded-full ring-2 ring-app", style: if i > 0 { "margin-left:-6px" } else { "" },
+                                    BotMark { picture: face.picture.clone(), color: face.color.clone(), initial: face.initial(), size: 20, mark: face.mark.clone() }
+                                }
+                            }
+                            if more > 0 {
+                                span { class: "ml-1 text-[12px] tabular-nums text-ink-tertiary", "+{more}" }
+                            }
+                        }
                     }
                     if elsewhere {
                         span { role: "img", "data-chathead-elsewhere": true, "aria-label": "Another chat is busy", title: "Another chat is busy", class: "size-1.5 shrink-0 rounded-full bg-accent" }
@@ -1114,6 +1173,15 @@ fn Row(
     /// In a channel: its members, to name who said each reply.
     #[props(default)]
     speakers: Option<crate::bots::ChannelInfo>,
+    /// A chat where more than one bot talks: every reply carries its speaker's name (stage 29.12).
+    #[props(default)]
+    room: bool,
+    /// A hand-off still going (the chat's newest, while it works).
+    #[props(default)]
+    handing: bool,
+    /// The reply streaming in now.
+    #[props(default)]
+    live: bool,
 ) -> Element {
     let when = clock(message.at);
     let full_time = full_date(message.at);
@@ -1177,24 +1245,28 @@ fn Row(
                 "w-fit min-w-9 max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct),calc(100%-82px))] rounded-[18px] bg-card bubble-finish px-3 py-[7px] text-[15px] leading-[22px] text-ink"
             };
             let html = markdown::to_html(text);
-            let speaker = match (&speakers, &message.bot_id) {
-                (Some(info), Some(id)) => info.members.iter().find(|m| &m.0 == id).cloned(),
-                // Another bot, brought into this bot's chat by a hand-off.
-                (None, Some(id)) if *id != bot_id => consume_context::<Signal<State>>()
-                    .read()
-                    .bots
-                    .iter()
-                    .find(|b| &b.id == id)
-                    .map(|b| (b.id.clone(), b.name.clone(), b.mark.clone(), b.color.clone())),
-                _ => None,
+            // Who said it, in a chat where several bots talk; and whom it hands to, if anyone.
+            let (speaker, to) = {
+                let state = consume_context::<Signal<State>>();
+                let state = state.read();
+                let said_by = message.bot_id.clone().unwrap_or_else(|| bot_id.clone());
+                let named = room || message.bot_id.as_deref().is_some_and(|id| id != bot_id);
+                let who = named.then(|| speaker(&state, &said_by).or_else(|| {
+                    // A channel member the app hasn't heard of yet: the channel's own record.
+                    let info = speakers.as_ref()?;
+                    let (id, name, mark, color) = info.members.iter().find(|m| m.0 == said_by)?.clone();
+                    Some(Speaker { id, name, mark, color, picture: None })
+                })).flatten();
+                let to = match &who {
+                    Some(w) => handed_to(text, &candidates(&state, speakers.as_ref()), &w.id),
+                    None => Vec::new(),
+                };
+                (who, to)
             };
             rsx! {
                 div { class: "group flex w-full flex-col items-start",
-                    if let Some((speaker_id, name, mark, color)) = speaker {
-                        div { class: "mb-1 flex items-center gap-1.5 text-[12px] font-semibold text-ink-secondary", "data-speaker": "{name}",
-                            crate::mascots::BotMark { picture: consume_context::<Signal<State>>().read().bots.iter().find(|b| b.id == speaker_id).and_then(|b| b.picture.clone()), color, initial: name.chars().next().map(|c| c.to_string()).unwrap_or_default(), size: 18, mark }
-                            "{name}"
-                        }
+                    if let Some(who) = speaker {
+                        SpeakerTag { who, to, working: live }
                     }
                     div { class: "flex w-full items-center justify-start gap-1.5",
                         div { class: "{shape}", title: "{full_time}",
@@ -1211,6 +1283,7 @@ fn Row(
             }
         }
         Body::Step { name, ok } => rsx! { Step { name: name.clone(), ok: *ok } },
+        Body::Handoff { from, to } => rsx! { HandoffChip { from: from.clone(), to: to.clone(), going: handing, at: full_time.clone() } },
         Body::Picture(card) => rsx! {
             crate::pictures::PictureCard { thread: thread.clone(), message: message.id.clone(), card: (**card).clone() }
         },
@@ -1226,6 +1299,151 @@ fn Row(
         Body::Card { subtitle, answer, tool, .. } => {
             let answer = settled_answer(*answer, asking);
             rsx! { ApprovalRow { line: approval_line(&bot_name, tool.as_deref()), detail: approval_detail(subtitle, tool.as_deref()), answer } }
+        }
+    }
+}
+
+/// How many faces the header shows before "+3".
+const FACES_SHOWN: usize = 5;
+
+/// A bot as a chat draws it beside what it said (stage 29.12).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Speaker {
+    pub id: String,
+    pub name: String,
+    pub mark: String,
+    pub color: String,
+    pub picture: Option<crate::mascots::Picture>,
+}
+
+impl Speaker {
+    fn of(bot: &Bot) -> Speaker {
+        Speaker { id: bot.id.clone(), name: bot.name.clone(), mark: bot.mark.clone(), color: bot.color.clone(), picture: bot.picture.clone() }
+    }
+
+    fn initial(&self) -> String {
+        self.name.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default()
+    }
+}
+
+/// A bot by its id (not a channel).
+fn speaker(state: &State, id: &str) -> Option<Speaker> {
+    state.bots.iter().find(|b| b.id == id && b.channel.is_none()).map(Speaker::of)
+}
+
+/// A bot by its name, as a hand-off note gives it.
+fn speaker_named(state: &State, name: &str) -> Option<Speaker> {
+    state.bots.iter().find(|b| b.name == name && b.channel.is_none()).map(Speaker::of)
+}
+
+/// The bots a reply could hand to: a channel's members, or every bot.
+fn candidates(state: &State, channel: Option<&crate::bots::ChannelInfo>) -> Vec<Speaker> {
+    match channel {
+        Some(info) => info.members.iter().filter_map(|m| speaker(state, &m.0)).collect(),
+        None => state.bots.iter().filter(|b| b.channel.is_none()).map(Speaker::of).collect(),
+    }
+}
+
+/// The other bots who answered in a bot's own chat (guests a hand-off brought in), in order.
+pub fn guests_of(messages: &[Msg], own: &str) -> Vec<String> {
+    let mut guests: Vec<String> = Vec::new();
+    for m in messages {
+        if let (Body::Reply(_), Some(id)) = (&m.body, &m.bot_id)
+            && id != own
+            && !guests.contains(id)
+        {
+            guests.push(id.clone());
+        }
+    }
+    guests
+}
+
+/// Whom a reply hands to: the bots @named in its last paragraph, as the server reads it
+/// (`handoffs::named`): whole names, longest first, in the order they appear.
+pub fn handed_to(reply: &str, candidates: &[Speaker], writer: &str) -> Vec<Speaker> {
+    let last = reply.trim_end().rsplit("\n\n").next().unwrap_or_default().to_lowercase();
+    let mut others: Vec<&Speaker> = candidates.iter().filter(|c| c.id != writer).collect();
+    others.sort_by_key(|c| std::cmp::Reverse(c.name.len()));
+    let mut taken: Vec<(usize, usize)> = Vec::new();
+    let mut named: Vec<(usize, Speaker)> = Vec::new();
+    for bot in others {
+        let tag = format!("@{}", bot.name.to_lowercase());
+        let mut from = 0;
+        while let Some(found) = last[from..].find(&tag) {
+            let at = from + found;
+            let end = at + tag.len();
+            let whole = last[end..].chars().next().is_none_or(|c| !c.is_alphanumeric())
+                && last[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+            if whole && !taken.iter().any(|(s, e)| at < *e && end > *s) {
+                taken.push((at, end));
+                if !named.iter().any(|(_, b)| b.id == bot.id) {
+                    named.push((at, bot.clone()));
+                }
+                break;
+            }
+            from = end;
+        }
+    }
+    named.sort_by_key(|(at, _)| *at);
+    named.into_iter().map(|(_, b)| b).collect()
+}
+
+/// A bot's name in its own colour.
+#[component]
+fn SpeakerName(who: Speaker) -> Element {
+    rsx! { span { class: "bot-identity font-semibold", "data-bot-color": "{who.color}", "{who.name}" } }
+}
+
+/// Over a reply in a chat with several bots: the speaker's face and name, and "→ Kiwi" when it
+/// hands to someone (their `ClusterLabel`).
+#[component]
+fn SpeakerTag(who: Speaker, #[props(default)] to: Vec<Speaker>, #[props(default)] working: bool) -> Element {
+    let last = to.len().saturating_sub(1);
+    rsx! {
+        div { class: "mb-1 flex flex-wrap items-center gap-1.5 text-[13px] text-ink-secondary", "data-speaker": "{who.name}",
+            BotMark { picture: who.picture.clone(), color: who.color.clone(), initial: who.initial(), size: 20, mark: who.mark.clone(), state: if working { "working" } else { "idle" } }
+            SpeakerName { who: who.clone() }
+            if !to.is_empty() {
+                span { class: "text-ink-tertiary", "data-hands-to": true, "→" }
+                for (i, one) in to.into_iter().enumerate() {
+                    span { key: "{one.id}", class: "inline-flex items-center",
+                        SpeakerName { who: one }
+                        if i < last { span { class: "text-ink-tertiary", "," } }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// One bot handing the work to another: both faces, and whether it's still going
+/// (their `HandoffStatusChip`).
+#[component]
+fn HandoffChip(from: String, to: String, going: bool, #[props(default)] at: String) -> Element {
+    let state = consume_context::<Signal<State>>();
+    let (giver, taker) = {
+        let state = state.read();
+        (speaker_named(&state, &from), speaker_named(&state, &to))
+    };
+    let face = |who: &Option<Speaker>, name: &str, state: &'static str| match who {
+        Some(w) => rsx! {
+            BotMark { picture: w.picture.clone(), color: w.color.clone(), initial: w.initial(), size: 18, mark: w.mark.clone(), state }
+            SpeakerName { who: w.clone() }
+        },
+        None => rsx! { span { class: "font-semibold", "{name}" } },
+    };
+    let (dot, status) = if going { ("bg-accent animate-pulse", "Working") } else { ("bg-success", "Handed over") };
+    rsx! {
+        div { class: "flex justify-start", "data-handoff": "{from}→{to}", "data-handoff-state": if going { "working" } else { "done" },
+            div { class: "ui-pill text-[13px] text-ink-secondary", role: "status", title: "{from} handed this to {to} · {at}",
+                {face(&giver, &from, "idle")}
+                span { class: "text-ink-tertiary", "aria-label": "handed this to", "→" }
+                {face(&taker, &to, if going { "working" } else { "idle" })}
+                span { class: "inline-flex items-center gap-1.5 text-[12px] text-ink-tertiary",
+                    span { "aria-hidden": "true", class: "size-1.5 shrink-0 rounded-full {dot}" }
+                    "{status}"
+                }
+            }
         }
     }
 }
@@ -1674,6 +1892,40 @@ mod tests {
         assert_eq!(card(json!({ "answered": "deny" })), Answer::Denied);
         assert_eq!(card(json!({ "answered": "deny", "dismissed": true })), Answer::Dismissed);
         assert!(Msg::from_wire(&json!({ "id": "x", "kind": "screen" })).is_none());
+    }
+
+    fn bot_said(id: &str, by: Option<&str>, text: &str) -> Msg {
+        Msg { id: id.into(), at: 1.0, send_id: None, body: Body::Reply(text.into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: by.map(str::to_string), scheduled: None }
+    }
+
+    fn who(id: &str, name: &str) -> Speaker {
+        Speaker { id: id.into(), name: name.into(), mark: "cat-head".into(), color: "teal".into(), picture: None }
+    }
+
+    #[test]
+    fn a_hand_off_note_is_a_chip_not_a_step() {
+        let note = Msg::from_wire(&json!({ "id": "n1", "at": 1.0, "role": "bot", "kind": "activity", "tool": { "name": "notice: Palette handed this to Gamewright.", "ok": true }, "handoff": { "from": "Palette", "to": "Gamewright" } })).unwrap();
+        assert_eq!(note.body, Body::Handoff { from: "Palette".into(), to: "Gamewright".into() });
+        // It stands on its own line, between steps.
+        let items = group(&[step("a", "Read", 1.0), note, step("b", "Read", 1.0)]);
+        assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn guests_are_the_other_bots_who_answered() {
+        let messages = [bot_said("1", Some("pal"), "hi"), bot_said("2", Some("game"), "yo"), bot_said("3", None, "x"), bot_said("4", Some("game"), "again")];
+        assert_eq!(guests_of(&messages, "pal"), ["game"]);
+        assert!(guests_of(&messages[..1], "pal").is_empty());
+    }
+
+    #[test]
+    fn a_reply_hands_to_the_bots_named_at_its_end() {
+        let team = [who("p", "Palette"), who("g", "Gamewright"), who("g2", "Gamewright Two"), who("k", "Kiwi")];
+        let names = |text: &str| handed_to(text, &team, "p").into_iter().map(|s| s.name).collect::<Vec<_>>();
+        assert_eq!(names("Done.\n\nOver to @Kiwi and @gamewright two."), ["Kiwi", "Gamewright Two"]);
+        // Only the last paragraph, whole names, never the writer.
+        assert!(names("As @Kiwi said, all good.\n\nThanks!").is_empty());
+        assert!(names("Ask @Kiwis or @Palette").is_empty());
     }
 
     #[test]
