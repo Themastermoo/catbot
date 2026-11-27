@@ -1192,6 +1192,39 @@ impl Store {
         Ok(list)
     }
 
+    /// A bot's main chat (stage 32.9): the one set as main while it's open, else its oldest open
+    /// chat. None for a bot with no open chat.
+    pub fn main_conversation(&self, bot_id: &str) -> Result<Option<Conversation>, BoxError> {
+        if let Some(id) = self.setting(&format!("main:{bot_id}"))?.and_then(|v| v.as_str().map(str::to_string))
+            && let Some(conversation) = self.conversation(&id)?
+            && conversation.bot_id == bot_id
+            && conversation.channel_id.is_none()
+            && conversation.archived_at.is_none()
+        {
+            return Ok(Some(conversation));
+        }
+        Ok(self
+            .conn
+            .query_row(
+                &format!("SELECT {CONVERSATION} FROM conversations WHERE bot_id = ?1 AND channel_id IS NULL AND archived_at IS NULL ORDER BY created_at, rowid LIMIT 1"),
+                [bot_id],
+                conversation_from_row,
+            )
+            .optional()?)
+    }
+
+    /// Sets a bot's main chat, or (None) goes back to its oldest.
+    pub fn set_main_conversation(&self, bot_id: &str, conversation: Option<&str>) -> Result<(), BoxError> {
+        let key = format!("main:{bot_id}");
+        match conversation {
+            Some(id) => self.set_setting(&key, &serde_json::json!(id)),
+            None => {
+                self.conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+                Ok(())
+            }
+        }
+    }
+
     /// Makes a chat the one its bot opens to.
     pub fn open_conversation(&self, conversation: &Conversation) -> Result<(), BoxError> {
         self.conn.execute(

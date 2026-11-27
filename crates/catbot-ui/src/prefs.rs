@@ -641,6 +641,9 @@ fn AppearancePage() -> Element {
             Row { label: "Your messages in the bot's colour".to_string(), line: "Off, they stay grey.".to_string(),
                 crate::settings::Switch { checked: look().color_mine, disabled: false, label: "Your messages in the bot's colour".to_string(), on_toggle: move |_| { looks::change(look, |l| l.color_mine = !l.color_mine); } }
             }
+            Row { label: "Suggested replies".to_string(), line: "After a bot replies, the empty message box shows one faded line you might send next; Tab fills it. A small model writes it.".to_string(),
+                crate::settings::Switch { checked: look().suggested, disabled: false, label: "Suggested replies".to_string(), on_toggle: move |_| { looks::change(look, |l| l.suggested = !l.suggested); } }
+            }
         }
     }
 }

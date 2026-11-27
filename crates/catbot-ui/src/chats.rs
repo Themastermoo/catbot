@@ -289,7 +289,18 @@ fn ChatRow(bot_id: String, chat: Chat, current: bool, #[props(default)] folders:
 
     let (open_bot, open_thread) = (bot_id.clone(), chat.id.clone());
     let path = format!("/api/bots/{bot_id}/tasks/{}", chat.id);
-    let (rename_path, archive_path, delete_path, folder_path) = (path.clone(), path.clone(), path.clone(), path);
+    let (rename_path, archive_path, delete_path, folder_path, main_path) = (path.clone(), path.clone(), path.clone(), path.clone(), path);
+    // Set as main (stage 32.9).
+    let make_main = move |_| {
+        menu.set(Menu::Closed);
+        let path = main_path.clone();
+        spawn(async move {
+            if let Err(err) = api::call("PATCH", &path, Some(&json!({ "main": true }))).await {
+                problem.set(Some(err));
+            }
+        });
+    };
+    let is_main = chat.main;
     // Into one of the bot's folders, or out of them (stage 23.3).
     let put = use_callback(move |folder: Option<String>| {
         menu.set(Menu::Closed);
@@ -385,6 +396,9 @@ fn ChatRow(bot_id: String, chat: Chat, current: bool, #[props(default)] folders:
                         class: "flex min-h-8 min-w-0 flex-1 items-center gap-2 rounded-md py-1.5 pl-6 pr-1 text-left text-[13px] font-medium outline-none focus-visible:ring-1 focus-visible:ring-accent/60 {title_look}",
                         onclick: move |_| open(state, ui, &open_bot, &open_thread),
                         span { dir: "auto", class: "min-w-0 flex-1 truncate {faded}", "{chat.title}" }
+                        if is_main {
+                            span { "data-chat-main": true, title: "This bot's main chat", class: "shrink-0 rounded-full bg-ink/[0.07] px-1.5 text-[10px] font-medium leading-4 text-ink-secondary", "Main" }
+                        }
                         if has_draft && !current {
                             span { "data-chat-draft": true, class: "shrink-0 text-[11px] font-semibold text-danger", "Draft" }
                         }
@@ -425,6 +439,19 @@ fn ChatRow(bot_id: String, chat: Chat, current: bool, #[props(default)] folders:
                             },
                             Icon { path: "M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z" }
                             "Rename"
+                        }
+                        if !archived {
+                            button {
+                                r#type: "button",
+                                role: "menuitem",
+                                "data-set-main": true,
+                                class: MENU_ITEM,
+                                disabled: is_main,
+                                title: if is_main { "This is already the main chat" } else { "Mark it Main and keep it first" },
+                                onclick: make_main,
+                                Icon { path: "M12 17v5M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" }
+                                if is_main { "Main chat" } else { "Set as main" }
+                            }
                         }
                         if !folders.is_empty() {
                             div { class: "px-2 pt-1 text-[11px] font-medium text-ink-tertiary", "Move to folder" }

@@ -373,6 +373,12 @@ pub fn Chat(bot: Bot) -> Element {
         }
     };
 
+    // The bot's own finished reply, when it's the chat's last word: a suggestion may follow it
+    // (stage 32.10).
+    let last_reply = match messages.last() {
+        Some(Msg { id, body: Body::Reply(_), bot_id, .. }) if bot.activity == Activity::Idle && live.is_none() && !id.starts_with("optimistic-") && bot_id.as_deref().is_none_or(|by| by == bot.id) => Some(id.clone()),
+        _ => None,
+    };
     // New rows scroll into view while the person is at the end.
     let size = messages.len() + live.as_ref().map_or(0, |l| l.text.len() + l.steps.len() * 1000);
     use_effect(use_reactive!(|size| {
@@ -491,7 +497,7 @@ pub fn Chat(bot: Bot) -> Element {
             if (speaker.chat_open)() {
                 crate::voice::VoiceChat { bot_id: bot.id.clone(), thread: bot.thread_id.clone(), name: bot.name.clone(), working }
             } else {
-                Composer { bot: bot.clone(), working, pending, on_send: move |_| following.set(true) }
+                Composer { bot: bot.clone(), working, pending, after: last_reply, on_send: move |_| following.set(true) }
             }
         }
     }
@@ -569,8 +575,12 @@ fn Working(#[props(default)] who: Option<String>, #[props(default)] color: Optio
 /// Shift+Enter starts a new line. While the bot works the box stays open; what's sent then goes
 /// in the chat at once and the bot reads it when its turn ends (stage 29.11). Stop ends the turn.
 #[component]
-fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandler<()>) -> Element {
+fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, after: Option<String>, on_send: EventHandler<()>) -> Element {
     let mut state = use_context::<Signal<State>>();
+    // A suggested next message (stage 32.10): asked for once per reply, while the box is empty.
+    let looks = use_context::<Signal<crate::looks::Looks>>();
+    let mut suggestion = use_signal(|| None::<(String, String)>);
+    let mut asked_after = use_signal(|| None::<String>);
     // This chat's draft, if one was left here (`drafts.rs`).
     let drafts = use_context::<Signal<crate::drafts::Drafts>>();
     let draft = use_hook(|| drafts.peek().get(&bot.thread_id).cloned().unwrap_or_default());
@@ -597,6 +607,35 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         crate::drafts::keep(drafts, &draft_thread, crate::drafts::Draft { text: text(), files });
     });
     let waiting_on_you = bot.activity == Activity::WaitingOnYou;
+    {
+        let (bot_id, thread) = (bot.id.clone(), bot.thread_id.clone());
+        use_effect(use_reactive!(|after, bot_id, thread| {
+            let Some(after) = after.clone().filter(|_| looks().suggested) else { return };
+            if asked_after.peek().as_ref() == Some(&after) || !text.peek().is_empty() {
+                return;
+            }
+            asked_after.set(Some(after.clone()));
+            let path = format!("/api/bots/{bot_id}/tasks/{thread}/suggest");
+            spawn(async move {
+                if let Ok(answer) = api::post(&path, &serde_json::json!({ "after": after })).await
+                    && let Some(line) = answer["text"].as_str().filter(|t| !t.trim().is_empty())
+                {
+                    suggestion.set(Some((after, line.to_string())));
+                }
+            });
+        }));
+    }
+    // Shown only for the reply it follows, while the box is empty.
+    let shown: Option<String> = suggestion()
+        .filter(|(for_reply, _)| Some(for_reply) == after.as_ref())
+        .map(|(_, line)| line)
+        .filter(|_| text.read().is_empty() && looks().suggested && !waiting_on_you && !working);
+    let use_suggestion = move |line: &str| {
+        set_box(line);
+        text.set(line.to_string());
+        suggestion.set(None);
+        document::eval(r#"document.getElementById("composer-box")?.focus()"#);
+    };
 
     let add_bot = bot.id.clone();
     let add_files = use_callback(move |files: Vec<dioxus::html::FileData>| {
@@ -774,7 +813,9 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         });
     });
 
-    let placeholder = if waiting_on_you && pending.first().is_some_and(|p| !p.questions.is_empty()) {
+    let placeholder = if let Some(line) = &shown {
+        line.clone()
+    } else if waiting_on_you && pending.first().is_some_and(|p| !p.questions.is_empty()) {
         "Type your answer, or pick one above".to_string()
     } else if waiting_on_you {
         "Answer the approval above to continue".to_string()
@@ -945,12 +986,37 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                                     text.set(e.value());
                                     document::eval(RESIZE_BOX);
                                 },
-                                onkeydown: move |e| {
-                                    if e.key() == Key::Enter && !e.modifiers().shift() && !e.data().is_composing() {
-                                        e.prevent_default();
-                                        submit();
+                                "data-suggested": shown.is_some(),
+                                onkeydown: {
+                                    let (tab_fill, mut use_it) = (shown.clone(), use_suggestion);
+                                    move |e: KeyboardEvent| {
+                                        if e.key() == Key::Enter && !e.modifiers().shift() && !e.data().is_composing() {
+                                            e.prevent_default();
+                                            submit();
+                                        } else if let Some(line) = tab_fill.as_ref().filter(|_| e.key() == Key::Tab && e.modifiers().is_empty()) {
+                                            // Tab takes the suggested reply (stage 32.10); Escape drops it.
+                                            e.prevent_default();
+                                            use_it(line);
+                                        } else if tab_fill.is_some() && e.key() == Key::Escape {
+                                            suggestion.set(None);
+                                        }
                                     }
                                 },
+                            }
+                            if let Some(line) = shown.clone() {
+                                div { class: "-mt-1 mb-1 flex items-center gap-2 text-[11px] text-ink-tertiary",
+                                    span { class: "pointer-coarse:hidden", "Tab to use the suggestion · Esc to dismiss" }
+                                    button {
+                                        r#type: "button",
+                                        "data-use-suggestion": true,
+                                        class: "hidden rounded-full bg-ink/[0.07] px-2.5 py-0.5 font-medium text-ink-secondary pointer-coarse:inline-flex",
+                                        onclick: {
+                                            let mut use_it = use_suggestion;
+                                            move |_| use_it(&line)
+                                        },
+                                        "Use"
+                                    }
+                                }
                             }
                             div { class: "flex h-8 items-center gap-2",
                                 if bot.channel.is_none() {

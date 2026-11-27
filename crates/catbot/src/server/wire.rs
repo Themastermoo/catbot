@@ -119,6 +119,8 @@ pub fn task(bot: &Bot, conversation: &Conversation, activity: &'static str) -> V
 pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<usize>) -> Result<Value, BoxError> {
     let conversation = store.ensure_conversation(&bot.id)?;
     let conversations = store.conversations(&bot.id)?;
+    // Its main chat (stage 32.9): marked, and first in its list.
+    let main = store.main_conversation(&bot.id)?.map(|c| c.id).unwrap_or_else(|| conversation.id.clone());
     // Its chat folders (stage 23.3), and which chat is in which.
     let in_folder = store.chat_folder_map(&bot.id)?;
     let tasks: Vec<Value> = conversations
@@ -127,6 +129,9 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
             let mut t = task(bot, c, activity(&c.id));
             if let Some(folder) = in_folder.get(&c.id) {
                 t["folderId"] = json!(folder);
+            }
+            if c.id == main {
+                t["main"] = json!(true);
             }
             t
         })
@@ -140,7 +145,7 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
         // Marks Catbot's own bots, so Catbot's interface can tell them from the reference server's.
         "catbot": true,
         "threadId": conversation.id,
-        "mainThreadId": conversation.id,
+        "mainThreadId": main,
         "name": bot.name,
 
         "soul": bot.instructions,

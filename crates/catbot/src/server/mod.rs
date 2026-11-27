@@ -990,6 +990,7 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
         }
         (Method::PATCH, ["tasks", thread]) => change_chat(app, bot, thread, json_body(req).await?),
         (Method::POST, ["tasks", thread, "branch"]) => branch_chat(app, bot, thread, json_body(req).await?),
+        (Method::POST, ["tasks", thread, "suggest"]) => suggest_reply(app, bot, thread, json_body(req).await?).await,
         (Method::DELETE, ["tasks", thread]) => delete_chat(app, bot, thread),
         (Method::POST, ["read"]) => {
             let body = json_body(req).await.unwrap_or(Value::Null);
@@ -1411,6 +1412,49 @@ fn name_chat(app: &Arc<App>, bot: &Bot, thread: &str, text: &str) {
     });
 }
 
+/// The person's last message and the bot's finished plain reply to it (with the reply's id), or
+/// None when there's nothing to suggest after: no reply yet, a card to answer, another bot's
+/// words, or a reply too short to answer ("Done."). After OpenMausBot's `lastExchange`.
+pub fn last_exchange(messages: &[store::Message], own: &str) -> Option<(String, String, i64)> {
+    let by_bot = |m: &store::Message| m.detail.as_ref().and_then(|d| d["botId"].as_str()).is_some_and(|by| by != own);
+    let ask_at = messages.iter().rposition(|m| m.role == Role::Person)?;
+    let ask = &messages[ask_at];
+    if ask.body.trim().is_empty() || by_bot(ask) {
+        return None;
+    }
+    let after = &messages[ask_at + 1..];
+    if after.is_empty() || after.iter().any(|m| matches!(m.role, Role::Person | Role::Card) || (m.role == Role::Bot && by_bot(m))) {
+        return None;
+    }
+    let reply = after.iter().rev().find(|m| m.role == Role::Bot)?;
+    let text = reply.body.trim();
+    if text.chars().count() < 20 || text.split_whitespace().count() < 4 {
+        return None;
+    }
+    Some((ask.body.trim().to_string(), text.to_string(), reply.id))
+}
+
+/// `POST /api/bots/:id/tasks/:thread/suggest {after}`: one short line the person might send next,
+/// after the reply `after` (stage 32.10), or `text: null`. Written by the small model that names
+/// chats (Claude's choice, Moo having left it to Claude); nothing is kept.
+async fn suggest_reply(app: &Arc<App>, bot: Bot, thread: &str, body: Value) -> Answer {
+    let conversation = chat_of(app, &bot, thread)?;
+    let nothing = Ok((StatusCode::OK, json!({ "text": null })));
+    let after = body["after"].as_str().and_then(wire::parse_message_id).ok_or_else(|| bad("after which reply?"))?;
+    let current = |app: &App| {
+        if app.turns.busy(&conversation.id) || app.channel_busy(&conversation.id) {
+            return None;
+        }
+        let messages = app.with_store(|store| store.messages(&conversation.id, 40)).unwrap_or_default();
+        last_exchange(&messages, &conversation.bot_id).filter(|(_, _, id)| *id == after)
+    };
+    let (Some(model), Some((ask, reply, _))) = (app.title_model.clone(), current(app)) else { return nothing };
+    let cwd = app.try_store(|store| Ok(store.home().join("titles"))).map_err(fail)?;
+    let text = titles::suggest(app.cli.clone(), cwd, model, &ask, &reply).await;
+    // Still the latest reply, with nothing sent since.
+    Ok((StatusCode::OK, json!({ "text": text.filter(|_| current(app).is_some()) })))
+}
+
 /// One of this bot's chats, or a 404.
 fn chat_of(app: &App, bot: &Bot, thread: &str) -> Result<store::Conversation, (StatusCode, String)> {
     app.try_store(|store| store.conversation(thread))
@@ -1482,6 +1526,13 @@ fn change_chat(app: &Arc<App>, bot: Bot, thread: &str, body: Value) -> Answer {
     }
     if let Some(folder) = body.get("folderId") {
         folders::put(app, &bot, &conversation.id, folder)?;
+    }
+    // Set as main (stage 32.9): an open chat of its own; false goes back to the oldest.
+    match body.get("main").and_then(Value::as_bool) {
+        Some(true) if conversation.archived_at.is_some() => return Err(bad("an archived chat can't be the main one")),
+        Some(true) => app.try_store(|store| store.set_main_conversation(&bot.id, Some(&conversation.id))).map_err(fail)?,
+        Some(false) => app.try_store(|store| store.set_main_conversation(&bot.id, None)).map_err(fail)?,
+        None => {}
     }
     let conversation = chat_of(app, &bot, thread)?;
     let task = wire::task(&bot, &conversation, app.chat_activity(&conversation.id));

@@ -19,11 +19,14 @@ pub struct Looks {
     pub color_mine: bool,
     /// The sidebar's folded departments, by name ("General" too).
     pub folded: Vec<String>,
+    /// A faded next message in the empty box after a bot replies (stage 32.10; theirs is on by
+    /// default too).
+    pub suggested: bool,
 }
 
 impl Default for Looks {
     fn default() -> Self {
-        Looks { skin: "system".into(), tint: String::new(), show_chief: true, color_mine: true, folded: Vec::new() }
+        Looks { skin: "system".into(), tint: String::new(), show_chief: true, color_mine: true, folded: Vec::new(), suggested: true }
     }
 }
 

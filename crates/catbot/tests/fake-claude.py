@@ -187,6 +187,9 @@ if first_line.startswith("catbot-tool: "):
 # "what are your instructions?" (the last line) gets the system prompt it was given, to check what a bot is told.
 if last_line == "what are your instructions?":
     reply = system
+# Catbot asking what the person might say next (stage 32.10).
+if prompt.startswith("Suggest the next message"):
+    reply = "- \"Send it to Priya too.\"" if "Priya" in prompt or "beds" in prompt else "NONE"
 # Catbot asking for a chat's name ("sleepy" in the message makes the namer slow).
 if prompt.startswith("Name the conversation"):
     if "sleepy" in prompt:

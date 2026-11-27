@@ -25,6 +25,7 @@ pub const CLAUDE: &str = "claude";
 pub const CODEX: &str = "codex";
 pub const CHATGPT: &str = "chatgpt";
 pub const PI: &str = "pi";
+pub const GROK_CLI: &str = "grok-cli";
 pub const MUSE: &str = "muse-code";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

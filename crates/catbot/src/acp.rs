@@ -81,8 +81,127 @@ pub fn start(turn: AcpTurn) -> std::io::Result<Running> {
     })?;
     let (tx, events) = mpsc::channel(256);
     let answers = Answerer::local();
-    let task = tokio::spawn(run(turn, child, tx, answers.clone()));
-    Ok(Running::in_process(events, task, answers))
+    // Grok takes words mid-turn as a second prompt on the running session (stage 32.11), once its
+    // own config says to steer.
+    let steers = turn.engine.id == crate::engines::GROK_CLI;
+    if steers {
+        grok::ensure_steer();
+    }
+    let slot: Slot = Arc::default();
+    let task = tokio::spawn(run(turn, child, tx, answers.clone(), slot.clone()));
+    let running = Running::in_process(events, task, answers);
+    Ok(if steers { running.with_steer(grok::steer(slot)) } else { running })
+}
+
+/// The running turn's link and session, once it has one: where a steer goes.
+type Slot = Arc<Mutex<Option<(Link, String)>>>;
+
+/// Grok's steering (stage 32.11, after OpenMausBot 0.1.175's `ensureGrokSteer`): with
+/// `[ui] follow_up_behavior = "steer"` in Grok's `config.toml`, a second `session/prompt` is
+/// taken into the running turn at its next step; its own answer is a "removedFromQueue" cancel.
+/// Catbot adds the line for a signed-in Grok, never over a choice the person made ("queue"
+/// included); with "queue", a message waits for the turn to end as before.
+pub mod grok {
+    use super::*;
+
+    /// Grok's own folder: `GROK_HOME`, else `~/.grok`.
+    pub fn home() -> PathBuf {
+        std::env::var_os("GROK_HOME").filter(|h| !h.is_empty()).map(PathBuf::from).unwrap_or_else(|| crate::store::user_home().join(".grok"))
+    }
+
+    /// What `follow_up_behavior` is set to under `[ui]`, if it's set.
+    pub fn follow_up(config: &str) -> Option<String> {
+        let mut in_ui = false;
+        for line in config.lines() {
+            let line = line.trim();
+            if line.starts_with('[') {
+                in_ui = line == "[ui]";
+                continue;
+            }
+            if in_ui && let Some((key, value)) = line.split_once('=') && key.trim() == "follow_up_behavior" {
+                return Some(value.split('#').next().unwrap_or("").trim().trim_matches(['"', '\'']).to_string());
+            }
+        }
+        None
+    }
+
+    /// The config with steering turned on, or None to leave it as it is (set already, by Catbot
+    /// or the person).
+    pub fn with_steer(config: &str) -> Option<String> {
+        if follow_up(config).is_some() || config.lines().any(|l| l.trim_start().starts_with("follow_up_behavior")) {
+            return None;
+        }
+        let eol = if config.contains("\r\n") { "\r\n" } else { "\n" };
+        let line = format!("follow_up_behavior = \"steer\"{eol}");
+        let lines: Vec<&str> = config.split_inclusive('\n').collect();
+        if let Some(at) = lines.iter().position(|l| l.trim() == "[ui]") {
+            let mut out: String = lines[..=at].concat();
+            if !out.ends_with('\n') {
+                out.push_str(eol);
+            }
+            out.push_str(&line);
+            out.push_str(&lines[at + 1..].concat());
+            return Some(out);
+        }
+        let mut out = config.to_string();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push_str(eol);
+        }
+        if !out.is_empty() {
+            out.push_str(eol);
+        }
+        out.push_str(&format!("[ui]{eol}{line}"));
+        Some(out)
+    }
+
+    /// Turns steering on in Grok's config, for a signed-in Grok, when nothing is set yet.
+    pub fn ensure_steer() {
+        let home = home();
+        if !home.join("auth.json").is_file() {
+            return;
+        }
+        let path = home.join("config.toml");
+        let config = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(_) => return,
+        };
+        let Some(next) = with_steer(&config) else { return };
+        // It may hold keys: private from its first byte, then moved into place.
+        let staged = home.join(format!("config.toml.catbot-{}.tmp", std::process::id()));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let written = options.open(&staged).and_then(|mut f| std::io::Write::write_all(&mut f, next.as_bytes())).and_then(|_| std::fs::rename(&staged, &path));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&staged);
+        } else {
+            eprintln!("catbot: turned on steering in Grok's config ({})", path.display());
+        }
+    }
+
+    /// Whether Grok takes words mid-turn now.
+    pub fn steers() -> bool {
+        std::fs::read_to_string(home().join("config.toml")).ok().and_then(|c| follow_up(&c)).is_some_and(|v| v == "steer")
+    }
+
+    /// Steers the turn: a second prompt on its session, once it has one.
+    pub(super) fn steer(slot: Slot) -> crate::claude::Steer {
+        crate::claude::Steer::new(move |text: String| {
+            let slot = slot.clone();
+            async move {
+                if !steers() {
+                    return Err("Grok's settings have it wait for the turn to end".to_string());
+                }
+                let Some((link, session)) = slot.lock().expect("slot lock").clone() else { return Err("the turn hasn't started yet".to_string()) };
+                link.call("session/prompt", json!({ "sessionId": session, "prompt": [{ "type": "text", "text": text }] }), Some(Duration::from_secs(600))).await.map(|_| ())
+            }
+        })
+    }
 }
 
 type Waiting = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>>;
@@ -142,7 +261,7 @@ struct Heard {
     gap: bool,
 }
 
-async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: Answerer) {
+async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: Answerer, slot: Slot) {
     let started = std::time::Instant::now();
     let stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
@@ -157,7 +276,8 @@ async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: 
     let heard = Arc::new(Mutex::new(Heard::default()));
     let reader = tokio::spawn(read(stdout, link.clone(), tx.clone(), answers, heard.clone(), turn.workspace.clone()));
 
-    let result = converse(&turn, &link, &tx, &heard).await;
+    let result = converse(&turn, &link, &tx, &heard, &slot).await;
+    *slot.lock().expect("slot lock") = None;
     let text = std::mem::take(&mut heard.lock().expect("heard lock").text);
     if !text.trim().is_empty() {
         let _ = tx.send(Event::Text { text: text.clone() }).await;
@@ -188,7 +308,7 @@ async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: 
 }
 
 /// The handshake, the session and the prompt. The session id and why the agent stopped.
-async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: &Mutex<Heard>) -> Result<(String, String), String> {
+async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: &Mutex<Heard>, slot: &Slot) -> Result<(String, String), String> {
     let init = link
         .call(
             "initialize",
@@ -269,6 +389,7 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: 
     let _ = tx.send(Event::Started { session_id: session.clone(), model: (!turn.model.is_empty()).then(|| turn.model.clone()) }).await;
     // The replay (if any) came before session/load's answer, which the reader handles in order.
     heard.lock().expect("heard lock").listening = true;
+    *slot.lock().expect("slot lock") = Some((link.clone(), session.clone()));
     let answer = link.call("session/prompt", json!({ "sessionId": session, "prompt": [{ "type": "text", "text": prompt }] }), None).await?;
     let stop = answer["stopReason"].as_str().unwrap_or("end_turn").to_string();
     Ok((session, stop))
@@ -811,6 +932,16 @@ fn explain(engine: &Engine, problem: &str, stderr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_steering_is_turned_on_only_where_nothing_is_set() {
+        assert_eq!(grok::with_steer("").as_deref(), Some("[ui]\nfollow_up_behavior = \"steer\"\n"));
+        assert_eq!(grok::with_steer("model = \"grok-4\"").as_deref(), Some("model = \"grok-4\"\n\n[ui]\nfollow_up_behavior = \"steer\"\n"));
+        assert_eq!(grok::with_steer("[ui]\ntheme = \"dark\"\n").as_deref(), Some("[ui]\nfollow_up_behavior = \"steer\"\ntheme = \"dark\"\n"));
+        assert_eq!(grok::with_steer("[ui]\nfollow_up_behavior = \"queue\"\n"), None, "the person's choice stays");
+        assert_eq!(grok::follow_up("[ui]\nfollow_up_behavior = \"steer\" # mid-turn\n").as_deref(), Some("steer"));
+        assert_eq!(grok::follow_up("[other]\nfollow_up_behavior = \"steer\"\n"), None);
+    }
 
     #[tokio::test]
     async fn a_pasted_address_goes_only_where_the_link_said() {

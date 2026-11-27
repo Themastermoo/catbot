@@ -257,6 +257,19 @@ fn Details(bot: Bot, on_page: EventHandler<Page>) -> Element {
             section { "data-panel-card": "conversation",
                 div { class: LABEL, span { "This conversation" } }
                 NavRow { icon: "search", title: "Find in conversation", data: "find", onclick: move |_| ui.find.set(Some(String::new())) }
+                if let Some(chat) = bot.open_chat().filter(|c| !c.archived) {
+                    if chat.main {
+                        NavRow { icon: "check", title: "This is the main chat", data: "main", onclick: move |_| {} }
+                    } else {
+                        NavRow { icon: "home", title: "Set as main chat", data: "set-main", onclick: {
+                            let path = format!("/api/bots/{}/tasks/{}", bot.id, chat.id);
+                            move |_| {
+                                let path = path.clone();
+                                spawn(async move { let _ = api::call("PATCH", &path, Some(&json!({ "main": true }))).await; });
+                            }
+                        } }
+                    }
+                }
                 NavRow { icon: "plus", title: "Start fresh", data: "start-fresh", onclick: move |_| crate::chats::start(state, ui, bot.id.clone()) }
                 NavRow { icon: "coins", title: "Spending", data: "usage", onclick: move |_| ui.prefs.set(Some("spending".into())) }
                 NavRow { icon: "gauge", title: "Activity", data: "activity", onclick: move |_| on_page.call(Page::Activity) }

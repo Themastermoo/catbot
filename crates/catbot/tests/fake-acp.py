@@ -5,6 +5,8 @@ does): the person's earlier message, a tool call and the earlier reply, as sessi
 
 session/prompt behaviour by the message's last line:
   contains "look" -> says "Looking.", reads a file (a tool call), then says "Found it."
+  contains "slow" -> says "working.", waits up to 5 s for a second session/prompt (a steer, as Grok
+                     takes one), answers it as removed from the queue, then " done; steered: <it>"
   contains "quota" -> refuses the prompt: out of quota (RESOURCE_EXHAUSTED), as Gemini's agents do
   contains "edit" -> a tool call that asks permission, then (if allowed) writes notes.md through
                      Catbot's fs/write_text_file, and says what happened
@@ -131,7 +133,20 @@ for line in sys.stdin:
         if "quota" in last:
             send({"jsonrpc": "2.0", "id": rid, "error": {"code": 429, "message": "RESOURCE_EXHAUSTED: Quota exceeded for this account. Try again later."}})
             continue
-        if "look" in last:
+        if "slow" in last:
+            # As Grok steering (stage 32.11): a second prompt while this one runs is taken in at
+            # the next step, and answered as removed from the queue.
+            import select
+            chunk(session, "working.")
+            steered = None
+            ready, _, _ = select.select([sys.stdin], [], [], 5)
+            if ready:
+                extra = json.loads(sys.stdin.readline())
+                if extra.get("method") == "session/prompt":
+                    steered = extra["params"]["prompt"][0]["text"]
+                    send({"jsonrpc": "2.0", "id": extra["id"], "result": {"stopReason": "cancelled", "_meta": {"completionKind": "removedFromQueue"}}})
+            chunk(session, f" done; steered: {steered}" if steered else " done.")
+        elif "look" in last:
             chunk(session, "Looking.")
             update(session, {"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Read notes.md", "kind": "read", "status": "completed"})
             chunk(session, "Found it.")

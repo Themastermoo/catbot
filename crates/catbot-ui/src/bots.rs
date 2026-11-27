@@ -122,6 +122,8 @@ pub struct Chat {
     pub unread: bool,
     /// The folder it's in, if any (stage 23.3).
     pub folder: Option<String>,
+    /// Its bot's main chat (stage 32.9): marked, and first in the list.
+    pub main: bool,
 }
 
 /// One of a bot's chat folders (stage 23.3).
@@ -142,6 +144,7 @@ impl Chat {
             archived: wire.get("archivedAt").is_some_and(|a| !a.is_null()),
             unread: wire["unread"] == true,
             folder: wire["folderId"].as_str().map(str::to_string),
+            main: wire["main"] == true,
         })
     }
 }
@@ -286,8 +289,10 @@ impl Bot {
     }
 
     /// The chats in the list (not archived).
+    /// Its open chats, the main one first (stage 32.9: it stays put while others move).
     pub fn listed_chats(&self) -> impl Iterator<Item = &Chat> {
-        self.chats.iter().filter(|c| !c.archived)
+        let open = |main: bool| self.chats.iter().filter(move |c| !c.archived && c.main == main);
+        open(true).chain(open(false))
     }
 
     /// The bot as its open chat sees it: busy only if that chat is.

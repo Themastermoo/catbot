@@ -66,6 +66,9 @@ async fn setup() -> Setup {
     // Nothing a test does opens a real browser: sign-in pages go to a program that does nothing.
     // SAFETY: every test sets the same value.
     unsafe { std::env::set_var("CATBOT_OPEN_WITH", "true") };
+    // Grok's own folder is one of the tests', never the person's ~/.grok (Catbot may write its
+    // config: stage 32.11). SAFETY: every test sets the same value.
+    unsafe { std::env::set_var("GROK_HOME", std::env::temp_dir().join(format!("catbot-tests-grok-{}", std::process::id()))) };
     let reference = listen(reference_server()).await;
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open(&dir.path().join("home")).unwrap();
@@ -308,6 +311,56 @@ async fn a_turn_goes_on_when_catbots_tools_dont_start() {
     assert!(note["message"]["tool"]["name"].as_str().unwrap().contains("goes on without them"), "{note}");
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
     assert_eq!(reply["message"]["text"], "Hello, hi", "the turn still answers (stage 32.7)");
+}
+
+#[tokio::test]
+async fn a_bot_has_a_main_chat_that_can_be_set() {
+    let s = setup().await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let first = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let (_, second) = s.call("POST", &format!("/api/bots/{bot}/tasks"), Some(json!({}))).await;
+    let second = second["task"]["threadId"].as_str().unwrap().to_string();
+    let main = async || {
+        let (_, got) = s.call("GET", &format!("/api/bots/{bot}"), None).await;
+        let marked: Vec<String> = got["bot"]["tasks"].as_array().unwrap().iter().filter(|t| t["main"] == true).map(|t| t["threadId"].as_str().unwrap().to_string()).collect();
+        assert_eq!(marked.len(), 1, "one main chat: {got}");
+        assert_eq!(got["bot"]["mainThreadId"], marked[0].as_str());
+        marked[0].clone()
+    };
+    // At first its oldest chat (stage 32.9), even when another was opened since.
+    assert_eq!(main().await, first);
+    // Set as main.
+    let (status, set) = s.call("PATCH", &format!("/api/bots/{bot}/tasks/{second}"), Some(json!({ "main": true }))).await;
+    assert_eq!(status, 200, "{set}");
+    assert_eq!(main().await, second);
+    // Archived, it's no longer the main one; an archived chat can't be set.
+    s.call("PATCH", &format!("/api/bots/{bot}/tasks/{second}"), Some(json!({ "archivedAt": 1 }))).await;
+    assert_eq!(main().await, first);
+    assert_eq!(s.call("PATCH", &format!("/api/bots/{bot}/tasks/{second}"), Some(json!({ "main": true }))).await.0, 400);
+}
+
+#[tokio::test]
+async fn a_reply_gets_a_suggested_next_message() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "Plan the beds for spring", "threadId": thread }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["busy"] == false).await;
+    let after = reply["message"]["id"].as_str().unwrap().to_string();
+    let suggest = async |after: &str| s.call("POST", &format!("/api/bots/{bot}/tasks/{thread}/suggest"), Some(json!({ "after": after }))).await;
+    let (status, got) = suggest(&after).await;
+    assert_eq!(status, 200, "{got}");
+    assert_eq!(got["text"], "Send it to Priya too.", "one clean line (stage 32.10): {after} {}", s.call("GET", &format!("/api/threads/{thread}/messages?limit=10"), None).await.1);
+    // Only for the latest reply.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "ok", "threadId": thread }))).await;
+    until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["busy"] == false).await;
+    assert_eq!(suggest(&after).await.1["text"], Value::Null, "an older reply gets none");
 }
 
 #[tokio::test]
@@ -1481,6 +1534,24 @@ async fn a_bot_on_an_agent_program_streams_asks_and_resumes() {
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
     assert_eq!(reply["message"]["text"], "Edited.");
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello from the agent");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Steering (stage 32.11): signed in, Catbot turns it on in Grok's config, and a message sent
+    // mid-turn goes into the running turn on Steer now.
+    let home = std::path::PathBuf::from(std::env::var("GROK_HOME").unwrap());
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(home.join("auth.json"), "{}").unwrap();
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "go slow", "threadId": thread }))).await;
+    until(&mut events, "working", |f| runtime(f, "content.delta") && f["event"]["delta"].as_str().is_some_and(|d| d.contains("working"))).await;
+    let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
+    assert!(config.contains("[ui]") && config.contains("follow_up_behavior = \"steer\""), "{config}");
+    let (_, held) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "use pytest", "threadId": thread }))).await;
+    assert_eq!(held["held"], true, "{held}");
+    let id = held["message"]["id"].as_str().unwrap().to_string();
+    let (status, steered) = s.call("POST", &format!("/api/threads/{thread}/steer"), Some(json!({ "messageId": id }))).await;
+    assert_eq!(status, 200, "{steered}");
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(reply["message"]["text"].as_str().unwrap().ends_with("done; steered: use pytest"), "{reply}");
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
 
     // Out of quota mid-turn: the turn goes to its backup (any AI, not just Claude and Codex).
