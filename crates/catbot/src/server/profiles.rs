@@ -232,9 +232,9 @@ pub fn archive(app: &Arc<App>, bot: &Bot) -> Answer {
     if app.with_store(|store| Ok(super::chief::is_chief_in(store, &bot.id))).unwrap_or(false) {
         return Err((StatusCode::CONFLICT, format!("{} is the Chief of Staff: choose another one first", bot.name)));
     }
-    // (Not the Team Chat: every bot is in it, and leaves it when put away.)
-    let team = app.with_store(|store| Ok(super::team_chat::id_in(store))).flatten();
-    if let Some(channel) = app.try_store(|store| store.channels()).map_err(fail)?.into_iter().find(|c| c.members.contains(&bot.id) && Some(&c.id) != team.as_ref()) {
+    // (Not a team chat: a bot leaves its department's when put away.)
+    let teams = app.with_store(|store| Ok(super::team_chat::ids_in(store))).unwrap_or_default();
+    if let Some(channel) = app.try_store(|store| store.channels()).map_err(fail)?.into_iter().find(|c| c.members.contains(&bot.id) && !teams.contains(&c.id)) {
         return Err((StatusCode::CONFLICT, format!("{} is in the channel {}: take it out first", bot.name, channel.name)));
     }
     let mut profile = of(app, &bot.id);

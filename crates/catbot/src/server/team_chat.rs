@@ -1,101 +1,161 @@
-//! The Team Chat (stage 30.1): one channel with every bot in it, for the team to work together.
+//! Team chats (stage 30.1, one per department since 30.4): a channel for each department, with
+//! its bots in it, for the team to work together.
 //!
 //! Moo's choices (2026-11-26):
-//! - **Who answers** a message with no @name: the Chief of Staff, or with no Chief a lead the
-//!   person picks (kept apart, so it comes back if the Chief goes).
-//! - **Who's in it:** every bot, always. A new bot joins, a deleted or archived one leaves; it
-//!   can't be taken out, and the Team Chat can't be deleted.
-//! - **Pinned notes** (the channel's instructions, read by every bot there): the person edits
-//!   them; a bot proposes a change with `<team-notes>…</team-notes>`, shown as a card to approve.
+//! - **One per team:** each department with bots gets its own team chat, named after it; bots
+//!   in no department (General) have none. (30.1 had one room with every bot; that one became an
+//!   ordinary channel, its talk kept.)
+//! - **Who answers** a message with no @name: the department's lead, or with no lead a bot the
+//!   person picks in the chat's settings (kept apart, so it comes back if the lead goes).
+//! - **Who's in it:** the department's bots, always: a bot joins or leaves with its department.
+//!   A team chat can't lose a member or be deleted; it follows its department's name, and becomes
+//!   an ordinary channel if the department is deleted.
+//! - **Pinned notes** are the department's shared instructions (read by its bots every turn):
+//!   the person edits them; a bot proposes a change with `<team-notes>…</team-notes>`, shown as a
+//!   card to approve.
 //!
-//! It's an ordinary channel otherwise (`channels.rs`): @names, @everyone, hand-offs, held
-//! messages. Its id is kept in the `team-chat` setting.
+//! An ordinary channel otherwise (`channels.rs`): @names, @everyone, hand-offs, held messages.
+//! Kept in `team-chats` (department → channel id) and `team-chat-leads` (department → picked bot).
+
+use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
 
-use super::{App, channels, turns};
+use super::{App, channels, departments, turns};
 use crate::store::{Bot, Channel, Role, Store};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
-pub const NAME: &str = "Team Chat";
-/// The setting holding its channel's id.
-const KEY: &str = "team-chat";
-/// The lead the person picked, for when there's no Chief.
-const LEAD: &str = "team-chat-lead";
+/// Department → its team chat's channel id.
+const KEY: &str = "team-chats";
+/// Department → the lead the person picked, for when it has no lead of its own.
+const LEADS: &str = "team-chat-leads";
+/// 30.1's one room for every bot.
+const OLD: &str = "team-chat";
 
 const OPEN: &str = "<team-notes>";
 const CLOSE: &str = "</team-notes>";
 
-/// The Team Chat's channel id, if it exists.
-pub fn id_in(store: &Store) -> Option<String> {
-    let id = store.setting(KEY).ok().flatten()?.as_str()?.to_string();
-    store.channel(&id).ok().flatten().map(|c| c.id)
+fn map(store: &Store, key: &str) -> BTreeMap<String, String> {
+    store.setting(key).ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
+}
+
+/// The department whose team chat this channel is.
+pub fn department_of(store: &Store, channel_id: &str) -> Option<String> {
+    map(store, KEY).into_iter().find(|(_, id)| id == channel_id).map(|(name, _)| name)
 }
 
 pub fn is_team_chat(app: &App, channel_id: &str) -> bool {
-    app.with_store(|store| Ok(id_in(store).is_some_and(|id| id == channel_id))).unwrap_or(false)
+    app.with_store(|store| Ok(department_of(store, channel_id).is_some())).unwrap_or(false)
 }
 
-/// Whether a conversation is the Team Chat's.
+/// Every team chat's channel id.
+pub fn ids_in(store: &Store) -> Vec<String> {
+    map(store, KEY).into_values().collect()
+}
+
+/// The team chat a conversation is, if it is one: its channel and department.
+fn of_thread(store: &Store, thread: &str) -> Option<(String, String)> {
+    let channel = store.conversation(thread).ok().flatten()?.channel_id?;
+    department_of(store, &channel).map(|dept| (channel, dept))
+}
+
 pub fn is_thread(app: &App, thread: &str) -> bool {
+    app.with_store(|store| Ok(of_thread(store, thread).is_some())).unwrap_or(false)
+}
+
+/// Keeps the person's pick of lead for a team chat, for when its department has no lead.
+pub fn pick_lead(app: &App, channel_id: &str, bot_id: &str) {
     app.with_store(|store| {
-        let Some(id) = id_in(store) else { return Ok(false) };
-        Ok(store.channel_conversation(&id)?.is_some_and(|c| c.id == thread))
-    })
-    .unwrap_or(false)
+        let Some(dept) = department_of(store, channel_id) else { return Ok(()) };
+        let mut leads = map(store, LEADS);
+        leads.insert(dept, bot_id.to_string());
+        store.set_setting(LEADS, &json!(leads))
+    });
 }
 
-/// Keeps the person's pick of lead, for when there's no Chief.
-pub fn pick_lead(app: &App, bot_id: &str) {
-    app.with_store(|store| store.set_setting(LEAD, &json!(bot_id)));
+/// A department renamed: its team chat and pick go with it (called inside the change).
+pub fn renamed_in(store: &Store, old: &str, new: &str) {
+    for key in [KEY, LEADS] {
+        let mut kept = map(store, key);
+        if let Some(value) = kept.remove(old) {
+            kept.insert(new.to_string(), value);
+            let _ = store.set_setting(key, &json!(kept));
+        }
+    }
 }
 
-/// Who it's made of now: every bot not put away, in the sidebar's order (by name); and who
-/// answers.
-fn wanted(store: &Store) -> Result<(Vec<String>, Option<String>), BoxError> {
-    let members: Vec<String> = store.bots()?.into_iter().map(|b| b.id).collect();
-    let chief = super::chief::options_in(store).bot_id.filter(|id| members.contains(id));
-    let picked = store.setting(LEAD)?.and_then(|v| v.as_str().map(str::to_string)).filter(|id| members.contains(id));
-    let lead = chief.or(picked).or_else(|| members.first().cloned());
-    Ok((members, lead))
+/// The department's shared instructions: the team chat's pinned notes.
+pub fn notes_in(store: &Store, channel_id: &str) -> Option<String> {
+    let dept = department_of(store, channel_id)?;
+    departments::load(store).list.into_iter().find(|d| d.name == dept).map(|d| d.instructions)
 }
 
-/// Brings the Team Chat up to date with the team: made once there's a bot, every bot in it, the
-/// Chief (or the person's pick) as its lead. Called at start and whenever the team changes.
+/// Brings every team chat up to date with the departments: one for each department with bots,
+/// its bots in it, its lead (or the person's pick) answering; one whose department is gone
+/// becomes an ordinary channel. Called at start and whenever bots or departments change.
 pub fn sync(app: &App) {
     let changed = app.with_store(|store| {
-        let (members, lead) = wanted(store)?;
-        if members.is_empty() {
-            return Ok(None);
+        let mut changed: Vec<String> = Vec::new();
+        // 30.1's room for every bot: an ordinary channel from now on.
+        if let Some(old) = store.setting(OLD)?.and_then(|v| v.as_str().map(str::to_string)) {
+            store.set_setting(OLD, &Value::Null)?;
+            changed.push(old);
         }
-        let channel = match id_in(store).and_then(|id| store.channel(&id).ok().flatten()) {
-            Some(channel) => channel,
-            None => {
-                let made = store.create_channel(NAME, &members, lead.as_deref())?;
-                store.set_setting(KEY, &json!(made.id))?;
-                return Ok(Some(made.id));
+        let kept = departments::load(store);
+        let bots = store.bots()?;
+        let mut chats = map(store, KEY);
+        let leads = map(store, LEADS);
+        // Departments that are gone: their chats are ordinary channels now.
+        let gone: Vec<String> = chats.keys().filter(|name| !kept.list.iter().any(|d| &d.name == *name)).cloned().collect();
+        for name in gone {
+            if let Some(id) = chats.remove(&name) {
+                changed.push(id);
             }
-        };
-        if channel.members == members && channel.lead == lead {
-            return Ok(None);
         }
-        store.update_channel(&Channel { members, lead, ..channel.clone() })?;
-        Ok(Some(channel.id))
+        for dept in &kept.list {
+            let members: Vec<String> = bots.iter().filter(|b| kept.members.get(&b.id) == Some(&dept.name)).map(|b| b.id.clone()).collect();
+            if members.is_empty() {
+                continue; // (a channel can't be empty: it waits for the department's next bot)
+            }
+            let chief = dept.chief.clone().filter(|id| members.contains(id));
+            let picked = leads.get(&dept.name).cloned().filter(|id| members.contains(id));
+            let lead = chief.or(picked).or_else(|| members.first().cloned());
+            match chats.get(&dept.name).and_then(|id| store.channel(id).ok().flatten()) {
+                Some(channel) => {
+                    if channel.members != members || channel.lead != lead || channel.name != dept.name {
+                        store.update_channel(&Channel { members, lead, name: dept.name.clone(), ..channel.clone() })?;
+                        changed.push(channel.id);
+                    }
+                }
+                None => {
+                    let made = store.create_channel(&dept.name, &members, lead.as_deref())?;
+                    chats.insert(dept.name.clone(), made.id.clone());
+                    changed.push(made.id);
+                }
+            }
+        }
+        store.set_setting(KEY, &json!(chats))?;
+        Ok::<_, BoxError>(changed)
     });
-    if let Some(Some(id)) = changed {
+    for id in changed.into_iter().flatten() {
         channels::announce(app, &id);
     }
 }
 
-/// What a bot in the Team Chat is told, on top of what any channel member is.
-pub fn note(channel: &Channel) -> String {
-    let notes = if channel.instructions.trim().is_empty() { "There are no pinned notes yet." } else { "The pinned notes are the channel's instructions above." };
+/// What a bot in a team chat is told, on top of what any channel member is.
+pub fn note(channel: &Channel, dept: &str) -> String {
+    let _ = channel;
     format!(
-        "\n\nThis channel is the {NAME}: the whole team is here, to coordinate. {notes} To change the pinned notes (who \
-         does what, goals, a checklist), put the whole new text in your reply as {OPEN}…{CLOSE}; Catbot asks the person, \
-         and changes them only if they approve."
+        "\n\nThis channel is the {dept} department's team chat: its bots are here, to coordinate. Its pinned notes are the \
+         department's shared instructions. To change them (who does what, goals, a checklist), put the whole new text in \
+         your reply as {OPEN}…{CLOSE}; Catbot asks the person, and changes them only if they approve."
     )
+}
+
+/// The department of the team chat a thread is, for the note above.
+pub fn department_of_thread(app: &App, thread: &str) -> Option<String> {
+    app.with_store(|store| Ok(of_thread(store, thread).map(|(_, d)| d))).flatten()
 }
 
 /// Takes `<team-notes>…</team-notes>` out of a reply: the reply without it, and the last
@@ -119,16 +179,16 @@ pub fn take(reply: &str) -> (String, Option<String>) {
     (rest.trim().to_string(), found)
 }
 
-/// A card asking the person to approve new pinned notes. It's a team change to the channel, so
-/// the card and its answer are the Chief's (`team.rs`).
+/// A card asking the person to approve new pinned notes. It's a team change to the channel (its
+/// notes are the department's instructions), so the card and its answer are the Chief's (`team.rs`).
 pub fn propose(app: &App, thread: &str, bot: &Bot, text: &str) {
-    let Some(channel) = app.with_store(|store| Ok(id_in(store))).flatten() else { return };
-    let mut lines = vec!["New pinned notes:".to_string()];
+    let Some((channel, dept)) = app.with_store(|store| Ok(of_thread(store, thread))).flatten() else { return };
+    let mut lines = vec!["New pinned notes (the department's shared instructions):".to_string()];
     lines.extend(text.lines().map(str::to_string));
     let detail = json!({
         "kind": "team-change",
         "askedBy": bot.name,
-        "title": format!("Change the {NAME}'s pinned notes"),
+        "title": format!("Change {dept}'s pinned notes"),
         "lines": lines,
         "warning": Value::Null,
         "action": "change_channel",
@@ -136,13 +196,13 @@ pub fn propose(app: &App, thread: &str, bot: &Bot, text: &str) {
         "body": { "soul": text },
         "state": "asking",
     });
-    turns::save_and_send(app, thread, Role::Step, &format!("Team change: change the {NAME}'s pinned notes"), Some(&detail));
+    turns::save_and_send(app, thread, Role::Step, &format!("Team change: change {dept}'s pinned notes"), Some(&detail));
 }
 
 // --- Team updates (stage 30.2) -------------------------------------------------------------
 //
-// Moo's choice: hand-offs, finished jobs and bots waiting on him show up in the Team Chat as
-// short lines, so the whole team can be followed in one place. Each says which chat it's about
+// Moo's choice: hand-offs, finished jobs and bots waiting on him show up in the bot's team chat
+// (its department's; none for General) as short lines, so each team can be followed in one place. Each says which chat it's about
 // and opens it. Kept short on purpose: a hand-off made elsewhere; a job that took two minutes or
 // more, a trigger's run, or a turn that failed; a bot waiting for an approval (once per chat in
 // ten minutes). Nothing from the Team Chat itself. Bots aren't shown these lines.
@@ -155,12 +215,14 @@ const WAITING_EVERY: std::time::Duration = std::time::Duration::from_secs(600);
 /// When each chat last said it was waiting.
 static WAITING: std::sync::Mutex<Option<std::collections::HashMap<String, std::time::Instant>>> = std::sync::Mutex::new(None);
 
-/// The Team Chat's own conversation, unless `thread` is it.
-fn room_for(app: &App, thread: &str) -> Option<String> {
+/// The team chat of the bot's department (its channel, and its conversation), unless `thread`
+/// is it. None for a bot in General.
+fn room_for(app: &App, bot: &Bot, thread: &str) -> Option<(String, String)> {
     app.with_store(|store| {
-        let Some(id) = id_in(store) else { return Ok(None) };
+        let Some(dept) = departments::load(store).of(&bot.id).map(|d| d.name.clone()) else { return Ok(None) };
+        let Some(id) = map(store, KEY).get(&dept).cloned() else { return Ok(None) };
         let room = store.channel_conversation(&id)?.map(|c| c.id);
-        Ok(room.filter(|room| room != thread))
+        Ok(room.filter(|room| room != thread).map(|room| (id, room)))
     })
     .flatten()
 }
@@ -187,16 +249,14 @@ fn place(app: &App, thread: &str, bot: &Bot) -> String {
 
 /// Puts one line in the Team Chat about `bot`, opening `thread`.
 pub fn post(app: &App, bot: &Bot, kind: &str, thread: &str, text: &str) {
-    let Some(room) = room_for(app, thread) else { return };
+    let Some((channel, room)) = room_for(app, bot, thread) else { return };
     let owner = app.with_store(|store| store.conversation(thread)).flatten().map(|c| match c.channel_id {
         Some(channel) => channel,
         None => c.bot_id,
     });
     let detail = json!({ "teamUpdate": { "botId": bot.id, "kind": kind, "threadId": thread, "chatOf": owner } });
     turns::save_and_send(app, &room, Role::Note, text, Some(&detail));
-    if let Some(id) = app.with_store(|store| Ok(id_in(store))).flatten() {
-        channels::announce(app, &id);
-    }
+    channels::announce(app, &channel);
 }
 
 /// A bot handed work to another, somewhere other than the Team Chat.

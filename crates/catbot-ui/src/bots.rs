@@ -14,8 +14,10 @@ pub struct ChannelInfo {
     /// The bot that answers when no one is @named.
     pub lead: String,
     pub folder: String,
-    /// The Team Chat (stage 30.1): every bot is in it, and its instructions are the pinned notes.
+    /// A department's team chat (stage 30.4): its department's bots are in it, and its
+    /// instructions (the department's shared instructions) are the pinned notes.
     pub team_chat: bool,
+    pub department: Option<String>,
     pub instructions: String,
 }
 
@@ -37,6 +39,7 @@ impl ChannelInfo {
             lead: wire["lead"].as_str().unwrap_or_default().to_string(),
             folder: wire["folder"].as_str().unwrap_or_default().to_string(),
             team_chat: wire["teamChat"] == true,
+            department: wire["department"].as_str().map(str::to_string),
             instructions: wire["instructions"].as_str().unwrap_or_default().to_string(),
         })
     }
@@ -179,7 +182,7 @@ pub struct Last {
 }
 
 impl Bot {
-    /// Whether this is the Team Chat (stage 30.1).
+    /// Whether this is a department's team chat (stage 30.4).
     pub fn is_team_chat(&self) -> bool {
         self.channel.as_ref().is_some_and(|c| c.team_chat)
     }
@@ -425,10 +428,11 @@ mod tests {
     }
 
     #[test]
-    fn the_team_chat_is_known_with_its_notes() {
-        let team = Bot::from_wire(&wire(json!({ "id": "ch-1", "name": "Team Chat", "channel": { "members": [{ "id": "b1", "name": "Kiwi" }], "lead": "b1", "teamChat": true, "instructions": "Kiwi: seeds." } }))).unwrap();
+    fn a_team_chat_is_known_with_its_department_and_notes() {
+        let team = Bot::from_wire(&wire(json!({ "id": "ch-1", "name": "Garden", "channel": { "members": [{ "id": "b1", "name": "Kiwi" }], "lead": "b1", "teamChat": true, "department": "Garden", "instructions": "Kiwi: seeds." } }))).unwrap();
         assert!(team.is_team_chat());
-        assert_eq!(team.channel.unwrap().instructions, "Kiwi: seeds.");
+        let info = team.channel.unwrap();
+        assert_eq!((info.instructions.as_str(), info.department.as_deref()), ("Kiwi: seeds.", Some("Garden")));
         let other = Bot::from_wire(&wire(json!({ "id": "ch-2", "channel": { "members": [], "lead": "" } }))).unwrap();
         assert!(!other.is_team_chat());
     }

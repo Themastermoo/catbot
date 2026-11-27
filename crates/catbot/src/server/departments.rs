@@ -195,7 +195,23 @@ fn change(app: &App, f: impl FnOnce(&Store, &mut Departments) -> Result<(), (Sta
         app.announce_bot(&id);
     }
     app.hub.send(json!({ "kind": "departments" }));
+    // Each department's team chat follows its bots, lead and name (stage 30.4).
+    super::team_chat::sync(app);
     Ok(after)
+}
+
+/// Sets a department's shared instructions (its team chat's pinned notes, stage 30.4).
+pub fn set_instructions(app: &App, name: &str, text: &str) -> Result<(), (StatusCode, String)> {
+    if text.len() > INSTRUCTIONS_MAX {
+        return Err(bad(format!("shared instructions are at most {INSTRUCTIONS_MAX} bytes")));
+    }
+    change(app, |_, kept| {
+        let at = kept.find(name).ok_or((StatusCode::NOT_FOUND, "no such department".to_string()))?;
+        kept.list[at].instructions = text.to_string();
+        kept.list[at].updated_at = Some(chrono::Utc::now().timestamp_millis());
+        Ok(())
+    })
+    .map(|_| ())
 }
 
 fn wire(app: &App, kept: &Departments) -> Value {
@@ -294,6 +310,8 @@ pub fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>
                         for member in kept.members.values_mut().filter(|m| **m == old) {
                             *member = new.clone();
                         }
+                        // Its team chat goes with it (stage 30.4).
+                        super::team_chat::renamed_in(store, &old, &new);
                         renamed = Some((old, new));
                     }
                 }

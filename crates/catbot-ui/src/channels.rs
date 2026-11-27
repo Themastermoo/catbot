@@ -141,7 +141,7 @@ pub fn NewChannelDialog(on_close: EventHandler<()>) -> Element {
 /// A channel's settings: name, instructions, members and lead, deleting it.
 #[component]
 pub fn ChannelSettings(bot: Bot, saving: bool, change: Callback<Value>) -> Element {
-    // (The Team Chat's own settings are below.)
+    // (A team chat's own settings are below.)
     let info = bot.channel.clone().unwrap_or_default();
     if info.team_chat {
         return rsx! { TeamChatSettings { info, saving, change } };
@@ -168,21 +168,24 @@ pub fn ChannelSettings(bot: Bot, saving: bool, change: Callback<Value>) -> Eleme
     }
 }
 
-/// The Team Chat's: every bot is in it, so there are no members to pick; the Chief of Staff
-/// answers what isn't @named, or with no Chief the bot chosen here (stage 30.1).
+/// A department's team chat (stage 30.4): its department's bots are in it, so there are no
+/// members to pick; the department's lead answers what isn't @named, or with no lead the bot
+/// chosen here.
 #[component]
 fn TeamChatSettings(info: crate::bots::ChannelInfo, saving: bool, change: Callback<Value>) -> Element {
-    let state = use_context::<Signal<State>>();
-    let chief = state.read().bots.iter().find(|b| b.chief && b.channel.is_none()).map(|b| b.name.clone());
+    let depts = use_context::<Signal<crate::departments::Depts>>();
+    let dept = info.department.clone().unwrap_or_default();
+    let lead = depts.read().list.iter().find(|d| d.name == dept).and_then(|d| d.chief.clone());
+    let lead_name = lead.as_ref().and_then(|id| info.members.iter().find(|m| &m.0 == id)).map(|m| m.1.clone());
     let names = info.members.iter().map(|m| m.1.clone()).collect::<Vec<_>>().join(", ");
     rsx! {
         div { class: "rounded-xl bg-card p-4", "data-channel-settings": true, "data-team-chat-settings": true,
             div { class: LABEL, "Who's in it" }
-            p { class: "mt-1 text-[13px] leading-relaxed text-ink", "Every bot: {names}." }
-            p { class: "mt-0.5 text-[12px] text-ink-tertiary", "New bots join by themselves; a bot leaves when it's deleted or put away." }
+            p { class: "mt-1 text-[13px] leading-relaxed text-ink", "{dept}'s bots: {names}." }
+            p { class: "mt-0.5 text-[12px] text-ink-tertiary", "A bot joins or leaves with the department. Its name follows the department's." }
             label { class: "mt-4 {LABEL}", "Answers when no one is @named"
-                if let Some(chief) = &chief {
-                    p { class: "mt-1 text-[13px] text-ink", "{chief}, your Chief of Staff." }
+                if let Some(lead) = &lead_name {
+                    p { class: "mt-1 text-[13px] text-ink", "{lead}, {dept}'s lead." }
                 } else {
                     select {
                         "data-team-chat-lead": true,
@@ -195,8 +198,8 @@ fn TeamChatSettings(info: crate::bots::ChannelInfo, saving: bool, change: Callba
                     }
                 }
             }
-            if chief.is_some() {
-                p { class: "mt-1 text-[12px] text-ink-tertiary", "With no Chief of Staff, a bot you choose here answers." }
+            if lead_name.is_some() {
+                p { class: "mt-1 text-[12px] text-ink-tertiary", "With no lead for {dept}, a bot you choose here answers." }
             }
             p { class: "mt-3 text-[12px] text-ink-tertiary", "Working folder: {info.folder}" }
         }

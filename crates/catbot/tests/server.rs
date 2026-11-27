@@ -226,8 +226,8 @@ async fn the_bot_list_has_both_teams() {
     assert_eq!(made["bot"]["name"], "Scout");
     let (_, list) = s.call("GET", "/api/bots?messages=50", None).await;
     let names: Vec<&str> = list["bots"].as_array().unwrap().iter().map(|b| b["name"].as_str().unwrap()).collect();
-    // With the Team Chat, made with the first bot (stage 30.1).
-    assert_eq!(names, ["MausBot", "Scout", "Team Chat"]);
+    // (No team chat: Scout is in no department, stage 30.4.)
+    assert_eq!(names, ["MausBot", "Scout"]);
     let scout_id = made["bot"]["id"].as_str().unwrap();
     assert!(list["computerControl"][scout_id].is_object());
     assert!(list["computerControl"]["their-bot"].is_object());
@@ -1770,62 +1770,81 @@ async fn pictures_are_asked_for_drawn_and_kept() {
 }
 
 #[tokio::test]
-async fn the_team_chat_has_every_bot_the_chief_answers_and_notes_change_with_a_yes() {
+async fn each_department_has_a_team_chat_its_lead_answers_and_notes_change_with_a_yes() {
     let s = setup().await;
     let mut events = s.events().await;
     until(&mut events, "hello", |f| f["kind"] == "hello").await;
     let mut ids = Vec::new();
-    for name in ["Scout", "Kiwi"] {
+    for name in ["Scout", "Kiwi", "Lin"] {
         let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name }))).await;
         ids.push(made["bot"]["id"].as_str().unwrap().to_string());
     }
-    let team = || async {
+    let teams = || async {
         let (_, list) = s.call("GET", "/api/bots", None).await;
-        list["bots"].as_array().unwrap().iter().find(|b| b["channel"]["teamChat"] == true).cloned().expect("a Team Chat")
+        list["bots"].as_array().unwrap().iter().filter(|b| b["channel"]["teamChat"] == true).cloned().collect::<Vec<_>>()
     };
+    assert!(teams().await.is_empty(), "no departments, no team chats");
     let members = |chat: &Value| chat["channel"]["members"].as_array().unwrap().iter().map(|m| m["name"].as_str().unwrap().to_string()).collect::<Vec<_>>();
-    let chat = team().await;
+    let (status, made) = s.call("POST", "/api/departments", Some(json!({ "name": "Garden", "botIds": [ids[0], ids[1]] }))).await;
+    assert_eq!(status, 201, "{made}");
+    let chats = teams().await;
+    assert_eq!(chats.len(), 1);
+    let chat = chats[0].clone();
     let id = chat["id"].as_str().unwrap().to_string();
-    assert_eq!((chat["name"].as_str(), members(&chat)), (Some("Team Chat"), vec!["Kiwi".to_string(), "Scout".into()]));
-    assert_eq!(chat["channel"]["lead"], ids[1].as_str(), "with no Chief and no pick, the first bot leads");
+    assert_eq!((chat["name"].as_str(), chat["channel"]["department"].as_str(), members(&chat)), (Some("Garden"), Some("Garden"), vec!["Kiwi".to_string(), "Scout".into()]));
+    assert_eq!(chat["channel"]["lead"], ids[1].as_str(), "with no lead and no pick, the first bot answers");
 
-    // The person's pick leads, until there's a Chief; the Chief leads; the pick comes back after.
+    // The person's pick answers until the department has a lead; then the lead; the pick after.
     let (status, picked) = s.call("PATCH", &format!("/api/bots/{id}"), Some(json!({ "lead": ids[0] }))).await;
     assert_eq!((status, picked["bot"]["channel"]["lead"].as_str()), (200, Some(ids[0].as_str())), "{picked}");
-    s.call("PUT", "/api/chief", Some(json!({ "botId": ids[1] }))).await;
-    assert_eq!(team().await["channel"]["lead"], ids[1].as_str());
-    s.call("PUT", "/api/chief", Some(json!({ "botId": null }))).await;
-    assert_eq!(team().await["channel"]["lead"], ids[0].as_str());
+    s.call("PATCH", "/api/departments/Garden", Some(json!({ "chief": ids[1] }))).await;
+    assert_eq!(teams().await[0]["channel"]["lead"], ids[1].as_str());
+    s.call("PATCH", "/api/departments/Garden", Some(json!({ "chief": null }))).await;
+    assert_eq!(teams().await[0]["channel"]["lead"], ids[0].as_str());
 
-    // Everyone, always: it can't lose a bot or be deleted; new bots join and deleted ones leave.
+    // Its department's bots, always: they come and go with the department; it can't be deleted.
     assert_eq!(s.call("PATCH", &format!("/api/bots/{id}"), Some(json!({ "members": [ids[0]] }))).await.0, 400);
     assert_eq!(s.call("DELETE", &format!("/api/bots/{id}"), None).await.0, 409);
-    s.call("POST", "/api/bots", Some(json!({ "name": "Lin" }))).await;
-    assert_eq!(members(&team().await), ["Kiwi", "Lin", "Scout"]);
+    s.call("PUT", "/api/departments/Garden/members", Some(json!({ "add": [ids[2]] }))).await;
+    assert_eq!(members(&teams().await[0]), ["Kiwi", "Lin", "Scout"]);
     s.call("DELETE", &format!("/api/bots/{}", ids[0]), None).await;
-    let chat = team().await;
-    assert_eq!((members(&chat), chat["id"].as_str()), (vec!["Kiwi".to_string(), "Lin".into()], Some(id.as_str())));
-    // It isn't part of a team sent to a file.
+    assert_eq!(members(&teams().await[0]), ["Kiwi", "Lin"]);
+    // Renamed with its department, same chat.
+    s.call("PATCH", "/api/departments/Garden", Some(json!({ "name": "Allotment" }))).await;
+    let chat = teams().await[0].clone();
+    assert_eq!((chat["name"].as_str(), chat["id"].as_str()), (Some("Allotment"), Some(id.as_str())));
+    // Not part of a team sent to a file.
     let (_, out) = s.call("POST", "/api/teams/export", Some(json!({ "name": "Garden Crew" }))).await;
-    assert!(!out["markdown"].as_str().unwrap().contains("Team Chat"), "{out}");
+    assert!(!out["markdown"].as_str().unwrap().contains("## Channel"), "{out}");
 
-    // A bot there proposes new pinned notes: a card, and they change only with a yes.
+    // Pinned notes are the department's instructions: a bot proposes, and they change with a yes.
     let thread = chat["threadId"].as_str().unwrap().to_string();
-    let (status, sent) = s.call("POST", &format!("/api/bots/{id}/messages"), Some(json!({ "text": "<team-notes>Kiwi: seeds. Lin: beds.</team-notes>" }))).await;
-    assert_eq!(status, 202, "{sent}");
+    s.call("POST", &format!("/api/bots/{id}/messages"), Some(json!({ "text": "<team-notes>Kiwi: seeds. Lin: beds.</team-notes>" }))).await;
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["kind"] == "text" && f["message"]["role"] == "bot").await;
-    assert!(!reply["message"]["text"].as_str().unwrap().contains("<team-notes>"), "taken out of the reply");
+    let said = reply["message"]["text"].as_str().unwrap();
+    assert!(!said.contains("<team-notes>"), "{said}");
     let card = until(&mut events, "card", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["teamChange"].is_object()).await;
-    assert_eq!(card["message"]["teamChange"]["title"], "Change the Team Chat's pinned notes", "{card}");
+    assert_eq!(card["message"]["teamChange"]["title"], "Change Allotment's pinned notes", "{card}");
     let message = card["message"]["id"].as_str().unwrap().to_string();
-    assert_eq!(team().await["channel"]["instructions"], "", "not yet");
     let (status, answered) = s.call("POST", &format!("/api/threads/{thread}/team/{message}"), Some(json!({ "approve": true }))).await;
     assert_eq!((status, answered["state"].as_str()), (200, Some("done")), "{answered}");
-    assert_eq!(team().await["channel"]["instructions"], "Kiwi: seeds. Lin: beds.");
+    let (_, depts) = s.call("GET", "/api/departments", None).await;
+    assert_eq!(depts["departments"][0]["instructions"], "Kiwi: seeds. Lin: beds.");
+    assert_eq!(teams().await[0]["channel"]["instructions"], "Kiwi: seeds. Lin: beds.");
+    // Edited in the chat's settings, they're the department's too.
+    s.call("PATCH", &format!("/api/bots/{id}"), Some(json!({ "soul": "Water at dawn." }))).await;
+    let (_, depts) = s.call("GET", "/api/departments", None).await;
+    assert_eq!(depts["departments"][0]["instructions"], "Water at dawn.");
+
+    // The department deleted: its chat is an ordinary channel, its talk kept.
+    s.call("DELETE", "/api/departments/Allotment", None).await;
+    assert!(teams().await.is_empty());
+    let (status, kept) = s.call("GET", &format!("/api/bots/{id}"), None).await;
+    assert_eq!((status, kept["bot"]["channel"]["teamChat"].as_bool()), (200, Some(false)));
 }
 
 #[tokio::test]
-async fn the_team_chat_hears_of_hand_offs_and_bots_waiting_elsewhere() {
+async fn a_team_chat_hears_of_hand_offs_and_bots_waiting_elsewhere() {
     let s = setup().await;
     let mut events = s.events().await;
     until(&mut events, "hello", |f| f["kind"] == "hello").await;
@@ -1834,6 +1853,7 @@ async fn the_team_chat_hears_of_hand_offs_and_bots_waiting_elsewhere() {
         let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name, "soul": soul }))).await;
         ids.push(made["bot"]["id"].as_str().unwrap().to_string());
     }
+    s.call("POST", "/api/departments", Some(json!({ "name": "Garden", "botIds": ids }))).await;
     let (_, list) = s.call("GET", "/api/bots", None).await;
     let room = list["bots"].as_array().unwrap().iter().find(|b| b["channel"]["teamChat"] == true).unwrap()["threadId"].as_str().unwrap().to_string();
     let updates = || async {
@@ -1874,6 +1894,8 @@ async fn board_items_run_in_their_own_chats_in_order_and_ask_when_they_need_to()
         let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name }))).await;
         ids.push(made["bot"]["id"].as_str().unwrap().to_string());
     }
+    // In a department, so their team chat hears how items go.
+    s.call("POST", "/api/departments", Some(json!({ "name": "Garden", "botIds": ids }))).await;
     let board = || async {
         let (_, all) = s.call("GET", "/api/board", None).await;
         all["items"].as_array().unwrap().clone()
@@ -1931,7 +1953,7 @@ async fn board_items_run_in_their_own_chats_in_order_and_ask_when_they_need_to()
     assert_eq!(note["message"]["tool"]["name"], "notice: Scout put “Water” on the task board for Kiwi.");
     let water = board().await.into_iter().find(|i| i["title"] == "Water").unwrap();
     assert_eq!((water["by"].as_str(), water["botId"].as_str()), (Some("Scout"), Some(ids[1].as_str())));
-    // And the Team Chat heard how items went.
+    // And their team chat heard how items went.
     let (_, list) = s.call("GET", "/api/bots", None).await;
     let room = list["bots"].as_array().unwrap().iter().find(|b| b["channel"]["teamChat"] == true).unwrap()["threadId"].as_str().unwrap().to_string();
     let (_, page) = s.call("GET", &format!("/api/threads/{room}/messages?limit=50"), None).await;

@@ -229,8 +229,8 @@ pub async fn follow(app: &Arc<App>, key: &str, thread: &str, request_id: i64, mu
                     None => format!("It's your turn now, as {}.", bot.name),
                 };
                 let mut runner = channels::in_channel(bot, &channel, &members);
-                if super::team_chat::is_team_chat(app, &channel.id) {
-                    runner.instructions.push_str(&super::team_chat::note(&channel));
+                if let Some(dept) = super::team_chat::department_of_thread(app, thread) {
+                    runner.instructions.push_str(&super::team_chat::note(&channel, &dept));
                 }
                 (runner, false, cue, members)
             }

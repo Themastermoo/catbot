@@ -72,7 +72,7 @@ pub enum Body {
     Step { name: String, ok: Option<bool> },
     /// One bot handing the work to another (stage 29.12), by name: drawn as a chip with both.
     Handoff { from: String, to: String },
-    /// A line about the team in the Team Chat (stage 30.2): whose, what kind ("handoff",
+    /// A line about the team in its team chat (stage 30.2): whose, what kind ("handoff",
     /// "finished", "failed", "waiting"), and the chat it opens (`chat_of` owns `thread`).
     TeamUpdate { bot_id: String, kind: String, thread: String, chat_of: String, text: String },
     /// A picture being asked for and drawn (`pictures.rs`).
@@ -1349,7 +1349,7 @@ fn Row(
     }
 }
 
-/// The Team Chat's pinned notes, under its header (stage 30.1): one line until opened; Edit
+/// A team chat's pinned notes (its department's shared instructions), under its header (stage 30.4): one line until opened; Edit
 /// opens them in its settings.
 #[component]
 fn PinnedNotes(text: String) -> Element {
@@ -1533,7 +1533,7 @@ fn SpeakerTag(who: Speaker, #[props(default)] to: Vec<Speaker>, #[props(default)
     }
 }
 
-/// A line about the team in the Team Chat: the bot's face, what happened, and Open for the chat
+/// A line about the team in its team chat: the bot's face, what happened, and Open for the chat
 /// it happened in (stage 30.2).
 #[component]
 fn TeamUpdateLine(bot_id: String, kind: String, thread: String, chat_of: String, text: String, at: String, when: String) -> Element {

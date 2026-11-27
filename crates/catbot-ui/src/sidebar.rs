@@ -77,8 +77,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     // only a search shows it.
     let the_chief = all.iter().find(|b| b.chief && b.channel.is_none()).cloned();
     let chief = the_chief.clone().filter(|_| q.is_empty() && show_chief);
-    // The Team Chat has its own row at the top (stage 30.1), and is in the list only for a search.
-    let team_chat = all.iter().find(|b| b.is_team_chat()).cloned().filter(|_| q.is_empty());
+    // Each department's team chat has its own row under the department's heading (stage 30.4),
+    // and is in the list only for a search.
+    let team_chats: Vec<Bot> = all.iter().filter(|b| b.is_team_chat()).cloned().collect();
     let shown: Vec<Bot> = all
         .iter()
         .filter(|b| b.matches(&query.read()) && !the_chief.as_ref().is_some_and(|c| c.id == b.id && q.is_empty()) && !(b.is_team_chat() && q.is_empty()))
@@ -195,10 +196,6 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
             }
             if q.is_empty() {
                 crate::inbox::InboxRow {}
-                TeamMapRow {}
-                if let Some(team) = team_chat {
-                    TeamChatRow { selected: selected.read().as_deref() == Some(team.id.as_str()), bot: team, on_select: pick }
-                }
                 BoardRow {}
             }
             div { class: "min-h-0 flex-1 overflow-y-auto",
@@ -232,6 +229,10 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                                 on_open: move |o| department_dialog.set(Some(o)),
                             }
                         }
+                        // The department's team chat, under its heading.
+                        if let Some(team) = group.as_ref().filter(|name| q.is_empty() && !folded.contains(*name)).and_then(|name| team_chats.iter().find(|c| c.channel.as_ref().and_then(|i| i.department.as_ref()) == Some(name))).cloned() {
+                            TeamChatRow { key: "team-{team.id}", selected: selected.read().as_deref() == Some(team.id.as_str()), bot: team, on_select: pick }
+                        }
                         if group.as_ref().is_some_and(|name| name != crate::departments::GENERAL && !folded.contains(name)) && members.is_empty() {
                             div { "data-department-empty": true, class: "px-2 pb-1 text-[12px] leading-4 text-ink-tertiary", "No bots yet. Drag one here, or right-click a bot." }
                         }
@@ -262,6 +263,10 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                         }
                     }
                 }
+            }
+            // The Team map, at the bottom (Moo, 2026-11-26).
+            if q.is_empty() {
+                div { class: "pt-1", TeamMapRow {} }
             }
             crate::profile::ArchivedBots {}
             crate::departments::Dialogs { open: department_dialog }
@@ -311,7 +316,7 @@ fn TeamMapRow() -> Element {
     }
 }
 
-/// The task board, below the Team Chat (stage 30.3): how many items are open.
+/// The task board, under the Inbox (stage 30.3): how many items are open.
 #[component]
 fn BoardRow() -> Element {
     let ui = use_context::<Ui>();
@@ -349,7 +354,7 @@ fn BoardRow() -> Element {
     }
 }
 
-/// The Team Chat, below the Team map: every bot in one room (stage 30.1).
+/// A department's team chat, under its heading (stage 30.4): its bots in one room.
 #[component]
 fn TeamChatRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element {
     let ui = use_context::<Ui>();
@@ -359,8 +364,8 @@ fn TeamChatRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Ele
     let ring = if selected { "bg-ink/[0.16] text-ink" } else { "bg-raised text-ink-secondary" };
     let weight = if bot.unread { "font-semibold" } else { "font-medium" };
     rsx! {
-        div { class: "px-3 pb-1",
-            button { r#type: "button", "data-sidebar-team-chat": true, "aria-current": if selected { "true" } else { "false" }, title: "Team Chat: every bot, together",
+        div { class: "pb-0.5",
+            button { r#type: "button", "data-sidebar-team-chat": true, "aria-current": if selected { "true" } else { "false" }, title: "{bot.name}'s team chat: its bots, together",
                 class: "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left outline-none hover:bg-raised/60 focus-visible:ring-2 focus-visible:ring-accent/60",
                 onclick: move |_| {
                     let (mut map, mut board) = (ui.map, ui.board);
@@ -371,7 +376,7 @@ fn TeamChatRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Ele
                 span { class: "grid size-9 shrink-0 place-items-center rounded-full {ring}",
                     Icon { name: "message", size: 16 }
                 }
-                span { class: "min-w-0 flex-1 truncate text-[14px] leading-5 text-ink {weight}", "Team Chat" }
+                span { class: "min-w-0 flex-1 truncate text-[14px] leading-5 text-ink {weight}", "Team chat" }
                 if busy {
                     span { role: "img", "aria-label": "Working", class: "size-1.5 shrink-0 animate-pulse rounded-full bg-accent" }
                 } else if bot.unread {

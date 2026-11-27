@@ -112,7 +112,7 @@ pub fn SettingsPanel(bot: Bot) -> Element {
                 button { r#type: "button", "aria-label": "Collapse bot settings", class: ICON_BUTTON, onclick: close,
                     Glyph { d: "m15 18-6-6 6-6", size: 18 }
                 }
-                span { class: "text-[15px] font-semibold text-ink", if bot.is_team_chat() { "Team Chat settings" } else if channel { "Channel settings" } else { "Bot settings" } }
+                span { class: "text-[15px] font-semibold text-ink", if bot.is_team_chat() { "Team chat settings" } else if channel { "Channel settings" } else { "Bot settings" } }
                 button { r#type: "button", "aria-label": "Close bot settings", class: ICON_BUTTON, onclick: close,
                     Glyph { d: "M18 6 6 18M6 6l12 12", size: 18 }
                 }
@@ -279,7 +279,7 @@ pub fn BotSettings(bot: Bot) -> Element {
                             }
                         }
                         p { class: "mt-1.5 text-[12px] text-ink-tertiary",
-                            if team_chat { "Saved when you click away. A bot can propose changes; you approve them." } else { "Saved when you click away. Used from its next message." }
+                            if team_chat { "The department's shared instructions. Saved when you click away; a bot can propose changes, which you approve." } else { "Saved when you click away. Used from its next message." }
                         }
                     }
                     if channel {
@@ -366,7 +366,7 @@ pub fn BotSettings(bot: Bot) -> Element {
                             }
                         }
                     }
-                    // Deleting (not the Team Chat: it stays).
+                    // Deleting (not a team chat: it stays while its department does).
                     div { class: CARD, hidden: team_chat,
                         if confirm_delete() {
                             p { class: "text-[13px] leading-relaxed text-ink",
