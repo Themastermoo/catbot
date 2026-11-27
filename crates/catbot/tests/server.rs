@@ -384,6 +384,42 @@ async fn a_message_sent_while_the_bot_works_shows_at_once_and_is_read_when_it_s_
 }
 
 #[tokio::test]
+async fn a_waiting_message_can_be_steered_into_the_running_turn() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Palette" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "approve", "threadId": thread }))).await;
+    let steerable = until(&mut events, "steerable", |f| runtime(f, "turn.steerable")).await;
+    assert_eq!(steerable["event"]["steerable"], true, "Claude Code takes words mid-turn");
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+
+    // Sent while it works: waiting, marked so.
+    let (_, sent) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "and water the beans", "threadId": thread }))).await;
+    assert_eq!((sent["held"].as_bool(), sent["message"]["held"].as_bool()), (Some(true), Some(true)), "{sent}");
+    let id = sent["message"]["id"].as_str().unwrap().to_string();
+    // Steered in: no longer waiting, marked steered.
+    let (status, steered) = s.call("POST", &format!("/api/threads/{thread}/steer"), Some(json!({ "messageId": id }))).await;
+    assert_eq!(status, 200, "{steered}");
+    let patched = until(&mut events, "steered", |f| f["kind"] == "message.patch" && f["message"]["id"] == id.as_str()).await;
+    assert_eq!((patched["message"]["steered"].as_bool(), patched["message"]["held"].as_bool()), (Some(true), None));
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/steer"), Some(json!({ "messageId": id }))).await.0, 409, "once");
+
+    // The running turn reads it, and no second turn follows for it.
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert!(reply["message"]["text"].as_str().unwrap().ends_with("Steered: and water the beans"), "{reply}");
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == bot.as_str() && f["bot"]["activity"] == "idle").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=20"), None).await;
+    let replies = page["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").count();
+    assert_eq!(replies, 1, "{page}");
+}
+
+#[tokio::test]
 async fn bots_become_desktop_pets_when_ticked() {
     let s = setup().await;
     let (_, pets) = s.call("GET", "/api/pets", None).await;
@@ -4120,6 +4156,21 @@ async fn a_bot_on_codex_signs_in_streams_asks_and_resumes() {
     assert_eq!(reply["message"]["text"], "Edited.");
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello from codex");
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // 29.14: a message sent while it waits is steered in with turn/steer.
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "please run", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    let (_, held) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hidden files too", "threadId": thread }))).await;
+    let id = held["message"]["id"].as_str().unwrap().to_string();
+    let (status, steered) = s.call("POST", &format!("/api/threads/{thread}/steer"), Some(json!({ "messageId": id }))).await;
+    assert_eq!(status, 200, "{steered}");
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Ran it. Steered: hidden files too");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let asked_codex = logged().into_iter().find(|l| l["method"] == "turn/steer").unwrap();
+    assert!(asked_codex["params"]["expectedTurnId"].as_str().unwrap().starts_with("turn-"), "{asked_codex}");
 
     // Signed out on Codex's side: the bot says how to sign in again.
     s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "fail", "threadId": thread }))).await;

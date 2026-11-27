@@ -4,8 +4,11 @@
 //! session id (`--session-id` on the first turn, `--resume` after), so nothing has to stay
 //! running between messages.
 //!
-//! The CLI speaks JSON Lines: we write one user message to its stdin, close stdin, and read
-//! events from stdout until the `result` line.
+//! The CLI speaks JSON Lines: we write the person's message to its stdin and read events from
+//! stdout until the `result` line. Stdin stays open while the turn runs, so the person can steer
+//! it (stage 29.14): another user line, which the CLI takes in at its next step, or runs straight
+//! after as its next native turn (OpenMausBot's finding, CLI 2.1.282). Stdin closes at each
+//! `result`: the CLI still reads what was already written, and exits once it has answered it.
 
 use std::{path::PathBuf, process::Stdio};
 
@@ -317,8 +320,32 @@ fn flatten_tool_output(content: &Value) -> String {
 }
 
 /// A turn in progress. Dropping it stops the CLI.
+/// A way into a running turn (stage 29.14): words the person adds while the bot works. Errs
+/// when the turn can't take them now (it's ending, or its AI can't be steered).
+#[derive(Clone)]
+pub struct Steer(std::sync::Arc<SteerFn>);
+
+type SteerFuture = std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+type SteerFn = dyn Fn(String) -> SteerFuture + Send + Sync;
+
+impl Steer {
+    pub fn new<F, Fut>(f: F) -> Self
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = Result<(), String>> + Send + 'static,
+    {
+        Steer(std::sync::Arc::new(move |text| Box::pin(f(text))))
+    }
+
+    pub async fn send(&self, text: String) -> Result<(), String> {
+        (self.0)(text).await
+    }
+}
+
 pub struct Running {
     pub events: mpsc::Receiver<Event>,
+    /// How to steer it, for AIs that take words mid-turn.
+    steer: Option<Steer>,
     child: Option<Child>,
     broker: Option<Broker>,
     /// A turn Catbot runs itself (a chat API, `api.rs`): its task and its own questions.
@@ -330,7 +357,18 @@ impl Running {
     /// A turn driven inside Catbot rather than by a program: its events, the task making them,
     /// and the answerer its approval questions wait on.
     pub fn in_process(events: mpsc::Receiver<Event>, task: tokio::task::JoinHandle<()>, answers: Answerer) -> Self {
-        Self { events, child: None, broker: None, task: Some(task), answers: Some(answers) }
+        Self { events, steer: None, child: None, broker: None, task: Some(task), answers: Some(answers) }
+    }
+
+    /// With a way to steer it.
+    pub fn with_steer(mut self, steer: Steer) -> Self {
+        self.steer = Some(steer);
+        self
+    }
+
+    /// How to steer the turn, if its AI can be.
+    pub fn steer(&self) -> Option<Steer> {
+        self.steer.clone()
     }
 
     /// The private folder holding this turn's approval socket, if approvals are on.
@@ -436,7 +474,22 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
     let mut line = user_message(&turn.prompt);
     line.push('\n');
     stdin.write_all(line.as_bytes()).await?;
-    drop(stdin); // end of input: the CLI answers this one message and exits
+    // Kept open for steering; closed at the turn's `result` (or when the reader stops).
+    let input = std::sync::Arc::new(tokio::sync::Mutex::new(Some(stdin)));
+    let steer = {
+        let input = input.clone();
+        Steer::new(move |text: String| {
+            let input = input.clone();
+            async move {
+                let mut held = input.lock().await;
+                let stdin = held.as_mut().ok_or("the turn is ending")?;
+                let mut line = user_message(&text);
+                line.push('\n');
+                stdin.write_all(line.as_bytes()).await.map_err(|e| format!("Claude Code stopped listening ({e})"))?;
+                stdin.flush().await.map_err(|e| format!("Claude Code stopped listening ({e})"))
+            }
+        })
+    };
 
     let stdout = child.stdout.take().expect("stdout is piped");
     let mut stderr = child.stderr.take().expect("stderr is piped");
@@ -454,12 +507,17 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
         let mut finished = false;
         while let Ok(Some(line)) = lines.next_line().await {
             for event in parse_line(&line) {
-                finished |= matches!(event, Event::Finished(_));
+                if matches!(event, Event::Finished(_)) {
+                    finished = true;
+                    // End of input: the CLI answers what it has (a steer included) and exits.
+                    input.lock().await.take();
+                }
                 if tx.send(event).await.is_err() {
                     return; // nobody is listening any more
                 }
             }
         }
+        input.lock().await.take();
         if !finished {
             // The CLI ended without a result line: crashed, killed, or refused its arguments.
             let tail = stderr_tail.await.unwrap_or_default();
@@ -469,7 +527,7 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
         }
     });
 
-    Ok(Running { events, child: Some(child), broker, task: None, answers: None })
+    Ok(Running { events, steer: Some(steer), child: Some(child), broker, task: None, answers: None })
 }
 
 #[cfg(test)]

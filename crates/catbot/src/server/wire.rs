@@ -236,6 +236,13 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
             if detail["scheduled"].is_object() {
                 fields["scheduled"] = detail["scheduled"].clone();
             }
+            // Sent while the bot worked (stage 29.14): waiting for the turn to end, or steered in.
+            if detail["held"] == true {
+                fields["held"] = json!(true);
+            }
+            if detail["steered"] == true {
+                fields["steered"] = json!(true);
+            }
             fields
         }
         Role::Bot => {

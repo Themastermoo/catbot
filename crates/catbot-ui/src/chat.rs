@@ -49,6 +49,17 @@ pub struct Msg {
     /// A message written earlier and sent at a set time: when it was for, and whether it went
     /// out late (stage 21).
     pub scheduled: Option<(f64, bool)>,
+    /// Sent while the bot worked (stage 29.14): waiting for the turn to end, or steered into it.
+    pub held: Held,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Held {
+    No,
+    /// Waiting for the turn to end (it can be steered in).
+    Waiting,
+    /// Steered into the turn while it ran.
+    Steered,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -158,7 +169,14 @@ impl Msg {
         let reactions = wire["reactions"].as_array().map(|r| r.iter().filter_map(|e| e.as_str().map(str::to_string)).collect()).unwrap_or_default();
         let bot_id = wire["botId"].as_str().map(str::to_string);
         let scheduled = wire["scheduled"]["for"].as_f64().map(|due| (due, wire["scheduled"]["late"] == true));
-        Some(Msg { id, at, send_id, body, attachments, reactions, bot_id, scheduled })
+        let held = if wire["held"] == true {
+            Held::Waiting
+        } else if wire["steered"] == true {
+            Held::Steered
+        } else {
+            Held::No
+        };
+        Some(Msg { id, at, send_id, body, attachments, reactions, bot_id, scheduled, held })
     }
 
     fn is_step(&self) -> bool {
@@ -352,6 +370,8 @@ pub fn Chat(bot: Bot) -> Element {
         None if room => std::iter::once(bot.id.clone()).chain(guests).collect(),
         None => Vec::new(),
     };
+    // Whether what's waiting can be steered into the running turn (stage 29.14).
+    let steerable = live.as_ref().is_some_and(|l| l.steerable);
     // The newest hand-off is still going while the chat works.
     let handing = messages.iter().rev().find(|m| matches!(m.body, Body::Handoff { .. })).map(|m| m.id.clone()).filter(|_| working);
     let replies: Vec<(String, String)> = messages.iter().filter_map(|m| match &m.body {
@@ -409,7 +429,7 @@ pub fn Chat(bot: Bot) -> Element {
                                 match item {
                                     Item::One(m) => {
                                         let handing = handing.as_deref() == Some(m.id.as_str());
-                                        rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone(), bot_id: bot.id.clone(), working, speakers: bot.channel.clone(), room, handing } }
+                                        rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone(), bot_id: bot.id.clone(), working, speakers: bot.channel.clone(), room, handing, steerable } }
                                     }
                                     Item::Run(steps) => rsx! { Run { steps, bot_name: bot.name.clone(), asking } },
                                 }
@@ -452,7 +472,7 @@ fn LiveTurn(
             if live.text.is_empty() {
                 Working { who }
             } else {
-                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: live.bot_id, scheduled: None }, bot_id, speakers, room, live: true }
+                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: live.bot_id, scheduled: None, held: Held::No }, bot_id, speakers, room, live: true }
             }
         }
     }
@@ -1194,6 +1214,9 @@ fn Row(
     /// The reply streaming in now.
     #[props(default)]
     live: bool,
+    /// The running turn takes words mid-turn: a waiting message gets Steer now (stage 29.14).
+    #[props(default)]
+    steerable: bool,
 ) -> Element {
     let when = clock(message.at);
     let full_time = full_date(message.at);
@@ -1221,6 +1244,13 @@ fn Row(
                         div { class: "chat-text", "{text}" }
                     }
                 }
+                }
+                match message.held {
+                    Held::Waiting => rsx! { HeldNote { thread: thread.clone(), message: message.id.clone(), steerable: steerable && working } },
+                    Held::Steered => rsx! {
+                        span { "data-steered": true, class: "flex items-center gap-1 pr-1 text-[11px] text-ink-tertiary", "Steered into the turn" }
+                    },
+                    Held::No => rsx! {},
                 }
                 if let Some((due, late)) = message.scheduled {
                     span { "data-scheduled-note": if late { "late" } else { "on-time" }, class: "flex items-center gap-1 pr-1 text-[11px] text-ink-tertiary", title: "Written earlier and sent at the time set",
@@ -1347,6 +1377,44 @@ fn PinnedNotes(text: String) -> Element {
                 button { r#type: "button", "data-pinned-edit": true, class: "shrink-0 text-ink-tertiary hover:text-ink hover:underline", onclick: move |_| ui.settings_open.set(true),
                     if text.is_empty() { "Add" } else { "Edit" }
                 }
+            }
+        }
+    }
+}
+
+/// Under a message sent while the bot worked: it waits for the turn to end, and Steer now sends
+/// it into the running turn when its AI can take it (stage 29.14).
+#[component]
+fn HeldNote(thread: String, message: String, steerable: bool) -> Element {
+    let mut busy = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    rsx! {
+        div { "data-held": true, class: "flex flex-col items-end gap-0.5 pr-1 text-[11px] text-ink-tertiary",
+            span { class: "flex items-center gap-1.5",
+                crate::sidebar::Icon { name: "clock", size: 11 }
+                "Waiting for the turn to end"
+                if steerable {
+                    button {
+                        r#type: "button",
+                        "data-steer": true,
+                        disabled: busy(),
+                        title: "Send this into what the bot is doing now",
+                        class: "rounded-full bg-raised px-2 py-0.5 text-[11px] font-medium text-ink hover:bg-control disabled:opacity-40",
+                        onclick: move |_| {
+                            let (thread, message) = (thread.clone(), message.clone());
+                            spawn(async move {
+                                busy.set(true);
+                                let body = serde_json::json!({ "messageId": message });
+                                problem.set(api::call("POST", &format!("/api/threads/{thread}/steer"), Some(&body)).await.err());
+                                busy.set(false);
+                            });
+                        },
+                        if busy() { "Steering…" } else { "Steer now" }
+                    }
+                }
+            }
+            if let Some(err) = problem() {
+                span { role: "alert", class: "text-right text-danger", style: "max-width:320px", "{err}" }
             }
         }
     }
@@ -1957,7 +2025,7 @@ mod tests {
     use serde_json::json;
 
     fn step(id: &str, name: &str, at: f64) -> Msg {
-        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) }, attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None }
+        Msg { id: id.into(), at, send_id: None, body: Body::Step { name: name.into(), ok: Some(true) }, attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None, held: Held::No }
     }
 
     #[test]
@@ -1978,7 +2046,7 @@ mod tests {
     }
 
     fn bot_said(id: &str, by: Option<&str>, text: &str) -> Msg {
-        Msg { id: id.into(), at: 1.0, send_id: None, body: Body::Reply(text.into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: by.map(str::to_string), scheduled: None }
+        Msg { id: id.into(), at: 1.0, send_id: None, body: Body::Reply(text.into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: by.map(str::to_string), scheduled: None, held: Held::No }
     }
 
     fn who(id: &str, name: &str) -> Speaker {
@@ -1992,6 +2060,16 @@ mod tests {
         // It stands on its own line, between steps.
         let items = group(&[step("a", "Read", 1.0), note, step("b", "Read", 1.0)]);
         assert_eq!(items.len(), 3);
+    }
+
+    #[test]
+    fn a_message_sent_while_the_bot_works_waits_or_was_steered() {
+        let mine = |extra: Value| {
+            let mut wire = json!({ "id": "cb-9", "at": 1.0, "role": "user", "kind": "text", "text": "and the beans" });
+            wire.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            Msg::from_wire(&wire).unwrap().held
+        };
+        assert_eq!((mine(json!({ "held": true })), mine(json!({ "steered": true })), mine(json!({}))), (Held::Waiting, Held::Steered, Held::No));
     }
 
     #[test]
@@ -2020,7 +2098,7 @@ mod tests {
 
     #[test]
     fn steps_fold_into_runs() {
-        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None };
+        let reply = Msg { id: "r".into(), at: 3.0, send_id: None, body: Body::Reply("done".into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None, held: Held::No };
         let items = group(&[step("a", "Read", 1.0), step("b", "Read", 1.0), step("c", "Bash", 2.0), reply.clone(), step("d", "Edit", 4.0)]);
         assert_eq!(items.len(), 3);
         assert!(matches!(&items[0], Item::Run(steps) if steps.len() == 3));

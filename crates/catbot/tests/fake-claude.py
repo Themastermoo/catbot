@@ -3,7 +3,8 @@
 The prompt picks the behaviour:
   "crash"  -> writes to stderr and exits 1 with no result line
   "tool"   -> calls a tool that is refused, like an unapproved Bash command
-  "approve" -> asks the permission prompt tool (as the real CLI does), and obeys the answer
+  "approve" -> asks the permission prompt tool (as the real CLI does), and obeys the answer;
+               user lines written meanwhile (steering) end its reply as "Steered: …"
   "draw me <what>" -> asks Catbot for a picture of it in its reply
   (asked as Catbot's drawer, for SVG or a Blender script) -> answers with one
   "limit"  -> turns the turn away at the plan's usage limit, as the real CLI does
@@ -123,6 +124,14 @@ if prompt == "approve" or ("</conversation_so_far>" in prompt and prompt.rsplit(
     tool_input = {"command": "echo hi"}
     out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t2", "name": "Bash", "input": tool_input}]}})
     verdict = ask_permission("Bash", tool_input)
+    # Words the person steered in while it waited (stage 29.14): more user lines on stdin.
+    import select
+    steered = []
+    while select.select([sys.stdin], [], [], 0.3)[0]:
+        extra = sys.stdin.readline()
+        if not extra:
+            break
+        steered.append(json.loads(extra)["message"]["content"])
     if verdict["behavior"] == "allow":
         out({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t2", "content": "hi"}]}})
     else:
@@ -134,6 +143,8 @@ if prompt.startswith("write ") and ":" in prompt.splitlines()[0]:
     with open(os.path.join(os.getcwd(), name.strip()), "w") as f:
         f.write(words.strip() + "\n")
 reply = f"Hello, {prompt}"
+if "steered" in dir() and steered:
+    reply += "\n\nSteered: " + " / ".join(steered)
 # A bot told "fake-pass @Name" (in its instructions, which come first) hands on to that bot.
 import re
 passing = re.search(r"fake-pass (@\w+)", system)

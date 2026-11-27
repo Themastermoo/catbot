@@ -319,6 +319,10 @@ pub(super) fn send(app: &Arc<App>, channel: Channel, body: Value) -> Answer {
     if !reacted.is_empty() {
         detail["reactionNote"] = json!(reacted);
     }
+    // Waiting for the bots, with Steer now in the app (stage 29.14).
+    if busy {
+        detail["held"] = json!(true);
+    }
     let message = turns::save_and_send(app, &conversation.id, Role::Person, &text, (detail != json!({})).then_some(&detail))
         .ok_or((StatusCode::INTERNAL_SERVER_ERROR, "couldn't save the message".to_string()))?;
     let request_id = message["id"].as_str().and_then(wire::parse_message_id).ok_or((StatusCode::INTERNAL_SERVER_ERROR, "no message id".to_string()))?;
@@ -361,6 +365,9 @@ pub fn release_held(app: &Arc<App>, channel_id: &str) {
     // (Each bot is shown the whole talk, replies given after these were sent included.)
     let request_id = held.last().map(|(id, _)| *id).unwrap_or_default();
     let said = held.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("\n\n");
+    for (id, _) in &held {
+        super::mark_held(app, &conversation.id, *id, None);
+    }
     let members: Vec<Bot> = channel.members.iter().filter_map(|id| app.with_store(|store| store.bot_by_id(id)).flatten()).collect();
     if !members.is_empty() {
         answer(app, &channel, &conversation.id, &members, request_id, &said);

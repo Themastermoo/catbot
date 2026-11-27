@@ -26,6 +26,8 @@ struct Handle {
     /// The bot taking the turn (in a channel, whichever member it is).
     bot_id: String,
     answerer: Option<Answerer>,
+    /// How to steer it, when its AI takes words mid-turn (stage 29.14).
+    steer: Option<claude::Steer>,
     cancel: Arc<Notify>,
     /// Approval cards still waiting for the person: request id → the card's message id.
     open_cards: HashMap<String, i64>,
@@ -109,6 +111,17 @@ impl Turns {
         answerer.answer(request_id, decision).then(|| handle.turn_id.clone())
     }
 
+    /// How to steer the conversation's running turn, if it can be.
+    pub fn steer(&self, thread_id: &str) -> Option<claude::Steer> {
+        self.running.lock().expect("turns lock").get(thread_id)?.steer.clone()
+    }
+
+    fn set_steer(&self, thread_id: &str, steer: Option<claude::Steer>) {
+        if let Some(handle) = self.running.lock().expect("turns lock").get_mut(thread_id) {
+            handle.steer = steer;
+        }
+    }
+
     fn set_answerer(&self, thread_id: &str, answerer: Option<Answerer>) {
         if let Some(handle) = self.running.lock().expect("turns lock").get_mut(thread_id) {
             handle.answerer = answerer;
@@ -182,7 +195,7 @@ fn register(app: &App, thread: &str, bot_id: &str) -> Result<(String, Arc<Notify
     if running.contains_key(thread) {
         return Err("this bot is still working on the last message");
     }
-    running.insert(thread.to_string(), Handle { turn_id: turn_id.clone(), bot_id: bot_id.to_string(), answerer: None, cancel: cancel.clone(), open_cards: HashMap::new() });
+    running.insert(thread.to_string(), Handle { turn_id: turn_id.clone(), bot_id: bot_id.to_string(), answerer: None, steer: None, cancel: cancel.clone(), open_cards: HashMap::new() });
     Ok((turn_id, cancel))
 }
 
@@ -489,6 +502,10 @@ async fn drive(
         }
     };
     app.turns.set_answerer(thread, running.answerer());
+    // Whether the person can steer it (stage 29.14): the app shows Steer now on what they sent meanwhile.
+    let steer = running.steer();
+    emit(json!({ "type": "turn.steerable", "steerable": steer.is_some() }));
+    app.turns.set_steer(thread, steer);
 
     let mut tools: HashMap<String, usize> = HashMap::new();
     let mut gap = false; // a text block ended; the next one starts a new paragraph

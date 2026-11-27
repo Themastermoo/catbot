@@ -1146,6 +1146,9 @@ pub fn release_held(app: &Arc<App>, thread: &str) {
     let Some(held) = app.held.lock().expect("held lock").remove(thread).filter(|h| !h.is_empty()) else { return };
     let request_id = held.last().map(|(id, _)| *id).unwrap_or_default();
     let said = held.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("\n\n");
+    for (id, _) in &held {
+        mark_held(app, thread, *id, None);
+    }
     let Some(conversation) = app.with_store(|store| store.conversation(thread)).flatten() else { return };
     let Some(mut bot) = app.with_store(|store| store.bot_by_id(&conversation.bot_id)).flatten() else { return };
     bot.instructions.push_str(&handoffs::roster_note(app, &bot));
@@ -1164,6 +1167,63 @@ pub fn release_held(app: &Arc<App>, thread: &str) {
     if let Err(err) = turns::start(app.clone(), bot, conversation, request_id, said) {
         eprintln!("catbot: a held message couldn't go: {err}");
     }
+}
+
+/// A held message no longer waits: read with the next turn (`steered` None), or steered into
+/// the running one. Its chat is told, so Steer now goes.
+pub fn mark_held(app: &App, thread: &str, id: i64, steered: Option<bool>) {
+    let wire = app.with_store(|store| {
+        let Some(message) = store.message(id)? else { return Ok(None) };
+        let mut detail = message.detail.clone().unwrap_or_else(|| json!({}));
+        if detail["held"] != true {
+            return Ok(None);
+        }
+        detail["held"] = json!(false);
+        if let Some(steered) = steered {
+            detail["steered"] = json!(steered);
+        }
+        store.update_detail(id, &detail)?;
+        let parent = store.previous_message_id(thread, id)?;
+        Ok(Some(wire::message(&store.message(id)?.ok_or("message vanished")?, parent)))
+    });
+    if let Some(Some(wire)) = wire {
+        app.hub.send(json!({ "kind": "message.patch", "threadId": thread, "message": wire }));
+    }
+}
+
+/// `POST /api/threads/:thread/steer` `{ messageId }` (stage 29.14): a message waiting for the
+/// turn to end goes into the running turn now, if its AI can take it. If not, it keeps waiting.
+async fn steer(app: &Arc<App>, thread: &str, body: &Value) -> Answer {
+    let id = body["messageId"].as_str().and_then(wire::parse_message_id).ok_or_else(|| bad("which message?"))?;
+    // Held under the chat, or for a channel under the channel.
+    let channel = app.with_store(|store| store.conversation(thread)).flatten().and_then(|c| c.channel_id);
+    let key = channel.unwrap_or_else(|| thread.to_string());
+    let taken = {
+        let mut held = app.held.lock().expect("held lock");
+        let list = held.get_mut(&key);
+        let at = list.as_ref().and_then(|l| l.iter().position(|(m, _)| *m == id));
+        match (list, at) {
+            (Some(list), Some(at)) => Some((at, list.remove(at))),
+            _ => None,
+        }
+    };
+    let Some((at, (_, text))) = taken else {
+        return Err((StatusCode::CONFLICT, "that message isn't waiting any more".into()));
+    };
+    let put_back = |why: String| {
+        let mut held = app.held.lock().expect("held lock");
+        let list = held.entry(key.clone()).or_default();
+        list.insert(at.min(list.len()), (id, text.clone()));
+        (StatusCode::CONFLICT, why)
+    };
+    let Some(steering) = app.turns.steer(thread) else {
+        return Err(put_back("this AI can't take words in the middle of a turn: it reads this when it's done".into()));
+    };
+    if let Err(why) = steering.send(text.clone()).await {
+        return Err(put_back(format!("it couldn't be steered in ({why}): it's read when the turn ends")));
+    }
+    mark_held(app, thread, id, Some(true));
+    Ok((StatusCode::OK, json!({ "ok": true, "steered": true })))
 }
 
 /// `POST /api/bots/:id/messages`: keep the person's message, show it everywhere, start the turn.
@@ -1209,6 +1269,10 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     let reacted = format!("{}{}", reactions::untold_note(app, &conversation.id), changes::untold_note(app, &conversation.id));
     if !reacted.is_empty() {
         detail["reactionNote"] = json!(reacted);
+    }
+    // Waiting for the turn to end, with Steer now in the app (stage 29.14).
+    if busy {
+        detail["held"] = json!(true);
     }
     let detail = (detail != json!({})).then_some(detail);
     let message = turns::save_and_send(app, &conversation.id, Role::Person, &text, detail.as_ref())
@@ -1388,6 +1452,10 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
         (Method::POST, ["messages", message, "reactions"]) => {
             let message = urlencoding_decode(message);
             reactions::react(app, thread, &message, &json_body(req).await?)
+        }
+        (Method::POST, ["steer"]) => {
+            let body = json_body(req).await?;
+            steer(app, thread, &body).await
         }
         (Method::POST, ["respond"]) => {
             let body = json_body(req).await?;

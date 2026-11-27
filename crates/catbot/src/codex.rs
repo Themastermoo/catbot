@@ -230,9 +230,25 @@ pub fn start(turn: CodexTurn) -> Result<Running, String> {
     .map_err(|e| e.to_string())?;
     let (tx, events) = mpsc::channel(256);
     let answers = Answerer::local();
-    let task = tokio::spawn(run(turn, child, tx, answers.clone()));
-    Ok(Running::in_process(events, task, answers))
+    // The running turn, once Codex has started it: steered with `turn/steer` (stage 29.14).
+    let live: Arc<Mutex<Option<(Link, String, String)>>> = Arc::default();
+    let steer = {
+        let live = live.clone();
+        crate::claude::Steer::new(move |text: String| {
+            let now = live.lock().expect("codex live lock").clone();
+            async move {
+                let (link, thread, turn) = now.ok_or("the turn isn't running yet, or is ending")?;
+                let ask = json!({ "threadId": thread, "input": [{ "type": "text", "text": text }], "expectedTurnId": turn });
+                link.call("turn/steer", ask, Some(STEER_TIME)).await.map(|_| ())
+            }
+        })
+    };
+    let task = tokio::spawn(run(turn, child, tx, answers.clone(), live));
+    Ok(Running::in_process(events, task, answers).with_steer(steer))
 }
+
+/// How long Codex has to take a steer.
+const STEER_TIME: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Codex's sandbox and approval policy for a bot's approval level.
 pub fn policy(mode: PermissionMode) -> (&'static str, &'static str) {
@@ -273,7 +289,7 @@ struct Heard {
     told: Vec<String>,
 }
 
-async fn run(turn: CodexTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: Answerer) {
+async fn run(turn: CodexTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: Answerer, live: Arc<Mutex<Option<(Link, String, String)>>>) {
     let started = std::time::Instant::now();
     let stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
@@ -289,7 +305,8 @@ async fn run(turn: CodexTurn, mut child: Child, tx: mpsc::Sender<Event>, answers
     let (done_tx, done_rx) = mpsc::channel(4);
     let reader = tokio::spawn(read(stdout, link.clone(), tx.clone(), answers, heard.clone(), turn.workspace.mode, done_tx));
 
-    let result = converse(&turn, &link, &tx, done_rx).await;
+    let result = converse(&turn, &link, &tx, done_rx, &live).await;
+    live.lock().expect("codex live lock").take();
     let (said, tokens, told) = {
         let mut heard = heard.lock().expect("heard lock");
         let mut said = std::mem::take(&mut heard.said);
@@ -332,7 +349,7 @@ async fn run(turn: CodexTurn, mut child: Child, tx: mpsc::Sender<Event>, answers
 
 /// The handshake, the thread and the turn: the thread's id, how the turn ended, and the error
 /// Codex gave, if any.
-async fn converse(turn: &CodexTurn, link: &Link, tx: &mpsc::Sender<Event>, mut done: mpsc::Receiver<Value>) -> Result<(String, String, Option<String>), String> {
+async fn converse(turn: &CodexTurn, link: &Link, tx: &mpsc::Sender<Event>, mut done: mpsc::Receiver<Value>, live: &Mutex<Option<(Link, String, String)>>) -> Result<(String, String, Option<String>), String> {
     initialize(link).await?;
     let (sandbox, approval) = policy(turn.workspace.mode);
     let cwd = turn.workspace.folder.display().to_string();
@@ -378,6 +395,9 @@ async fn converse(turn: &CodexTurn, link: &Link, tx: &mpsc::Sender<Event>, mut d
     }
     let started = link.call("turn/start", ask, Some(START_TIME)).await?;
     let id = started["turn"]["id"].as_str().unwrap_or_default().to_string();
+    if !id.is_empty() {
+        *live.lock().expect("codex live lock") = Some((link.clone(), thread.clone(), id.clone()));
+    }
     // Its end: the turn/completed for this turn (Codex has one turn at a time on a thread).
     while let Some(finished) = done.recv().await {
         let ended = &finished["turn"];

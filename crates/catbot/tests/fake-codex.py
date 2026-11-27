@@ -25,6 +25,7 @@ def note(method, params):
     send({"method": method, "params": params})
 
 pending = []
+steered = []
 next_id = [100]
 def ask(method, params):
     """A request of Codex's own; waits for Catbot's answer (other messages wait their turn)."""
@@ -39,6 +40,11 @@ def ask(method, params):
         log(message)
         if message.get("id") == rid and "method" not in message:
             return message.get("result", {})
+        # Steered while it waits (turn/steer, stage 29.14): taken in now, for the reply.
+        if message.get("method") == "turn/steer":
+            steered.append(message["params"]["input"][0]["text"])
+            send({"id": message["id"], "result": {"turnId": message["params"].get("expectedTurnId")}})
+            continue
         pending.append(message)
 
 def auth():
@@ -72,7 +78,7 @@ def turn(params, tid):
         answer = ask("item/commandExecution/requestApproval", dict(base, itemId="c1", command="ls", reason="list the folder"))
         if answer.get("decision") == "accept":
             note("item/completed", dict(base, item={"type": "commandExecution", "id": "c1", "command": "ls", "status": "completed", "exitCode": 0, "aggregatedOutput": "a.md\n"}))
-            say("Ran it.")
+            say("Ran it." + (" Steered: " + " / ".join(steered) if steered else ""))
         else:
             note("item/completed", dict(base, item={"type": "commandExecution", "id": "c1", "command": "ls", "status": "declined"}))
             say("Didn't run it.")
