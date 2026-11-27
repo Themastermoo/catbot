@@ -374,6 +374,9 @@ fn now() -> String {
     chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, false)
 }
 
+/// The most rows one page of a chat brings, steps included.
+pub const SHOWN_PAGE_ROWS: usize = 1000;
+
 impl Store {
     /// Opens (or creates) the store in `home`, a folder only this user can open.
     pub fn open(home: &Path) -> Result<Self, BoxError> {
@@ -1361,6 +1364,29 @@ impl Store {
         Ok((messages, more))
     }
 
+    /// A page as the chat shows it: up to `limit` messages older than `before` that aren't tool
+    /// steps, with the steps between them besides, oldest first, and whether there are older
+    /// ones still. A busy bot's steps would otherwise fill a page and push the conversation out
+    /// of it (Moo, 2026-11-27). At most `SHOWN_PAGE_ROWS` rows come back all the same.
+    pub fn shown_page(&self, conversation_id: &str, before: Option<i64>, limit: usize) -> Result<(Vec<Message>, bool), BoxError> {
+        let before = before.unwrap_or(i64::MAX);
+        let mut stmt = self.conn.prepare("SELECT id, role, body, detail, at FROM messages WHERE conversation_id = ?1 AND id < ?2 ORDER BY id DESC")?;
+        let rows = stmt.query_map(params![conversation_id, before], message_from_row)?;
+        let (mut messages, mut counted, mut more) = (Vec::new(), 0, false);
+        for row in rows {
+            let message = row?;
+            let counts = message.role != Role::Step;
+            if (counts && counted == limit) || messages.len() == SHOWN_PAGE_ROWS {
+                more = true;
+                break;
+            }
+            counted += usize::from(counts);
+            messages.push(message);
+        }
+        messages.reverse();
+        Ok((messages, more))
+    }
+
     /// The message just before `id` in its conversation.
     pub fn previous_message_id(&self, conversation_id: &str, id: i64) -> Result<Option<i64>, BoxError> {
         Ok(self
@@ -1625,6 +1651,23 @@ mod tests {
         assert_eq!(store.previous_message_id(&conv.id, ids[2]).unwrap(), Some(ids[1]));
         assert_eq!(store.previous_message_id(&conv.id, ids[0]).unwrap(), None);
         assert_eq!(store.message(ids[4]).unwrap().unwrap().body, "m4");
+
+        // Tool steps come along without counting: the conversation stays in the page.
+        let steps = store.ensure_conversation(&store.create_bot(new("Busy")).unwrap().id).unwrap();
+        store.add_message(&steps.id, Role::Person, "first", None).unwrap();
+        store.add_message(&steps.id, Role::Bot, "first reply", None).unwrap();
+        let ask = store.add_message(&steps.id, Role::Person, "read the notes", None).unwrap();
+        for i in 0..60 {
+            store.add_message(&steps.id, Role::Step, &format!("read {i}"), None).unwrap();
+        }
+        store.add_message(&steps.id, Role::Bot, "done", None).unwrap();
+        let (shown, more) = store.shown_page(&steps.id, None, 2).unwrap();
+        assert_eq!(shown.first().map(|m| m.id), Some(ask), "the person's message, then its 60 steps and the reply");
+        assert_eq!(shown.len(), 62);
+        assert!(more);
+        let (older, more) = store.shown_page(&steps.id, Some(ask), 2).unwrap();
+        assert_eq!(older.iter().map(|m| m.body.as_str()).collect::<Vec<_>>(), ["first", "first reply"]);
+        assert!(!more);
     }
 
     #[test]

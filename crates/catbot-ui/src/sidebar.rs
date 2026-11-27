@@ -214,11 +214,19 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                     }
                     for (group, members) in grouped {
                         if let Some(name) = group.clone() {
+                            // The department's team chat opens from its name (Moo, 2026-11-27).
+                            {
+                                let team = q.is_empty().then(|| team_chats.iter().find(|c| c.channel.as_ref().and_then(|i| i.department.as_ref()) == Some(&name)).cloned()).flatten();
+                                let team_selected = team.as_ref().is_some_and(|t| selected.read().as_deref() == Some(t.id.as_str()));
+                                rsx! {
                             crate::departments::Header {
                                 key: "dept-{name}",
                                 name: name.clone(),
                                 bots: members.clone(),
                                 folded: folded.contains(&name),
+                                team,
+                                team_selected,
+                                on_team: pick,
                                 dragging,
                                 on_toggle: {
                                     let name = name.clone();
@@ -228,10 +236,8 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                                 },
                                 on_open: move |o| department_dialog.set(Some(o)),
                             }
-                        }
-                        // The department's team chat, under its heading.
-                        if let Some(team) = group.as_ref().filter(|name| q.is_empty() && !folded.contains(*name)).and_then(|name| team_chats.iter().find(|c| c.channel.as_ref().and_then(|i| i.department.as_ref()) == Some(name))).cloned() {
-                            TeamChatRow { key: "team-{team.id}", selected: selected.read().as_deref() == Some(team.id.as_str()), bot: team, on_select: pick }
+                                }
+                            }
                         }
                         if group.as_ref().is_some_and(|name| name != crate::departments::GENERAL && !folded.contains(name)) && members.is_empty() {
                             div { "data-department-empty": true, class: "px-2 pb-1 text-[12px] leading-4 text-ink-tertiary", "No bots yet. Drag one here, or right-click a bot." }
@@ -347,41 +353,6 @@ fn BoardRow() -> Element {
                 }
                 span { class: "min-w-0 flex-1 truncate text-[14px] font-medium leading-5 text-ink", "Task board" }
                 if count() > 0 {
-                    span { class: "shrink-0 text-[12px] tabular-nums text-ink-tertiary", "{count}" }
-                }
-            }
-        }
-    }
-}
-
-/// A department's team chat, under its heading (stage 30.4): its bots in one room.
-#[component]
-fn TeamChatRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Element {
-    let ui = use_context::<Ui>();
-    let id = bot.id.clone();
-    let busy = bot.activity != Activity::Idle;
-    let count = bot.channel.as_ref().map_or(0, |c| c.members.len());
-    let ring = if selected { "bg-ink/[0.16] text-ink" } else { "bg-raised text-ink-secondary" };
-    let weight = if bot.unread { "font-semibold" } else { "font-medium" };
-    rsx! {
-        div { class: "pb-0.5",
-            button { r#type: "button", "data-sidebar-team-chat": true, "aria-current": if selected { "true" } else { "false" }, title: "Team chat for {bot.name}: its bots, together",
-                class: "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left outline-none hover:bg-raised/60 focus-visible:ring-2 focus-visible:ring-accent/60",
-                onclick: move |_| {
-                    let (mut map, mut board) = (ui.map, ui.board);
-                    map.set(false);
-                    board.set(false);
-                    on_select.call(id.clone());
-                },
-                span { class: "grid size-9 shrink-0 place-items-center rounded-full {ring}",
-                    Icon { name: "message", size: 16 }
-                }
-                span { class: "min-w-0 flex-1 truncate text-[14px] leading-5 text-ink {weight}", "Team chat" }
-                if busy {
-                    span { role: "img", "aria-label": "Working", class: "size-1.5 shrink-0 animate-pulse rounded-full bg-accent" }
-                } else if bot.unread {
-                    span { role: "img", "aria-label": "Unread", class: "size-2 shrink-0 rounded-full bg-accent" }
-                } else {
                     span { class: "shrink-0 text-[12px] tabular-nums text-ink-tertiary", "{count}" }
                 }
             }

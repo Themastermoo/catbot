@@ -106,10 +106,11 @@ impl State {
     /// an earlier page goes in front.
     pub fn loaded(&mut self, thread: &str, page: Vec<Msg>, more: bool, earlier: bool) {
         let entry = self.threads.entry(thread.to_string()).or_default();
-        if earlier {
+        let more = if earlier {
             let mut all = page;
             all.append(&mut entry.messages);
             entry.messages = all;
+            more
         } else {
             let mut all = page;
             // What came while it loaded: a newer version of a message in the page, or a message
@@ -122,14 +123,29 @@ impl State {
                     None => {}
                 }
             }
+            // Earlier messages already loaded stay in front of the page: fetching a chat again
+            // (after a reconnect) brings only its newest page (Moo, 2026-11-27).
+            let oldest = all.iter().filter_map(|m| order(&m.id)).min();
+            let mut earlier: Vec<Msg> = Vec::new();
+            let mut sending = Vec::new();
+            for kept in entry.messages.drain(..) {
+                if kept.id.starts_with("optimistic-") {
+                    sending.push(kept);
+                } else if oldest.is_some_and(|oldest| order(&kept.id).is_some_and(|n| n < oldest)) {
+                    earlier.push(kept);
+                }
+            }
+            let more = if earlier.is_empty() { more } else { entry.more };
             // The person's messages still on their way stay in view.
-            for sending in entry.messages.drain(..).filter(|m| m.id.starts_with("optimistic-")) {
+            for sending in sending {
                 if !all.iter().any(|m| same_message(m, &sending)) {
                     all.push(sending);
                 }
             }
-            entry.messages = all;
-        }
+            earlier.append(&mut all);
+            entry.messages = earlier;
+            more
+        };
         entry.more = more;
         entry.loaded = true;
     }
@@ -385,6 +401,21 @@ mod tests {
         // Loaded: frames go straight in.
         s.apply(&said("cb-4", "fourth"));
         assert_eq!(s.threads["t1"].messages.len(), 4);
+    }
+
+    #[test]
+    fn fetching_a_chat_again_keeps_its_earlier_messages() {
+        let mut s = state();
+        let page = |id: &str, text: &str| crate::chat::Msg::from_wire(&json!({ "id": id, "at": 1.0, "role": "bot", "kind": "text", "text": text })).unwrap();
+        s.loaded("t1", vec![page("cb-5", "five"), page("cb-6", "six")], true, false);
+        s.loaded("t1", vec![page("cb-3", "three"), page("cb-4", "four")], false, true);
+        // A reconnect fetches the newest page again; what was scrolled back to stays, and so
+        // does whether there's more before it.
+        s.threads.get_mut("t1").unwrap().loaded = false;
+        s.loaded("t1", vec![page("cb-6", "six"), page("cb-7", "seven")], true, false);
+        let t = &s.threads["t1"];
+        assert_eq!(t.messages.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["cb-3", "cb-4", "cb-5", "cb-6", "cb-7"]);
+        assert!(!t.more, "nothing before cb-3, as its page said");
     }
 
     #[test]

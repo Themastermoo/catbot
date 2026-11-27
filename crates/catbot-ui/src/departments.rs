@@ -133,7 +133,21 @@ pub enum Open {
 /// A department's heading in the sidebar (their simple "line" header): its name, a dot when
 /// folded and something needs you, the fold chevron, its ⋯ menu, and a place to drop a bot.
 #[component]
-pub fn Header(name: String, bots: Vec<Bot>, folded: bool, on_toggle: EventHandler<()>, on_open: EventHandler<Open>, dragging: Signal<Option<String>>) -> Element {
+pub fn Header(
+    name: String,
+    bots: Vec<Bot>,
+    folded: bool,
+    /// The department's team chat. With one, the name opens it and the arrow beside it folds
+    /// the department; without (General, or while searching), the name folds as before.
+    #[props(default)]
+    team: Option<Bot>,
+    #[props(default)]
+    team_selected: bool,
+    on_team: EventHandler<String>,
+    on_toggle: EventHandler<()>,
+    on_open: EventHandler<Open>,
+    dragging: Signal<Option<String>>,
+) -> Element {
     let depts = use_context::<Signal<Depts>>();
     let mut menu = use_signal(|| false);
     let mut over = use_signal(|| false);
@@ -168,15 +182,45 @@ pub fn Header(name: String, bots: Vec<Bot>, folded: bool, on_toggle: EventHandle
                     move_bots(depts, &drop_name, vec![bot]);
                 }
             },
-            button { r#type: "button", "aria-expanded": "{!folded}", title: "{toggle_title}",
-                class: "flex min-w-0 flex-1 items-center gap-1.5 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus",
-                onclick: move |_| on_toggle.call(()),
-                span { class: "min-w-0 flex-1 truncate text-[13px] leading-[18px] text-ink-secondary", "{name}" }
+            if let Some(team) = team.clone() {
+                {
+                    let id = team.id.clone();
+                    let busy = team.activity != crate::bots::Activity::Idle;
+                    let look = if team_selected { "bg-raised font-semibold text-ink" } else if team.unread { "font-semibold text-ink" } else { "text-ink-secondary hover:text-ink" };
+                    rsx! {
+                        button { r#type: "button", "data-sidebar-team-chat": "{name}", "aria-current": if team_selected { "page" },
+                            title: "Team chat for {name}: its bots, together",
+                            class: "-mx-1 flex min-w-0 shrink items-center gap-1.5 rounded px-1 text-left hover:bg-ink/[0.06] focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus {look}",
+                            onclick: move |_| on_team.call(id.clone()),
+                            span { class: "min-w-0 truncate text-[13px] leading-[18px]", "{name}" }
+                            if busy {
+                                span { role: "img", "aria-label": "Team chat working", class: "size-1.5 shrink-0 animate-pulse rounded-full bg-accent" }
+                            } else if team.unread {
+                                span { role: "img", "aria-label": "Team chat unread", class: "size-1.5 shrink-0 rounded-full bg-accent" }
+                            }
+                        }
+                    }
+                }
                 if let Some((color, label)) = dot {
                     span { role: "img", "aria-label": label, title: label, class: "size-1.5 shrink-0 rounded-full {color}" }
                 }
-                span { class: "shrink-0 text-ink-secondary opacity-0 transition-opacity group-hover/section:opacity-100 group-focus-within/section:opacity-100",
+                button { r#type: "button", "aria-expanded": "{!folded}", "aria-label": "{toggle_title}", title: "{toggle_title}", "data-section-fold": "{name}",
+                    class: "flex size-5 shrink-0 items-center justify-center rounded text-ink-tertiary hover:bg-ink/[0.07] hover:text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus",
+                    onclick: move |_| on_toggle.call(()),
                     Icon { name: chevron, size: 12 }
+                }
+                span { class: "flex-1" }
+            } else {
+                button { r#type: "button", "aria-expanded": "{!folded}", title: "{toggle_title}",
+                    class: "flex min-w-0 flex-1 items-center gap-1.5 rounded text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-focus",
+                    onclick: move |_| on_toggle.call(()),
+                    span { class: "min-w-0 flex-1 truncate text-[13px] leading-[18px] text-ink-secondary", "{name}" }
+                    if let Some((color, label)) = dot {
+                        span { role: "img", "aria-label": label, title: label, class: "size-1.5 shrink-0 rounded-full {color}" }
+                    }
+                    span { class: "shrink-0 text-ink-secondary opacity-0 transition-opacity group-hover/section:opacity-100 group-focus-within/section:opacity-100",
+                        Icon { name: chevron, size: 12 }
+                    }
                 }
             }
             if !general {

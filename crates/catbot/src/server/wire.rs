@@ -192,7 +192,7 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
 
 /// A page of a conversation as `WireMessage`s, each pointing at the one before it.
 pub fn page(store: &Store, conversation_id: &str, before: Option<i64>, limit: usize) -> Result<(Vec<Value>, bool), BoxError> {
-    let (messages, more) = store.page(conversation_id, before, limit)?;
+    let (messages, more) = store.shown_page(conversation_id, before, limit)?;
     let mut parent = match messages.first() {
         Some(first) => store.previous_message_id(conversation_id, first.id)?,
         None => None,

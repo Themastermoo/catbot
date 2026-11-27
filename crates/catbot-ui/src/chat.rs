@@ -330,6 +330,7 @@ pub fn Chat(bot: Bot) -> Element {
         }
     };
 
+    let earlier_button = load_earlier.clone();
     let (messages, more, live, loaded) = {
         let state = state.read();
         match state.threads.get(&thread) {
@@ -410,6 +411,15 @@ pub fn Chat(bot: Bot) -> Element {
                         div { class: "flex items-center justify-center gap-2 py-3 text-xs text-ink-tertiary",
                             span { class: "inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent border-t-transparent" }
                             span { "Loading earlier messages…" }
+                        }
+                    } else if loaded && more {
+                        // Scrolling up loads them too, but a short chat may have nothing to scroll.
+                        div { class: "flex justify-center py-2",
+                            button { r#type: "button", "data-load-earlier": true,
+                                class: "rounded-full px-3 py-1 text-[12px] text-ink-secondary hover:bg-raised hover:text-ink",
+                                onclick: move |_| { spawn(earlier_button.clone()()); },
+                                "Show earlier messages"
+                            }
                         }
                     }
                     if let Some(err) = problem() {
