@@ -451,6 +451,35 @@ async fn a_waiting_message_can_be_taken_back_before_it_goes() {
 }
 
 #[tokio::test]
+async fn messages_waiting_when_catbot_stops_go_out_when_it_starts_again() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Palette" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "approve", "threadId": thread }))).await;
+    let asked = until(&mut events, "request.opened", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    let (_, sent) = s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "and the walk-throughs", "threadId": thread }))).await;
+    assert_eq!(sent["held"], true);
+
+    // Catbot stops: the queue in memory is gone, the message still says it's waiting.
+    s.app.held.lock().unwrap().clear();
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await;
+    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == bot.as_str() && f["bot"]["activity"] == "idle").await;
+
+    // Starting again sends it on: it stops waiting, and the bot answers it.
+    server::resume_held(&s.app);
+    let id = sent["message"]["id"].as_str().unwrap().to_string();
+    until(&mut events, "no longer waiting", |f| f["kind"] == "message.patch" && f["message"]["id"] == id.as_str() && f["message"]["held"] != true).await;
+    until(&mut events, "answered", |f| runtime(f, "turn.started")).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=20"), None).await;
+    assert_eq!(page["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").count(), 2, "{page}");
+}
+
+#[tokio::test]
 async fn bots_become_desktop_pets_when_ticked() {
     let s = setup().await;
     let (_, pets) = s.call("GET", "/api/pets", None).await;
@@ -1919,15 +1948,19 @@ async fn a_team_chat_hears_of_hand_offs_and_bots_waiting_elsewhere() {
         page["messages"].as_array().unwrap().iter().filter(|m| m["teamUpdate"].is_object()).cloned().collect::<Vec<_>>()
     };
 
-    // Scout hands to Kiwi in Scout's own chat.
+    // Scout, in the person's chat, hands to Kiwi: they talk in the team chat itself (Moo,
+    // 2026-11-27), and the person's chat gets a line pointing there.
     let (_, sent) = s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Plan the beds" }))).await;
     let scouts = sent["threadId"].as_str().unwrap().to_string();
     until(&mut events, "handed", |f| f["kind"] == "message" && f["threadId"] == room.as_str()).await;
     until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
-    let said = updates().await;
-    let line = said[0]["tool"]["name"].as_str().unwrap();
-    assert!(line.starts_with("notice: Scout handed work to Kiwi in its chat"), "{line}");
-    assert_eq!((said[0]["teamUpdate"]["kind"].as_str(), said[0]["teamUpdate"]["threadId"].as_str(), said[0]["teamUpdate"]["chatOf"].as_str()), (Some("handoff"), Some(scouts.as_str()), Some(ids[0].as_str())));
+    let (_, talk) = s.call("GET", &format!("/api/threads/{room}/messages?limit=50"), None).await;
+    let speakers: Vec<&str> = talk["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").filter_map(|m| m["botId"].as_str()).collect();
+    assert_eq!(speakers, [ids[0].as_str(), &ids[1]], "Scout asks, Kiwi answers, in the team chat: {talk}");
+    let (_, mine) = s.call("GET", &format!("/api/threads/{scouts}/messages?limit=50"), None).await;
+    let line = mine["messages"].as_array().unwrap().iter().find(|m| m["teamUpdate"].is_object()).unwrap();
+    assert_eq!((line["teamUpdate"]["kind"].as_str(), line["teamUpdate"]["threadId"].as_str()), (Some("handoff"), Some(room.as_str())), "{line}");
+    assert!(updates().await.is_empty(), "no news line for talk that's already in the team chat");
 
     // Kiwi asks for an approval in its own chat: said once, however many times it asks.
     for _ in 0..2 {
@@ -2107,8 +2140,9 @@ async fn a_bot_hands_work_on_within_the_limits_set() {
     let mut events = s.events().await;
     until(&mut events, "hello", |f| f["kind"] == "hello").await;
     let mut ids = Vec::new();
-    for (name, soul) in [("Scout", "fake-pass @Kiwi"), ("Kiwi", "fake-pass @Scout")] {
-        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name, "soul": soul }))).await;
+    // Scout has Full access; Kiwi asks, and does Scout's work at Scout's level (stage 32.4).
+    for (name, soul, level) in [("Scout", "fake-pass @Kiwi fake-done", "full"), ("Kiwi", "fake-pass @Scout fake-agree fake-mode", "ask")] {
+        let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": name, "soul": soul, "approvalMode": level }))).await;
         ids.push(made["bot"]["id"].as_str().unwrap().to_string());
     }
     let (_, limits) = s.call("GET", "/api/handoffs", None).await;
@@ -2120,60 +2154,57 @@ async fn a_bot_hands_work_on_within_the_limits_set() {
         page["messages"].as_array().unwrap().iter().filter_map(|m| m["tool"]["name"].as_str()?.strip_prefix("notice: ").map(str::to_string)).collect()
     };
 
-    // Three hand-offs deep: Scout, Kiwi, Scout, Kiwi; the fourth is refused.
+    // Bots of no department talk in a direct chat of Kiwi's, taking turns, closed once both say
+    // it's done (Moo, 2026-11-27): the person's chat gets a line, then Scout's report, nothing of Kiwi's.
     let (status, sent) = s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Plan the beds" }))).await;
     assert_eq!(status, 202, "{sent}");
     let thread = sent["threadId"].as_str().unwrap().to_string();
-    until(&mut events, "too deep", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("3 deep"))).await;
+    until(&mut events, "report", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["role"] == "bot" && f["message"]["text"].as_str().is_some_and(|t| t.contains("Kiwi, in a direct chat"))).await;
     until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
     let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=50"), None).await;
-    assert_eq!(replies(&page), [ids[0].as_str(), &ids[1], &ids[0], &ids[1]], "{page}");
-    assert_eq!(notes(&page)[0], "Scout handed this to Kiwi.");
-    // The chat's chip knows who handed to whom (stage 29.12).
-    let chip = page["messages"].as_array().unwrap().iter().find(|m| m["handoff"].is_object()).unwrap();
-    assert_eq!(chip["handoff"], json!({ "from": "Scout", "to": "Kiwi" }));
+    assert_eq!(replies(&page), [ids[0].as_str(), &ids[0]], "only Scout speaks in the person's chat: {page}");
+    let line = page["messages"].as_array().unwrap().iter().find(|m| m["teamUpdate"].is_object() || m["tool"]["name"].as_str().is_some_and(|t| t.contains("asked Kiwi"))).unwrap().clone();
+    assert!(line.to_string().contains("Scout asked Kiwi in a direct chat."), "{line}");
     let texts: Vec<&str> = page["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").filter_map(|m| m["text"].as_str()).collect();
-    assert!(texts[1].contains("Scout: Hello, Plan the beds"), "Kiwi is shown the chat: {}", texts[1]);
-    assert!(texts[2].contains("[Kiwi]: Hello,") && texts[2].contains("handed this back"), "Scout is told what Kiwi said: {}", texts[2]);
-    // Kiwi was a guest: Scout's chat keeps Scout's own session (stage 29.11: a guest's session
-    // used to become the chat's, and Scout then went on as Kiwi).
+    assert!(texts[1].contains("[Kiwi, in a direct chat]: Hello,") && texts[1].contains("report to the person"), "Scout is told what Kiwi said: {}", texts[1]);
+    // Kiwi's direct chat: Scout asks, Kiwi answers, Scout says DONE, Kiwi agrees: closed.
+    let direct = s.app.with_store(|store| store.conversations(&ids[1])).unwrap().into_iter().find(|c| c.title.as_deref().is_some_and(|t| t.starts_with("Scout asks"))).unwrap();
+    assert!(direct.archived_at.is_some(), "closed out when done");
+    let (_, dm) = s.call("GET", &format!("/api/threads/{}/messages?limit=20", direct.id), None).await;
+    assert_eq!(replies(&dm), [ids[0].as_str(), &ids[1], &ids[0], &ids[1]], "back and forth until both say done: {dm}");
+    assert!(notes(&dm).iter().any(|n| n == "Both said it's done: this direct chat is closed."), "{dm}");
+    let said: Vec<&str> = dm["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").filter_map(|m| m["text"].as_str()).collect();
+    assert!(!said[1].ends_with("DONE") && said[2].ends_with("DONE") && said[3].ends_with("DONE"), "{said:?}");
+    assert!(notes(&dm).iter().any(|n| n == "Kiwi works at Full access for this, Scout's level."), "{dm}");
+    assert!(said[1].contains("(mode bypassPermissions)"), "Kiwi ran at Scout's level: {}", said[1]);
+    let (_, kiwi) = s.call("GET", &format!("/api/bots/{}", ids[1]), None).await;
+    assert_eq!(kiwi["bot"]["approvalMode"], "ask", "Kiwi's own level is unchanged");
+    // Scout's chat keeps Scout's own session (stage 29.11).
     let (_, runs) = s.call("GET", &format!("/api/bots/{}/runs", ids[0]), None).await;
     let first = runs["runs"].as_array().unwrap().last().unwrap()["id"].clone();
     let (_, one) = s.call("GET", &format!("/api/bots/{}/runs/{}", ids[0], first), None).await;
     let scouts = one["run"]["events"].as_array().unwrap().iter().find(|e| e["type"] == "session.started").unwrap()["sessionId"].as_str().unwrap().to_string();
     let kept = s.app.with_store(|store| store.conversation(&thread)).flatten().unwrap().session_id;
     assert_eq!(kept.as_deref(), Some(scouts.as_str()), "the chat's session is still Scout's");
-    let (_, scout) = s.call("GET", &format!("/api/bots/{}", ids[0]), None).await;
-    assert_eq!(scout["bot"]["tasks"].as_array().unwrap().len(), 1);
-    // The Team map draws who handed work to whom, both ways.
+    // The Team map draws who handed work to whom.
     let (_, map) = s.call("GET", "/api/team-map", None).await;
-    let edges: Vec<(String, String, String)> = map["edges"].as_array().unwrap().iter().map(|e| (e["from"].as_str().unwrap().to_string(), e["to"].as_str().unwrap().to_string(), e["state"].as_str().unwrap().to_string())).collect();
-    assert!(edges.contains(&(ids[0].clone(), ids[1].clone(), "connected".into())) && edges.contains(&(ids[1].clone(), ids[0].clone(), "connected".into())), "{map}");
+    let edges: Vec<(String, String)> = map["edges"].as_array().unwrap().iter().map(|e| (e["from"].as_str().unwrap().to_string(), e["to"].as_str().unwrap().to_string())).collect();
+    assert!(edges.contains(&(ids[0].clone(), ids[1].clone())), "{map}");
 
-    // Fewer replies allowed: Scout, Kiwi, Scout, then the limit.
-    let (status, _) = s.call("PUT", "/api/handoffs", Some(json!({ "depth": 10, "replies": 3 }))).await;
-    assert_eq!(status, 200);
+    // Bots of one department talk in its team chat, within the limits: three hand-offs deep.
+    s.call("POST", "/api/departments", Some(json!({ "name": "Garden", "botIds": [ids[0], ids[1]] }))).await;
+    let (_, list) = s.call("GET", "/api/bots", None).await;
+    let room = list["bots"].as_array().unwrap().iter().find(|b| b["channel"]["teamChat"] == true && b["channel"]["department"] == "Garden").unwrap()["threadId"].as_str().unwrap().to_string();
     s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Again", "threadId": thread }))).await;
-    until(&mut events, "too many", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("at most 3 bot replies"))).await;
+    until(&mut events, "too deep", |f| f["kind"] == "message" && f["threadId"] == room.as_str() && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("3 deep"))).await;
+    until(&mut events, "report", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["role"] == "bot" && f["message"]["text"].as_str().is_some_and(|t| t.contains("in #Garden]"))).await;
     until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
     let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;
-    assert_eq!(replies(&page).len(), 4 + 3);
-
-    // Unlimited: it goes on until stopped.
-    s.call("PUT", "/api/handoffs", Some(json!({ "unlimited": true }))).await;
-    s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Keep going", "threadId": thread }))).await;
-    for n in 0..5 {
-        until(&mut events, &format!("reply {n}"), |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
-    }
-    let (status, stopped) = s.call("POST", &format!("/api/bots/{}/interrupt", ids[0]), Some(json!({ "threadId": thread }))).await;
-    assert_eq!((status, stopped["stopped"].as_bool()), (200, Some(true)));
-    until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
-    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=200"), None).await;
-    let count = replies(&page).len();
-    assert!(count >= 7 + 5, "{count}");
-    tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=200"), None).await;
-    assert!(replies(&page).len() <= count + 1, "stopped");
+    assert_eq!(replies(&page).len(), 4, "still only Scout in the person's chat: {page}");
+    assert!(page.to_string().contains("Scout asked Kiwi in #Garden."), "{page}");
+    let (_, talk) = s.call("GET", &format!("/api/threads/{room}/messages?limit=80"), None).await;
+    assert_eq!(replies(&talk), [ids[0].as_str(), &ids[1], &ids[0], &ids[1]], "Scout asks; Kiwi, Scout, Kiwi; the fourth is refused: {talk}");
+    assert!(notes(&talk).iter().any(|n| n == "Scout handed this to Kiwi."), "{talk}");
 }
 
 #[tokio::test]
@@ -2232,6 +2263,14 @@ async fn departments_group_bots_share_instructions_and_take_map_messages() {
     assert_eq!(members, both);
     assert_eq!(made["general"], json!([kiwi]));
     assert_eq!(s.call("POST", "/api/departments", Some(json!({ "name": "garden" }))).await.0, 409);
+    // Its bots go in the order they're put in (stage 32.3); only its own bots can be ordered.
+    let (status, ordered) = s.call("PUT", "/api/departments/Garden/order", Some(json!({ "bots": [scout, quill] }))).await;
+    assert_eq!(status, 200, "{ordered}");
+    assert_eq!(ordered["departments"][0]["members"], json!([scout, quill]));
+    let (_, ordered) = s.call("PUT", "/api/departments/Garden/order", Some(json!({ "bots": [quill, scout] }))).await;
+    assert_eq!(ordered["departments"][0]["members"], json!([quill, scout]));
+    assert_eq!(s.call("PUT", "/api/departments/Garden/order", Some(json!({ "bots": [kiwi] }))).await.0, 400, "Kiwi isn't in Garden");
+    assert_eq!(s.call("PUT", "/api/departments/General/order", Some(json!({ "bots": [kiwi] }))).await.0, 200, "General has an order too");
     let (_, got) = s.call("GET", &format!("/api/bots/{scout}"), None).await;
     assert_eq!((got["bot"]["department"].as_str(), got["bot"]["departmentChief"].as_bool()), (Some("Garden"), Some(false)));
 

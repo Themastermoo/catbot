@@ -465,6 +465,9 @@ async fn drive(
     // resume (it then went on as the guest).
     keep_session: bool,
 ) -> Result_ {
+    // A hand-off can run a bot at a freer level than its own (stage 32.4): that level holds for
+    // the turn's questions too, on top of the bot's own as it is now.
+    let lifted = app.with_store(|store| store.bot_by_id(&bot.id)).flatten().filter(|own| own.mode != bot.mode).map(|_| bot.mode);
     let mut result = Result_::default();
     let started = if bot.engine == engines::CLAUDE {
         let mut turn = chat::bot_turn(bot, text.to_string(), session.clone(), app.cli.clone(), app.helper.clone(), codex, app.memory.clone());
@@ -567,7 +570,7 @@ async fn drive(
             Event::ApprovalRequested { id, tool, input } => {
                 let summary = format!("{tool} {}", summarize(&input)).trim().to_string();
                 // Its approval level as it is now, or an "Always allow" it was given: no card.
-                if super::allowed::covers(app, &bot.id, &tool, &input) && app.turns.answer(thread, &id, Decision::Allow).is_some() {
+                if super::allowed::covers(app, &bot.id, lifted, &tool, &input) && app.turns.answer(thread, &id, Decision::Allow).is_some() {
                     emit(json!({ "type": "request.resolved", "requestId": id, "behavior": "allow", "source": "rule", "tool": tool, "summary": summary }));
                     continue;
                 }

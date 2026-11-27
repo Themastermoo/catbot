@@ -13,6 +13,8 @@ pulldown-cmark = { version = "0.13", default-features = false }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Pictures: pasted ones come from the page as base64; the apps draw saved ones from it.
+base64 = "0.22"
 
 # In a browser: the browser's own clock, fetch and event stream.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
@@ -25,7 +27,6 @@ gloo-timers = { version = "0.3", features = ["futures"] }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "http2", "rustls-tls"] }
-base64 = "0.22"
 tokio = { version = "1", features = ["time"] }
 # Desktop notifications (Linux and Windows apps only).
 notify-rust = { version = "4", optional = true }

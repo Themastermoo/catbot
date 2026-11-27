@@ -40,6 +40,8 @@ pub struct Live {
     pub bot_id: Option<String>,
     /// Whether what the person sends meanwhile can be steered into it (stage 29.14).
     pub steerable: bool,
+    /// When it started (ms since the epoch), for how long it has run; 0 when not known.
+    pub started: f64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -239,7 +241,7 @@ impl State {
                 }
                 let entry = self.threads.entry(thread.to_string()).or_default();
                 match event["type"].as_str() {
-                    Some("turn.started") => entry.live = Some(Live { bot_id: event["botId"].as_str().map(str::to_string), ..Live::default() }),
+                    Some("turn.started") => entry.live = Some(Live { bot_id: event["botId"].as_str().map(str::to_string), started: crate::chat::js_now(), ..Live::default() }),
                     Some("turn.completed") => entry.live = None,
                     Some(kind) => {
                         let live = entry.live.get_or_insert_with(Live::default);

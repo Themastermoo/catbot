@@ -175,9 +175,9 @@ pub fn wire(rules: &[String]) -> Value {
 }
 
 /// Whether the bot may do this now without asking: its approval level as it is now (not as it
-/// was when the turn began), or a rule it was given.
-pub fn covers(app: &App, bot_id: &str, tool: &str, input: &Value) -> bool {
-    let mode = app.with_store(|store| store.bot_by_id(bot_id)).flatten().map(|b| b.mode);
+/// was when the turn began), or the freer one a hand-off lifted it to, or a rule it was given.
+pub fn covers(app: &App, bot_id: &str, lifted: Option<PermissionMode>, tool: &str, input: &Value) -> bool {
+    let mode = app.with_store(|store| store.bot_by_id(bot_id)).flatten().map(|b| super::handoffs::freer(b.mode, lifted));
     let files = writes_files(tool);
     match mode {
         Some(PermissionMode::BypassPermissions) => return true,

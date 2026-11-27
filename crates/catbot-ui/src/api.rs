@@ -18,6 +18,21 @@ pub async fn post(path: &str, body: &Value) -> Result<Value, String> {
     call("POST", path, Some(body)).await
 }
 
+/// A POST that gives up after `ms` with no answer (stage 32, Moo, 2026-11-27): a message sent
+/// while Catbot restarts used to wait for ever, showing as sent when it never arrived.
+pub async fn post_within(path: &str, body: &Value, ms: u32) -> Result<Value, String> {
+    use futures_util::future::{Either, select};
+    let call = std::pin::pin!(post(path, body));
+    let wait = std::pin::pin!(crate::events::pause(ms));
+    match select(call, wait).await {
+        Either::Left((answer, _)) => answer,
+        Either::Right(_) => Err(NO_ANSWER.to_string()),
+    }
+}
+
+/// What a send says when Catbot didn't answer in time.
+pub const NO_ANSWER: &str = "Catbot didn't answer (it may be restarting), so it wasn't sent. Your words are back in the box.";
+
 /// To this device's own Catbot, whichever place is open (stage 28.5): updates are about the app
 /// on this device, so on the phone and the Windows app they go to the Catbot inside it even
 /// while it's showing home's. The status comes beside the answer, for routes whose refusals

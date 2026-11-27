@@ -32,6 +32,8 @@ pub struct Dept {
 pub struct Depts {
     pub list: Vec<Dept>,
     pub instructions_max: usize,
+    /// The bots in no department, in their order (stage 32.3).
+    pub general: Vec<String>,
 }
 
 impl Depts {
@@ -53,7 +55,16 @@ impl Depts {
                     .collect()
             })
             .unwrap_or_default();
-        Depts { list, instructions_max: answer["instructionsMax"].as_u64().unwrap_or(24_000) as usize }
+        let general = answer["general"].as_array().map(|m| m.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+        Depts { list, instructions_max: answer["instructionsMax"].as_u64().unwrap_or(24_000) as usize, general }
+    }
+
+    /// A group's bots in their order: a department's, or General's for "".
+    pub fn order_of(&self, department: &str) -> &[String] {
+        match self.get(department) {
+            Some(d) => &d.members,
+            None => &self.general,
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<&Dept> {
@@ -74,6 +85,9 @@ fn path(name: &str) -> String {
     format!("/api/departments/{}", crate::markdown::encode(name))
 }
 
+/// What the sidebar's drag carries for a department (a bot's is its id).
+const DEPT_DRAG: &str = "dept:";
+
 /// Sends a change, and shows the departments as the server answers.
 async fn send(method: &str, path: String, body: Value, mut depts: Signal<Depts>) -> Result<(), String> {
     let answer = api::call(method, &path, Some(&body)).await?;
@@ -92,6 +106,28 @@ pub fn move_bots(depts: Signal<Depts>, to: &str, bots: Vec<String>) {
     });
 }
 
+/// Moves a department to `to` in the order (stage 32.2): shown at once, then kept on the server,
+/// which every device follows.
+pub fn move_department(mut depts: Signal<Depts>, name: &str, to: usize) {
+    let (name, path) = (name.to_string(), path(name));
+    let now = depts.peek().clone();
+    depts.set(Depts { list: reordered(&now.list, &name, to), ..now });
+    dioxus::core::spawn_forever(async move {
+        let _ = send("PATCH", path, json!({ "position": to }), depts).await;
+    });
+}
+
+/// The order with `name` taken out and put back at `to` (as the server does).
+pub fn reordered(list: &[Dept], name: &str, to: usize) -> Vec<Dept> {
+    let mut list = list.to_vec();
+    if let Some(at) = list.iter().position(|d| d.name == name) {
+        let dept = list.remove(at);
+        let to = to.min(list.len());
+        list.insert(to, dept);
+    }
+    list
+}
+
 /// The sidebar's bots in their groups: each department in order (empty ones too), then General.
 pub fn groups(bots: &[Bot], depts: &Depts) -> Vec<(String, Vec<Bot>)> {
     let mut out: Vec<(String, Vec<Bot>)> = depts.list.iter().map(|d| (d.name.clone(), Vec::new())).collect();
@@ -103,7 +139,37 @@ pub fn groups(bots: &[Bot], depts: &Depts) -> Vec<(String, Vec<Bot>)> {
         }
     }
     out.push((GENERAL.to_string(), general));
+    // Each group in the order its bots were put in (stage 32.3); any not in it yet keep theirs.
+    for (name, list) in out.iter_mut() {
+        let order = if name == GENERAL { &depts.general } else { depts.order_of(name) };
+        list.sort_by_key(|b| order.iter().position(|id| *id == b.id).unwrap_or(usize::MAX));
+    }
     out
+}
+
+/// Puts `moved` just before `before` among its group's bots (stage 32.3): shown at once, then
+/// kept on the server.
+pub fn place_bot(mut depts: Signal<Depts>, department: &str, moved: &str, before: &str) {
+    let now = depts.peek().clone();
+    let order = placed(now.order_of(department), moved, before);
+    let mut next = now.clone();
+    match next.list.iter_mut().find(|d| d.name == department) {
+        Some(d) => d.members = order.clone(),
+        None => next.general = order.clone(),
+    }
+    depts.set(next);
+    let path = format!("{}/order", path(if department.is_empty() { GENERAL } else { department }));
+    dioxus::core::spawn_forever(async move {
+        let _ = send("PUT", path, json!({ "bots": order }), depts).await;
+    });
+}
+
+/// A group's order with `moved` taken out and put back just before `before`.
+pub fn placed(order: &[String], moved: &str, before: &str) -> Vec<String> {
+    let mut order: Vec<String> = order.iter().filter(|id| *id != moved).cloned().collect();
+    let at = order.iter().position(|id| id == before).unwrap_or(order.len());
+    order.insert(at, moved.to_string());
+    order
 }
 
 /// What a folded department shows: someone waiting on you wins, then working, then unread.
@@ -161,12 +227,31 @@ pub fn Header(
         on_open.call(what);
     };
     let (n1, n2, n3, n4, n5) = (name.clone(), name.clone(), name.clone(), name.clone(), name.clone());
+    // Where it stands in the order, for Move up and down, and for a department dropped on it.
+    let (place, count) = {
+        let list = &depts.read().list;
+        (list.iter().position(|d| d.name == name), list.len())
+    };
+    let (up, down, drag_name) = (name.clone(), name.clone(), name.clone());
     let drop_class = if over() { "bg-accent/10 outline outline-2 -outline-offset-2 outline-accent/70" } else { "" };
     rsx! {
         div {
             "data-section": "{name}",
             "data-section-drop": over(),
             class: "group/section relative flex h-[30px] items-center gap-1.5 rounded-[6px] px-2 pb-1.5 pt-2 hover:bg-raised/50 {drop_class}",
+            // A department is dragged by its heading onto another's, to take its place (stage 32.2).
+            draggable: if general { "false" } else { "true" },
+            title: if !general { "Drag to reorder" },
+            ondragstart: move |_| {
+                let mut dragged = dragging;
+                if !general {
+                    dragged.set(Some(format!("{DEPT_DRAG}{drag_name}")));
+                }
+            },
+            ondragend: move |_| {
+                let mut dragged = dragging;
+                dragged.set(None);
+            },
             ondragover: move |e| {
                 if dragging.peek().is_some() {
                     e.prevent_default();
@@ -178,8 +263,15 @@ pub fn Header(
                 e.prevent_default();
                 over.set(false);
                 let mut dragged = dragging;
-                if let Some(bot) = dragged.take() {
-                    move_bots(depts, &drop_name, vec![bot]);
+                match dragged.take() {
+                    Some(moved) if moved.starts_with(DEPT_DRAG) => {
+                        let moved = &moved[DEPT_DRAG.len()..];
+                        if moved != drop_name {
+                            move_department(depts, moved, place.unwrap_or(count));
+                        }
+                    }
+                    Some(bot) => move_bots(depts, &drop_name, vec![bot]),
+                    None => {}
                 }
             },
             if let Some(team) = team.clone() {
@@ -238,6 +330,18 @@ pub fn Header(
                     button { r#type: "button", role: "menuitem", class: MENU_ROW, onclick: move |_| open(Open::Members(n2.clone())), "Bots and lead…" }
                     button { r#type: "button", role: "menuitem", class: MENU_ROW, onclick: move |_| open(Open::Memory(n3.clone())), "Department memory" }
                     button { r#type: "button", role: "menuitem", class: MENU_ROW, onclick: move |_| open(Open::Rename(n4.clone())), "Rename…" }
+                    if let Some(at) = place.filter(|at| *at > 0) {
+                        button { r#type: "button", role: "menuitem", class: MENU_ROW, "data-department-up": true,
+                            onclick: move |_| { menu.set(false); move_department(depts, &up, at - 1); },
+                            "Move up"
+                        }
+                    }
+                    if let Some(at) = place.filter(|at| at + 1 < count) {
+                        button { r#type: "button", role: "menuitem", class: MENU_ROW, "data-department-down": true,
+                            onclick: move |_| { menu.set(false); move_department(depts, &down, at + 1); },
+                            "Move down"
+                        }
+                    }
                     button { r#type: "button", role: "menuitem", class: "{MENU_ROW} text-danger", onclick: move |_| open(Open::Delete(n5.clone())), "Delete department…" }
                 }
             }
@@ -633,6 +737,34 @@ fn DeleteDialog(name: String, on_close: EventHandler<()>) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_bot_goes_just_before_the_one_it_is_dropped_on() {
+        let order: Vec<String> = ["a", "b", "c"].map(String::from).to_vec();
+        assert_eq!(placed(&order, "c", "a"), ["c", "a", "b"]);
+        assert_eq!(placed(&order, "a", "c"), ["b", "a", "c"]);
+        assert_eq!(placed(&order, "b", "gone"), ["a", "c", "b"]);
+        // Bots follow their group's order; ones not in it yet go last.
+        let depts = Depts::from_wire(&json!({ "departments": [{ "name": "Garden", "members": ["y", "x"] }], "general": ["n", "m"] }));
+        let bot = |id: &str, dept: &str| {
+            let mut b = Bot::from_wire(&json!({ "id": id, "name": id })).unwrap();
+            b.department = dept.to_string();
+            b
+        };
+        let grouped = groups(&[bot("x", "Garden"), bot("y", "Garden"), bot("m", ""), bot("n", ""), bot("o", "")], &depts);
+        let ids = |list: &Vec<Bot>| list.iter().map(|b| b.id.clone()).collect::<Vec<_>>();
+        assert_eq!((ids(&grouped[0].1), ids(&grouped[1].1)), (vec!["y".to_string(), "x".into()], vec!["n".to_string(), "m".into(), "o".into()]));
+    }
+
+    #[test]
+    fn a_department_moves_to_its_new_place_in_the_order() {
+        let depts = Depts::from_wire(&json!({ "departments": [{ "name": "A" }, { "name": "B" }, { "name": "C" }] }));
+        let names = |list: Vec<Dept>| list.into_iter().map(|d| d.name).collect::<Vec<_>>();
+        assert_eq!(names(reordered(&depts.list, "C", 0)), ["C", "A", "B"], "up to the top");
+        assert_eq!(names(reordered(&depts.list, "A", 2)), ["B", "C", "A"], "down past the last");
+        assert_eq!(names(reordered(&depts.list, "A", 9)), ["B", "C", "A"], "past the end is the end");
+        assert_eq!(names(reordered(&depts.list, "Gone", 0)), ["A", "B", "C"]);
+    }
 
     #[test]
     fn bots_fall_into_their_departments_then_general() {

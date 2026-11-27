@@ -227,6 +227,19 @@ fn room_for(app: &App, bot: &Bot, thread: &str) -> Option<(String, String)> {
     .flatten()
 }
 
+/// The team chat two bots share, if they're in the same department and it has one: its channel
+/// and its conversation.
+pub fn shared_room(app: &App, one: &Bot, other: &Bot) -> Option<(String, String)> {
+    let same = app.with_store(|store| {
+        let kept = departments::load(store);
+        Ok(kept.of(&one.id).zip(kept.of(&other.id)).is_some_and(|(a, b)| a.name == b.name))
+    });
+    if same != Some(true) {
+        return None;
+    }
+    room_for(app, one, "")
+}
+
 /// Where a chat is, in words: "in #Garden", "in Palette's chat", "in its chat “Seeds”".
 fn place(app: &App, thread: &str, bot: &Bot) -> String {
     app.with_store(|store| {

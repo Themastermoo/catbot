@@ -86,15 +86,87 @@ fn Picture(file: Attached) -> Element {
         }
     });
     let alt = file.name.clone();
+    let viewing = try_use_context::<Viewing>();
     rsx! {
         match source() {
             Some(Some(src)) => rsx! {
-                a { href: "{src}", target: "_blank", rel: "noreferrer", title: "{alt}",
+                button {
+                    r#type: "button",
+                    title: "{alt}",
+                    "aria-label": "See {alt} bigger",
+                    class: "cursor-zoom-in rounded-xl focus-visible:outline-2 focus-visible:outline-accent",
+                    onclick: {
+                        let (src, file) = (src.clone(), file.clone());
+                        move |_| if let Some(Viewing(mut viewing)) = viewing { viewing.set(Some((src.clone(), file.clone()))) }
+                    },
                     img { src: "{src}", alt: "{alt}", "data-attachment-picture": true, class: "max-h-[220px] max-w-[min(320px,70vw)] rounded-xl border border-hairline/40 object-cover" }
                 }
             },
             Some(None) => rsx! { FileChip { file: file.clone() } },
             None => rsx! { div { class: "h-[120px] w-[160px] animate-pulse rounded-xl bg-raised" } },
+        }
+    }
+}
+
+/// The picture shown big over everything (stage 32.19), with what it was drawn from.
+#[derive(Clone, Copy)]
+pub struct Viewing(pub Signal<Option<(String, Attached)>>);
+
+/// A picture clicked in a chat, big over the app as in the Claude app (Moo, 2026-11-27): click
+/// outside it, the X or Escape closes it; Download saves it.
+#[component]
+pub fn PictureViewer() -> Element {
+    let Viewing(mut viewing) = use_context::<Viewing>();
+    let Some((src, file)) = viewing() else { return rsx! {} };
+    let name = file.name.clone();
+    rsx! {
+        div {
+            role: "dialog",
+            "aria-modal": "true",
+            "aria-label": "{name}",
+            tabindex: "-1",
+            "data-picture-viewer": true,
+            class: "fixed inset-0 z-[60] flex cursor-zoom-out items-center justify-center bg-black/80 p-6 focus:outline-none",
+            onclick: move |_| viewing.set(None),
+            onkeydown: move |e| if e.key() == Key::Escape { viewing.set(None) },
+            onmounted: move |e| async move { let _ = e.set_focus(true).await; },
+            div { class: "absolute end-4 top-4 flex items-center gap-2",
+                span { class: "max-w-[40vw] truncate text-[13px] text-white/80", "{name}" }
+                button {
+                    r#type: "button",
+                    "aria-label": "Download {name}",
+                    title: "Download",
+                    class: "flex size-8 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        let file = file.clone();
+                        spawn(async move { open_file(&file).await });
+                    },
+                    // Lucide `Download` (ISC).
+                    svg { "aria-hidden": "true", width: "16", height: "16", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
+                        path { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }
+                        path { d: "m7 10 5 5 5-5" }
+                        path { d: "M12 15V3" }
+                    }
+                }
+                button {
+                    r#type: "button",
+                    "aria-label": "Close",
+                    title: "Close (Esc)",
+                    class: "flex size-8 items-center justify-center rounded-full bg-white/10 text-white hover:bg-white/20",
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        viewing.set(None);
+                    },
+                    crate::sidebar::Icon { name: "x", size: 16 }
+                }
+            }
+            img {
+                src: "{src}",
+                alt: "{name}",
+                class: "max-h-[calc(100vh-6rem)] max-w-full cursor-default rounded-lg object-contain shadow-2xl",
+                onclick: move |e| e.stop_propagation(),
+            }
         }
     }
 }

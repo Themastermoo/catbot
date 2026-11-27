@@ -441,6 +441,12 @@ fn BotRow(
 ) -> Element {
     let (id, key_id, fold_id, new_id) = (bot.id.clone(), bot.id.clone(), bot.id.clone(), bot.id.clone());
     let drag_id = bot.id.clone();
+    let depts = use_context::<Signal<crate::departments::Depts>>();
+    let mut drop_here = use_signal(|| false);
+    // Where a dropped bot will go: a line along this row's top.
+    let drop_line = if drop_here() { "shadow-[inset_0_2px_0_var(--color-accent)]" } else { "" };
+    let (place_id, drop_id) = (bot.id.clone(), bot.id.clone());
+    let (place_dept, drop_dept) = (bot.department.clone(), bot.department.clone());
     // Right-click: move it to another department.
     let mut moving = use_signal(|| false);
     let is_bot = bot.channel.is_none();
@@ -474,10 +480,32 @@ fn BotRow(
                 draggable: if is_bot { "true" } else { "false" },
                 ondragstart: move |_| if is_bot { dragging.set(Some(drag_id.clone())) },
                 ondragend: move |_| dragging.set(None),
+                // Another bot of the same department dropped here goes just above it (stage 32.3).
+                "data-bot-drop": drop_here(),
+                ondragover: move |e| {
+                    if let Some(moved) = dragging.peek().clone()
+                        && is_bot
+                        && moved != place_id
+                        && depts.peek().order_of(&place_dept).contains(&moved)
+                    {
+                        e.prevent_default();
+                        drop_here.set(true);
+                    }
+                },
+                ondragleave: move |_| drop_here.set(false),
+                ondrop: move |e| {
+                    drop_here.set(false);
+                    let moved = dragging.peek().clone();
+                    if let Some(moved) = moved.filter(|m| *m != drop_id && depts.peek().order_of(&drop_dept).contains(m)) {
+                        e.prevent_default();
+                        dragging.set(None);
+                        crate::departments::place_bot(depts, &drop_dept, &moved, &drop_id);
+                    }
+                },
                 oncontextmenu: move |e| if is_bot { e.prevent_default(); moving.set(true); },
                 // The cat's eyes follow the pointer anywhere on its row (see `MASCOT_LIFE`).
                 "data-cat-follow": true,
-                class: "flex w-full items-center gap-2.5 rounded-xl p-2 text-left transition-colors duration-150 md:h-[54px] md:py-0 max-md:rounded-2xl max-md:py-2.5 {ROW_FOCUS} {surface}",
+                class: "flex w-full items-center gap-2.5 rounded-xl p-2 text-left transition-colors duration-150 md:h-[54px] md:py-0 max-md:rounded-2xl max-md:py-2.5 {ROW_FOCUS} {surface} {drop_line}",
                 onclick: move |_| on_select.call(id.clone()),
                 onkeydown: move |e| {
                     if e.key() == Key::Enter || e.key() == Key::Character(" ".into()) {

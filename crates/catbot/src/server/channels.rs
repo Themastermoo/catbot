@@ -359,7 +359,7 @@ fn answer(app: &Arc<App>, channel: &Channel, thread: &str, members: &[Bot], requ
     let channel_id = channel.id.clone();
     let thread = thread.to_string();
     let asked = answering.len() as u32;
-    let queue = answering.into_iter().map(|bot| super::handoffs::Turn { bot, depth: 0, from: None }).collect();
+    let queue = answering.into_iter().map(|bot| super::handoffs::Turn { bot, depth: 0, from: None, level: None }).collect();
     tokio::spawn(async move {
         super::handoffs::follow(&app, &channel_id, &thread, request_id, queue, super::handoffs::Place::Channel(channel_id.clone()), asked, 0).await;
         app.set_channel_busy(&channel_id, false);

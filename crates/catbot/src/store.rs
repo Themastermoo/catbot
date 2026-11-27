@@ -1360,6 +1360,13 @@ impl Store {
         Ok(messages)
     }
 
+    /// The messages after message `after` in a conversation, oldest first (at most 500).
+    pub fn messages_after(&self, conversation_id: &str, after: i64) -> Result<Vec<Message>, BoxError> {
+        let mut stmt = self.conn.prepare("SELECT id, role, body, detail, at FROM messages WHERE conversation_id = ?1 AND id > ?2 ORDER BY id LIMIT 500")?;
+        let messages = stmt.query_map(params![conversation_id, after], message_from_row)?.collect::<Result<_, _>>()?;
+        Ok(messages)
+    }
+
     /// Up to `limit` messages older than message `before` (all the latest when None), oldest
     /// first, and whether there are older ones still.
     pub fn page(&self, conversation_id: &str, before: Option<i64>, limit: usize) -> Result<(Vec<Message>, bool), BoxError> {
@@ -1449,6 +1456,18 @@ impl Store {
     pub fn unread_conversations(&self) -> Result<Vec<Conversation>, BoxError> {
         let mut stmt = self.conn.prepare(&format!("SELECT {CONVERSATION} FROM conversations WHERE unread = 1 AND archived_at IS NULL ORDER BY updated_at DESC"))?;
         let rows = stmt.query_map([], conversation_from_row)?.collect::<Result<_, _>>()?;
+        Ok(rows)
+    }
+
+    /// Messages still marked as waiting for a bot's turn to end (`detail.held`), oldest first,
+    /// each with its chat: after a restart, the ones the queue in memory lost.
+    pub fn held_messages(&self) -> Result<Vec<(String, Message)>, BoxError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, role, body, detail, at, conversation_id FROM messages
+             WHERE detail IS NOT NULL AND json_valid(detail) AND json_extract(detail, '$.held') = 1
+             ORDER BY id",
+        )?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(5)?, message_from_row(r)?)))?.collect::<Result<_, _>>()?;
         Ok(rows)
     }
 

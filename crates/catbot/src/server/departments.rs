@@ -14,6 +14,7 @@
 //! * `POST   /api/departments`                  `{ name, botIds }`: a new one, bots moved in
 //! * `PATCH  /api/departments/:name`            `{ name?, instructions?, chief?, position? }`
 //! * `PUT    /api/departments/:name/members`    `{ add: [ids], remove: [ids] }` (General: "General")
+//! * `PUT    /api/departments/:name/order`      `{ bots: [ids] }`: its bots' order (General too)
 //! * `DELETE /api/departments/:name`            its bots go to General; its memory note stays
 //! * `GET    /api/team-map`                     hand-offs between bots, and the boxes' places
 //! * `PUT    /api/team-map/layout`              the boxes' places
@@ -61,6 +62,9 @@ pub struct Departments {
     pub list: Vec<Department>,
     /// Bot id → its department's name.
     pub members: BTreeMap<String, String>,
+    /// The order Moo put bots in (stage 32.3): within a department, or General, bots go in this
+    /// order, and the ones not in it after them, by name.
+    pub order: Vec<String>,
 }
 
 impl Departments {
@@ -95,6 +99,7 @@ pub fn load(store: &Store) -> Departments {
     let bots: Vec<String> = store.bots().unwrap_or_default().into_iter().map(|b| b.id).collect();
     let names: Vec<String> = kept.list.iter().map(|d| d.name.clone()).collect();
     kept.members.retain(|id, name| bots.contains(id) && names.contains(name));
+    kept.order.retain(|id| bots.contains(id));
     for dept in kept.list.iter_mut() {
         if dept.chief.as_ref().is_some_and(|c| kept.members.get(c) != Some(&dept.name)) {
             dept.chief = None;
@@ -214,8 +219,20 @@ pub fn set_instructions(app: &App, name: &str, text: &str) -> Result<(), (Status
     .map(|_| ())
 }
 
+/// Bots in the order chosen for them, the rest after by name (as the store gives them).
+fn in_order(mut bots: Vec<crate::store::Bot>, order: &[String]) -> Vec<crate::store::Bot> {
+    bots.sort_by_key(|b| order.iter().position(|id| *id == b.id).unwrap_or(usize::MAX));
+    bots
+}
+
+/// Puts `group`'s bots in the order given, keeping where the others stand.
+fn set_order(kept: &mut Departments, group: &[String]) {
+    kept.order.retain(|id| !group.contains(id));
+    kept.order.extend(group.iter().cloned());
+}
+
 fn wire(app: &App, kept: &Departments) -> Value {
-    let bots = app.with_store(|store| store.bots()).unwrap_or_default();
+    let bots = in_order(app.with_store(|store| store.bots()).unwrap_or_default(), &kept.order);
     let list: Vec<Value> = kept
         .list
         .iter()
@@ -345,6 +362,25 @@ pub fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<Value>
                         kept.put(id, None);
                     }
                 }
+                Ok(())
+            })?;
+            Ok((StatusCode::OK, wire(app, &kept)))
+        }
+        // The order of a department's bots, or General's (stage 32.3): every one of them, in order.
+        (&Method::PUT, [name, "order"]) => {
+            let wanted = ids(&body["bots"]);
+            let general = name.eq_ignore_ascii_case(GENERAL);
+            let kept = change(app, |store, kept| {
+                known_bots(store, &wanted)?;
+                let target = if general {
+                    None
+                } else {
+                    Some(kept.list[kept.find(name).ok_or((StatusCode::NOT_FOUND, "no such department".to_string()))?].name.clone())
+                };
+                if let Some(stray) = wanted.iter().find(|id| kept.members.get(*id) != target.as_ref()) {
+                    return Err(bad(format!("{stray} isn't in {name}")));
+                }
+                set_order(kept, &wanted);
                 Ok(())
             })?;
             Ok((StatusCode::OK, wire(app, &kept)))

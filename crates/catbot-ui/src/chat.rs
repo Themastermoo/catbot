@@ -484,8 +484,8 @@ fn LiveTurn(
     let (tint, mark) = tint.unzip();
     rsx! {
         div { class: "contents", "data-live-turn": true,
-            for step in live.steps {
-                Step { key: "{step.id}", name: step.name, ok: step.ok, live: true }
+            if !live.steps.is_empty() {
+                LiveRun { steps: live.steps.clone(), started: live.started }
             }
             if live.text.is_empty() {
                 Working { who, color: tint, mark: mark.unwrap_or_default() }
@@ -587,6 +587,33 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         }
     });
 
+    // A picture pasted into the box (a screenshot, say) is attached, as a chosen file is (Moo,
+    // 2026-11-27). The page hands it over as base64; the bot it goes to follows the open chat.
+    let mut paste_bot = use_signal(|| bot.id.clone());
+    {
+        let id = bot.id.clone();
+        use_effect(use_reactive!(|id| paste_bot.set(id)));
+    }
+    use_future(move || async move {
+        use base64::Engine;
+        let mut pasted = document::eval(PASTE_PICTURES);
+        while let Ok(file) = pasted.recv::<Value>().await {
+            let (Some(name), Some(mime), Some(data)) = (file["name"].as_str(), file["mime"].as_str(), file["data"].as_str()) else { continue };
+            let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) else { continue };
+            let (name, mime, key, bot_id) = (name.to_string(), mime.to_string(), live::send_id(), paste_bot.peek().clone());
+            tray.write().push(Tray { key: key.clone(), name: name.clone(), state: TrayState::Uploading });
+            spawn(async move {
+                let result = crate::attach::upload(&bot_id, &name, &mime, bytes).await;
+                if let Some(item) = tray.write().iter_mut().find(|t| t.key == key) {
+                    item.state = match result {
+                        Ok(attached) => TrayState::Ready(attached),
+                        Err(err) => TrayState::Failed(err),
+                    };
+                }
+            });
+        }
+    });
+
     let send_bot = bot.clone();
     let send = use_callback(move |(words, files): (String, Vec<Attached>)| {
         let bot = send_bot.clone();
@@ -595,7 +622,12 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
             state.write().sending(&bot.thread_id, live::optimistic(&words, &id, js_now(), files.clone()));
             let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
             let body = serde_json::json!({ "text": words, "threadId": bot.thread_id, "sendId": id, "attachments": ids });
-            if let Err(err) = api::post(&format!("/api/bots/{}/messages", bot.id), &body).await {
+            if let Err(err) = api::post_within(&format!("/api/bots/{}/messages", bot.id), &body, SEND_WITHIN_MS).await {
+                // Arrived after all (its saved copy came over the live feed): nothing to undo.
+                let pending = format!("optimistic-{id}");
+                if !state.peek().threads.get(&bot.thread_id).is_some_and(|t| t.messages.iter().any(|m| m.id == pending)) {
+                    return;
+                }
                 state.write().unsend(&bot.thread_id, &id);
                 problem.set(Some(err));
                 // Put the files back too.
@@ -976,6 +1008,32 @@ fn set_box(text: &str) {
 }
 
 /// The typing box grows with its text, up to its max height.
+/// Pictures pasted into the message box, handed to the program one by one as
+/// `{ name, mime, data }` (base64). Text pastes as ever.
+const PASTE_PICTURES: &str = r#"
+if (window.__catbotPaste) document.removeEventListener("paste", window.__catbotPaste, true);
+window.__catbotPaste = async (e) => {
+    if (!e.target || e.target.id !== "composer-box") return;
+    const items = [...((e.clipboardData && e.clipboardData.items) || [])].filter((i) => i.kind === "file" && i.type.startsWith("image/"));
+    if (!items.length) return;
+    e.preventDefault();
+    let n = 0;
+    for (const item of items) {
+        const file = item.getAsFile();
+        if (!file) continue;
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+        const ext = (file.type.split("/")[1] || "png").replace("jpeg", "jpg").replace("+xml", "");
+        const named = file.name && !/^image\.\w+$/.test(file.name);
+        n += 1;
+        dioxus.send({ name: named ? file.name : `Pasted picture${n > 1 ? " " + n : ""}.${ext}`, mime: file.type, data: btoa(bin) });
+    }
+};
+document.addEventListener("paste", window.__catbotPaste, true);
+await new Promise(() => {});
+"#;
+
 const RESIZE_BOX: &str = r#"requestAnimationFrame(() => { const box = document.getElementById("composer-box"); if (box) { box.style.height = "auto"; box.style.height = box.scrollHeight + "px"; } });"#;
 
 fn page_messages(page: &Value) -> Vec<Msg> {
@@ -1685,6 +1743,65 @@ fn Step(name: String, ok: Option<bool>, #[props(default)] live: bool) -> Element
     }
 }
 
+/// The running turn's steps, folded into one line that says what it's doing now and for how
+/// long, and opens to show them all (like Claude's "Running a command 2m 13s ›"; Moo's ask on
+/// 2026-11-27: a busy bot's steps had filled the chat one chip each).
+#[component]
+fn LiveRun(steps: Vec<crate::live::LiveStep>, started: f64) -> Element {
+    let mut open = use_signal(|| false);
+    let mounted = use_hook(js_now);
+    let mut now = use_signal(js_now);
+    use_future(move || async move {
+        loop {
+            crate::events::pause(1000).await;
+            now.set(js_now());
+        }
+    });
+    let since = if started > 0.0 { started } else { mounted };
+    let elapsed = elapsed_label(now() - since);
+    let doing = steps.iter().rev().find(|s| s.ok.is_none()).or(steps.last()).map(|s| s.name.clone()).unwrap_or_default();
+    let count = steps.len();
+    let failed = steps.iter().filter(|s| s.ok == Some(false)).count();
+    let pill = "flex min-w-0 max-w-full items-center gap-2 rounded-full border border-hairline/40 bg-panel px-3 py-1.5 text-[13px] text-ink-secondary hover:bg-control";
+    let turned = if open() { "rotate-90" } else { "" };
+    rsx! {
+        div { class: "flex flex-col gap-1", "data-live-run": "{count}",
+            div { class: "flex min-w-0 justify-start",
+                button { r#type: "button", "aria-expanded": "{open()}", class: "{pill}", title: "{doing}",
+                    onclick: move |_| open.toggle(),
+                    span { "aria-hidden": "true", class: "inline-block size-3 shrink-0 animate-spin rounded-full border-[1.5px] border-accent border-t-transparent" }
+                    span { class: "min-w-0 max-w-[420px] truncate font-mono leading-5", "{doing}" }
+                    span { class: "shrink-0 tabular-nums text-ink-tertiary", "{elapsed}" }
+                    if count > 1 {
+                        span { class: "shrink-0 text-ink-tertiary", "· {count} steps" }
+                    }
+                    if failed > 0 {
+                        span { class: "shrink-0 text-danger", "· {failed} failed" }
+                    }
+                    Icon { path: CHEVRON, class: turned }
+                }
+            }
+            if open() {
+                div { class: "ml-3 flex flex-col gap-1 border-l border-hairline/40 pl-3",
+                    for step in steps {
+                        Step { key: "{step.id}", name: step.name, ok: step.ok, live: true }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// How long something has run: "8s", "2m 13s", "1h 4m".
+pub fn elapsed_label(ms: f64) -> String {
+    let s = (ms / 1000.0).max(0.0) as u64;
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{}m {}s", s / 60, s % 60),
+        _ => format!("{}h {}m", s / 3600, (s % 3600) / 60),
+    }
+}
+
 /// Two or more steps in a row, folded into one line that opens to show them (their `ActivityRun`).
 #[component]
 fn Run(steps: Vec<Msg>, #[props(default)] bot_name: String, #[props(default)] asking: bool) -> Element {
@@ -1970,6 +2087,9 @@ fn Icon(path: &'static str, class: &'static str, #[props(default = 13)] size: u3
     }
 }
 
+/// How long a send waits for Catbot before saying it wasn't sent.
+const SEND_WITHIN_MS: u32 = 20_000;
+
 pub fn js_now() -> f64 {
     #[cfg(target_arch = "wasm32")]
     return js_sys::Date::now();
@@ -2168,6 +2288,7 @@ mod tests {
         }
         let many: Vec<Msg> = ["A", "B", "C", "D", "E"].iter().enumerate().map(|(i, n)| step(&i.to_string(), n, 1.0)).collect();
         assert_eq!(describe_run(&many), "5 steps · A, B, C +2 more");
+        assert_eq!((elapsed_label(8_400.0), elapsed_label(133_000.0), elapsed_label(3_840_000.0), elapsed_label(-5.0)), ("8s".into(), "2m 13s".into(), "1h 4m".into(), "0s".into()));
     }
 
     #[test]

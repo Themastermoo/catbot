@@ -206,6 +206,7 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let map = use_signal(|| false);
     let board = use_signal(|| false);
     let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat, prefs, find, map, board });
+    use_context_provider(|| attach::Viewing(Signal::new(None)));
     let notify_prefs = use_context_provider(|| Signal::new(notify::load()));
     let inbox = use_context_provider(inbox::Inbox::new);
     let depts = use_context_provider(|| Signal::new(departments::Depts::default()));
@@ -358,6 +359,7 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
                     inbox::InboxPanel {}
                 }
             }
+            attach::PictureViewer {}
         }
     }
 }

@@ -375,6 +375,8 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
     tokio::spawn(computers::keep_tidy(app.clone()));
     // Scheduled messages, those missed while Catbot was off first (stage 21).
     scheduled::start(app.clone());
+    // Messages that were waiting for a turn when Catbot stopped (stage 32, Moo, 2026-11-27).
+    resume_held(&app);
     axum::serve(listener, router(app)).await?;
     Ok(())
 }
@@ -1168,6 +1170,37 @@ pub fn release_held(app: &Arc<App>, thread: &str) {
     };
     if let Err(err) = turns::start(app.clone(), bot, conversation, request_id, said) {
         eprintln!("catbot: a held message couldn't go: {err}");
+    }
+}
+
+/// Messages waiting for a bot's turn to end are queued in memory, so stopping Catbot (an update,
+/// a restart after a build) used to strand them: marked "waiting", never read. At start they
+/// queue again and go to their bots. Ones more than a day old are only let go, not sent, so a
+/// stale question doesn't start work (and spend usage) out of the blue.
+pub fn resume_held(app: &Arc<App>) {
+    let stranded = app.with_store(|store| store.held_messages()).unwrap_or_default();
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(1);
+    let mut queued: Vec<(String, bool)> = Vec::new();
+    for (thread, message) in stranded {
+        let recent = chrono::DateTime::parse_from_rfc3339(&message.at).is_ok_and(|at| at > cutoff);
+        if !recent {
+            mark_held(app, &thread, message.id, None);
+            continue;
+        }
+        let channel = app.with_store(|store| store.conversation(&thread)).flatten().and_then(|c| c.channel_id);
+        let key = channel.clone().unwrap_or_else(|| thread.clone());
+        app.held.lock().expect("held lock").entry(key.clone()).or_default().push((message.id, message.body.clone()));
+        if !queued.iter().any(|(k, _)| *k == key) {
+            queued.push((key, channel.is_some()));
+        }
+    }
+    for (key, is_channel) in queued {
+        eprintln!("catbot: sending on the messages that were waiting in {key} when Catbot stopped");
+        if is_channel {
+            channels::release_held(app, &key);
+        } else {
+            release_held(app, &key);
+        }
     }
 }
 

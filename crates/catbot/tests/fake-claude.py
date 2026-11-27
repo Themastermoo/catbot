@@ -11,7 +11,7 @@ The prompt picks the behaviour:
   "write <file>: <words>" -> writes the words to that file in its folder (as a bot's edit would)
   "Name the conversation…" -> a chat's name, the way Catbot asks for one
   anything else -> streams "Hello, <prompt>" back (ending "@Name, over to you." for a bot
-                   whose instructions say "fake-pass @Name"; "what are your instructions?" -> its system prompt;
+                   whose instructions say "fake-pass @Name" (and DONE in a direct chat, for "fake-done" or "fake-agree"); "what are your instructions?" -> its system prompt;
                    "team: {…}" -> proposes that team change; "offer a skill" -> offers one;
                    "catbot-tool: name {json}" -> calls one of Catbot's tools and says what it answered)
 """
@@ -145,11 +145,17 @@ if prompt.startswith("write ") and ":" in prompt.splitlines()[0]:
 reply = f"Hello, {prompt}"
 if "steered" in dir() and steered:
     reply += "\n\nSteered: " + " / ".join(steered)
+# "fake-mode" (in its instructions) says what approval level it was run at.
+if "fake-mode" in system:
+    reply += f"\n\n(mode {arg_after('--permission-mode')})"
 # A bot told "fake-pass @Name" (in its instructions, which come first) hands on to that bot.
 import re
 passing = re.search(r"fake-pass (@\w+)", system)
 if passing:
     reply += f"\n\n{passing.group(1)}, over to you."
+# In a direct chat between bots, "fake-done" says DONE each turn; "fake-agree" only once the other has.
+if "saying just DONE" in prompt and ("fake-done" in system or ("fake-agree" in system and "say DONE too" in prompt)):
+    reply += "\n\nDONE"
 # "team: {…}" (the first line) proposes that team change, as a Chief of Staff would.
 first_line = prompt.strip().splitlines()[0] if prompt.strip() else ""
 if first_line.startswith("team: "):
