@@ -54,16 +54,20 @@ fn base(app: &App, id: &str) -> String {
 
 /// Whether it's offered to bots: the person added it, or a bot already uses it.
 pub fn is_added(app: &App, id: &str) -> bool {
-    let added = app.with_store(|store| store.setting(ADDED)).flatten().and_then(|v| v.as_array().cloned()).unwrap_or_default();
-    added.iter().any(|v| v == id) || app.with_store(|store| store.all_bots()).unwrap_or_default().iter().any(|b| b.engine == id)
+    let added = app.with_store(|store| store.setting(ADDED)).flatten();
+    added.as_ref().and_then(Value::as_array).is_some_and(|ids| ids.iter().any(|v| v == id))
+        || app.with_store(|store| store.uses_engine(id)).unwrap_or_default()
 }
 
 fn add(app: &App, id: &str) -> Result<(), (StatusCode, String)> {
-    let mut added = app.with_store(|store| store.setting(ADDED)).flatten().and_then(|v| v.as_array().cloned()).unwrap_or_default();
-    if !added.iter().any(|v| v == id) {
-        added.push(json!(id));
-    }
-    app.try_store(|store| store.set_setting(ADDED, &json!(added))).map_err(fail)
+    app.try_store(|store| {
+        let mut added = store.setting(ADDED)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        if !added.iter().any(|v| v == id) {
+            added.push(json!(id));
+            store.set_setting(ADDED, &json!(added))?;
+        }
+        Ok(())
+    }).map_err(fail)
 }
 
 fn client(timeout: Duration) -> reqwest::Client {

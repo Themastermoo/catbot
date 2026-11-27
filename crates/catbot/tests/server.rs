@@ -1124,6 +1124,39 @@ fn fake_api(seen: std::sync::Arc<std::sync::Mutex<Vec<Value>>>) -> Router {
 }
 
 #[tokio::test]
+async fn local_chat_handles_unsupported_options_in_either_order() {
+    let s = setup().await;
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let requests = seen.clone();
+    let endpoint = listen(Router::new().route("/v1/chat/completions", post(move |axum::Json(body): axum::Json<Value>| {
+        let tools = body.get("tools").is_some();
+        let usage = body.get("stream_options").is_some();
+        requests.lock().unwrap().push((tools, usage));
+        async move {
+            if tools || usage {
+                let rejected = if tools && (!usage || body["model"] == "tools-first") { "tools" } else { "stream_options" };
+                return Response::builder().status(400).body(Body::from(format!("unsupported {rejected}"))).unwrap();
+            }
+            Response::builder().header("content-type", "text/event-stream")
+                .body(Body::from("data: {\"choices\":[{\"delta\":{\"content\":\"local reply\"}}]}\n\ndata: [DONE]\n\n")).unwrap()
+        }
+    }))).await;
+    s.app.with_store(|store| store.set_engine_key("ollama", "", Some(&format!("http://{endpoint}/v1"))));
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    for (model, second) in [("tools-first", (false, true)), ("usage-first", (true, false))] {
+        let (_, bot) = s.call("POST", "/api/bots", Some(json!({ "name": model }))).await;
+        let path = format!("/api/bots/{}", bot["bot"]["id"].as_str().unwrap());
+        let selection = json!({ "modelSelection": { "instanceId": "ollama", "model": model } });
+        assert_eq!(s.call("PATCH", &path, Some(selection)).await.0, 200);
+        s.call("POST", &format!("{path}/messages"), Some(json!({ "text": "Say hello" }))).await;
+        let done = until(&mut events, "turn.completed", |f| runtime(f, "turn.completed")).await;
+        assert_eq!(done["event"]["ok"], true, "{model}: {done}");
+        assert_eq!(std::mem::take(&mut *seen.lock().unwrap()), vec![(true, true), second, (false, false)]);
+    }
+}
+
+#[tokio::test]
 async fn a_bot_on_a_chat_api_uses_its_tools_with_approval() {
     let s = setup().await;
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));

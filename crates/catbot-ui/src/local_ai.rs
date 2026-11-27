@@ -21,10 +21,15 @@ pub fn use_local_ai() -> (Signal<Option<Result<Value, String>>>, Signal<u32>) {
     let mut seen = use_signal(|| None::<Result<Value, String>>);
     let checked = use_signal(|| 0u32);
     let state = use_context::<Signal<State>>();
+    let discovery_changes = use_memo(move || {
+        let state = state.read();
+        // An existing bot also makes its local engine available without explicit opt-in.
+        let uses = |id: &str| state.bots.iter().any(|bot| bot.engine == id);
+        (state.local_ai_changed, state.engines_changed, state.archived_changed, uses("ollama"), uses("lmstudio"))
+    });
     use_effect(move || {
         let _ = checked();
-        let _ = state.read().local_ai_changed;
-        let _ = state.read().engines_changed;
+        let _ = discovery_changes();
         spawn(async move {
             seen.set(Some(api::get("/api/local-ai").await));
         });

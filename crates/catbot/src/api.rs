@@ -117,20 +117,15 @@ async fn converse(turn: &ApiTurn, tx: &mpsc::Sender<Event>, answers: &Answerer, 
     let mut use_tools = true;
     let mut reply = String::new();
     for _ in 0..MOST_ROUNDS {
-        let mut attempt = ask(&client, turn, &messages, use_tools, used, tx).await;
-        if let Err(Failure::NoUsageOption) = attempt {
-            used.no_usage_option = true;
-            attempt = ask(&client, turn, &messages, use_tools, used, tx).await;
-        }
-        let round = match attempt {
-            Err(Failure::NoTools) if use_tools => {
-                // Some models (often small local ones) can't take tools: carry on without them.
-                use_tools = false;
-                ask(&client, turn, &messages, false, used, tx).await
+        // Providers can reject either option first. Each rejection removes one
+        // option for the remainder of the turn, so at most two retries are needed.
+        let round = loop {
+            match ask(&client, turn, &messages, use_tools, used, tx).await {
+                Err(Failure::NoUsageOption) if !used.no_usage_option => used.no_usage_option = true,
+                Err(Failure::NoTools) if use_tools => use_tools = false,
+                result => break result.map_err(|failure| failure.to_string())?,
             }
-            other => other,
-        }
-        .map_err(|f| f.to_string())?;
+        };
         match round.usage {
             Some((tokens, cost)) => {
                 used.tokens.add(tokens);

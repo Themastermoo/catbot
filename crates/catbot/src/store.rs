@@ -976,6 +976,11 @@ impl Store {
         Ok(bots)
     }
 
+    /// Whether any bot uses the engine, including bots in the archive.
+    pub fn uses_engine(&self, engine: &str) -> Result<bool, BoxError> {
+        Ok(self.conn.query_row("SELECT EXISTS(SELECT 1 FROM bots WHERE engine = ?1)", [engine], |row| row.get(0))?)
+    }
+
     /// A bot by name, ignoring case.
     pub fn bot(&self, name: &str) -> Result<Option<Bot>, BoxError> {
         Ok(self
@@ -1651,6 +1656,20 @@ mod tests {
         assert_eq!(found, bot);
         assert_eq!(found.mode, PermissionMode::AcceptEdits);
         assert_eq!(store.bots().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn engine_readiness_counts_archived_bots() {
+        let (_dir, store) = store();
+        assert!(!store.uses_engine("ollama").unwrap());
+        let mut bot = store.create_bot(new("Scout")).unwrap();
+        bot.engine = "ollama".into();
+        store.update_bot(&bot).unwrap();
+        assert!(store.uses_engine("ollama").unwrap());
+        store.set_profile(&bot.id, &Profile { archived_at: Some(now()), ..Profile::default() }).unwrap();
+        assert!(store.bots().unwrap().is_empty());
+        assert!(store.uses_engine("ollama").unwrap());
+        assert!(!store.uses_engine("lmstudio").unwrap());
     }
 
     #[test]

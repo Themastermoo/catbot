@@ -65,6 +65,8 @@ The repository is `github.com/Themastermoo/catbot` (made 2026-11-26), and `REPO`
 
 ## Making a release
 
+The [0.2.3 update notes](notes/v0.2.3.md) describe Burst mode and the local AI fixes. For an update with notes in a file, pass that file to the annotated tag with `git tag -a v0.2.3 -F scripts/release/notes/v0.2.3.md`. The workflow copies the tag text into the GitHub release and the in-app update manifest.
+
 1. Raise `version` in the top `Cargo.toml` (for example `0.2.0` → `0.3.0`) and commit.
 2. Tag it with a note. The tag's message becomes the release notes Catbot shows:
    ```
