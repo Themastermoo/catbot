@@ -1,6 +1,7 @@
-//! Backup AIs: when a bot's AI is at a limit (Claude's plan, or Catbot's own token or spend
-//! limits, `limits.rs`), its turn goes to the first of its backups that is ready and isn't at a
-//! limit too, as MausBot's fallback models do. Each bot keeps its own list, in order
+//! Backup AIs: when a bot's AI is at a limit (its plan, credit or quota running out, which any
+//! AI can say mid-turn, or Catbot's own token or spend limits, `limits.rs`), its turn goes to
+//! the first of its backups that is ready and isn't at a limit too, as MausBot's fallback
+//! models do. Each bot keeps its own list, in order
 //! (`backups:<bot id>` in the settings).
 //!
 //! A switch gets a note in the chat. The conversation's AI session is started afresh on each
@@ -118,7 +119,41 @@ fn until_words(until: Option<DateTime<Utc>>) -> String {
 /// Whether a failed Claude turn was turned away for its usage limit (the CLI's words for it).
 pub fn says_limit(text: &str) -> bool {
     let lower = text.to_lowercase();
-    ["usage limit", "limit reached", "hit your limit", "out of extra usage", "weekly limit", "session limit"].iter().any(|w| lower.contains(w))
+    LIMIT_WORDS.iter().chain(RATE_WORDS).any(|w| lower.contains(w))
+}
+
+/// How AIs say they're out of usage, credit or quota (Claude, Codex, the APIs, Gemini's
+/// RESOURCE_EXHAUSTED, Grok's and others' own words).
+const LIMIT_WORDS: &[&str] = &[
+    "usage limit",
+    "limit reached",
+    "hit your limit",
+    "out of extra usage",
+    "weekly limit",
+    "session limit",
+    "daily limit",
+    "monthly limit",
+    "quota exceeded",
+    "exceeded your current quota",
+    "exceeded your quota",
+    "insufficient_quota",
+    "insufficient quota",
+    "resource_exhausted",
+    "resource exhausted",
+    "out of credit",
+    "credit balance is too low",
+    "no credits",
+    "spending limit",
+];
+
+/// How they say to slow down for a while.
+const RATE_WORDS: &[&str] = &["rate limit", "rate-limit", "ratelimit", "too many requests", "answered 429", "status 429", "error 429", "(429)", "says to slow down"];
+
+/// When a limit lifts, if the AI didn't say: soon for a rate limit, in an hour otherwise.
+pub fn lifts_guess(text: &str) -> DateTime<Utc> {
+    let lower = text.to_lowercase();
+    let rate_only = RATE_WORDS.iter().any(|w| lower.contains(w)) && !LIMIT_WORDS.iter().any(|w| lower.contains(w));
+    Utc::now() + chrono::Duration::minutes(if rate_only { 5 } else { 60 })
 }
 
 /// When a limit message says the limit lifts: Claude's `…|1763316000` form, if it's there.
@@ -137,6 +172,14 @@ mod tests {
         assert!(says_limit("Claude AI usage limit reached|1763316000"));
         assert!(says_limit("5-hour limit reached ∙ resets 3pm"));
         assert!(!says_limit("No conversation found with session ID: x"));
+        // Every AI's way of saying it: Gemini's, OpenAI's, Grok's, an API's 429.
+        for said in ["Antigravity (Google) didn't finish: RESOURCE_EXHAUSTED: Quota exceeded.", "You exceeded your current quota, please check your plan", "Grok CLI didn't finish: Rate limit exceeded.", "OpenAI says to slow down or that the account is out of credit: x"] {
+            assert!(says_limit(said), "{said}");
+        }
+        assert!(!says_limit("The function has no limit on recursion"), "not every limit");
+        let soon = lifts_guess("Rate limit exceeded") - Utc::now();
+        let later = lifts_guess("Quota exceeded") - Utc::now();
+        assert!(soon.num_minutes() <= 5 && later.num_minutes() >= 59);
         assert_eq!(lifts_at("Claude AI usage limit reached|1763316000").map(|t| t.timestamp()), Some(1_763_316_000));
         assert_eq!(lifts_at("5-hour limit reached"), None);
         assert_eq!(label(&Backup { engine: "xai".into(), model: Some("grok-4".into()) }), "Grok (xAI) · grok-4");

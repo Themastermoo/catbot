@@ -5,6 +5,7 @@ does): the person's earlier message, a tool call and the earlier reply, as sessi
 
 session/prompt behaviour by the message's last line:
   contains "look" -> says "Looking.", reads a file (a tool call), then says "Found it."
+  contains "quota" -> refuses the prompt: out of quota (RESOURCE_EXHAUSTED), as Gemini's agents do
   contains "edit" -> a tool call that asks permission, then (if allowed) writes notes.md through
                      Catbot's fs/write_text_file, and says what happened
   anything else   -> thinks briefly, then answers "Echo: <line> (new|resumed)"; "new" when the
@@ -83,9 +84,11 @@ def chunk(session, text, kind="agent_message_chunk"):
     update(session, {"sessionUpdate": kind, "content": {"type": "text", "text": text}})
 
 # Its thinking levels (ACP's thought_level config option); a level set is logged.
-def options(level):
+def options(level, model="fake-pro"):
     return [{"id": "reasoning", "name": "Thinking", "category": "thought_level", "type": "select", "currentValue": level,
-             "options": [{"value": "low", "name": "Light"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "Deep"}]}]
+             "options": [{"value": "low", "name": "Light"}, {"value": "medium", "name": "Medium"}, {"value": "high", "name": "Deep"}]},
+            {"id": "model", "name": "Model", "category": "model", "type": "select", "currentValue": model,
+             "options": [{"value": "fake-pro", "name": "Fake Pro"}, {"value": "fake-flash", "name": "Fake Flash"}]}]
 
 def logged(entry):
     if os.environ.get("FAKE_ACP_LOG"):
@@ -125,6 +128,9 @@ for line in sys.stdin:
         session = params["sessionId"]
         text = params["prompt"][0]["text"]
         last = text.strip().splitlines()[-1]
+        if "quota" in last:
+            send({"jsonrpc": "2.0", "id": rid, "error": {"code": 429, "message": "RESOURCE_EXHAUSTED: Quota exceeded for this account. Try again later."}})
+            continue
         if "look" in last:
             chunk(session, "Looking.")
             update(session, {"sessionUpdate": "tool_call", "toolCallId": "t2", "title": "Read notes.md", "kind": "read", "status": "completed"})

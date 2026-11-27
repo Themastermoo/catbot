@@ -1,10 +1,12 @@
 //! A bot's panel on the right, as MausBot's simple layout shows it (`bot-panel/PanelShell.tsx`,
 //! MIT): round buttons at the top (its settings, close), the bot large with its name and what it's
-//! doing, then three tabs.
+//! doing, then five tabs (Approvals and Look were made tabs of their own, Moo, 2026-11-27).
 //!
 //! - **Details**: its model and thinking level, its chats, things to ask (the Chief only), the
 //!   conversation's tools (find, start fresh, spending) and its routines.
 //! - **Library**: what it keeps: its memory notes, skills, folder and published pages.
+//! - **Approvals**: how much it does without asking, and what it was always allowed.
+//! - **Look**: its picture and colour.
 //! - **Computer**: its own computer, live, or where it works without one; Codex access and how
 //!   much it may do without asking.
 //!
@@ -43,6 +45,8 @@ enum Page {
 enum Tab {
     Details,
     Library,
+    Approvals,
+    Look,
     Computer,
 }
 
@@ -97,7 +101,7 @@ pub fn BotPanel(bot: Bot) -> Element {
                     Hero { bot: bot.clone() }
                     div { role: "tablist", "aria-label": "{bot.name}", class: "sticky top-0 z-[1] -mx-4 mt-[15px] flex justify-center bg-app px-4 pb-2.5 pt-1",
                         div { class: "flex min-w-0 gap-0.5 rounded-full bg-ink/[0.05] p-[3px]",
-                            for (id, label) in [(Tab::Details, "Details"), (Tab::Library, "Library"), (Tab::Computer, "Computer")] {
+                            for (id, label) in [(Tab::Details, "Details"), (Tab::Library, "Library"), (Tab::Approvals, "Approvals"), (Tab::Look, "Look"), (Tab::Computer, "Computer")] {
                                 button {
                                     key: "{label}",
                                     r#type: "button",
@@ -115,7 +119,9 @@ pub fn BotPanel(bot: Bot) -> Element {
                         match tab() {
                             Tab::Details => rsx! { Details { bot: bot.clone(), on_page: move |p| page.set(Some(p)) } },
                             Tab::Library => rsx! { Library { bot: bot.clone(), on_settings: move |_| page.set(Some(Page::Settings)) } },
-                            Tab::Computer => rsx! { Computer { bot: bot.clone(), on_settings: move |_| page.set(Some(Page::Settings)) } },
+                            Tab::Approvals => rsx! { crate::settings::ApprovalSettings { bot: bot.clone() } },
+                            Tab::Look => rsx! { crate::settings::LookSettings { bot: bot.clone() } },
+                            Tab::Computer => rsx! { Computer { bot: bot.clone(), on_approvals: move |_| tab.set(Tab::Approvals) } },
                         }
                     }
                 }
@@ -553,7 +559,7 @@ fn event_gist(event: &Value) -> String {
 const APPROVAL: [(&str, &str); 4] = [("ask", "Asks first"), ("edits", "Edits on its own"), ("auto", "Approves for you"), ("full", "Full access")];
 
 #[component]
-fn Computer(bot: Bot, on_settings: EventHandler<()>) -> Element {
+fn Computer(bot: Bot, on_approvals: EventHandler<()>) -> Element {
     let state = use_context::<Signal<State>>();
     let mut ui = use_context::<Ui>();
     let mut computers = use_signal(|| None::<Value>);
@@ -612,7 +618,7 @@ fn Computer(bot: Bot, on_settings: EventHandler<()>) -> Element {
                     }
                 }
             }
-            NavRow { icon: "check", title: "Without asking", value: approval, data: "approval", onclick: move |_| on_settings.call(()) }
+            NavRow { icon: "check", title: "Without asking", value: approval, data: "approval", onclick: move |_| on_approvals.call(()) }
             if let Some(err) = problem() {
                 p { role: "alert", class: "px-2 text-[12px] text-danger", "{err}" }
             }

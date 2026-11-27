@@ -1357,6 +1357,15 @@ async fn a_bot_on_an_agent_program_streams_asks_and_resumes() {
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
     assert_eq!(reply["message"]["text"], "Looking.\n\nFound it.");
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    // Its own models, as it listed them, for the menu; the bot's pick is set on its session.
+    let (_, models) = s.call("GET", "/api/engines/grok-cli/models", None).await;
+    assert_eq!((models["models"].clone(), models["live"].clone()), (json!(["fake-pro", "fake-flash"]), json!(true)), "{models}");
+    assert_eq!(models["labels"][1], json!({ "id": "fake-flash", "label": "Fake Flash" }));
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "grok-cli", "model": "fake-flash" } }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "which model", "threadId": thread }))).await;
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+    let picked: Vec<Value> = std::fs::read_to_string(&log).unwrap().lines().filter_map(|l| serde_json::from_str::<Value>(l).ok()).filter(|l| l["set"] == "model").collect();
+    assert_eq!(picked, [json!({ "set": "model", "value": "fake-flash", "session": "fake-session-1" })]);
     // Another model thinks in other words: the level goes back to its own.
     let (_, moved) = s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "modelSelection": { "instanceId": "grok-cli", "model": "grok-4.7" } }))).await;
     assert_eq!(moved["bot"]["effort"], Value::Null);
@@ -1373,6 +1382,15 @@ async fn a_bot_on_an_agent_program_streams_asks_and_resumes() {
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
     assert_eq!(reply["message"]["text"], "Edited.");
     assert_eq!(std::fs::read_to_string(&notes).unwrap(), "hello from the agent");
+    until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
+
+    // Out of quota mid-turn: the turn goes to its backup (any AI, not just Claude and Codex).
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "approvalMode": "full", "backups": [{ "engine": "claude", "model": "" }] }))).await;
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "use the quota", "threadId": thread }))).await;
+    let note = until(&mut events, "backup note", |f| f["kind"] == "message" && f["message"]["kind"] == "activity" && f["message"]["tool"]["name"].as_str().is_some_and(|n| n.contains("backup"))).await;
+    let said = note["message"]["tool"]["name"].as_str().unwrap();
+    assert!(said.contains("Grok CLI turned the last turn away at its usage limit") && said.contains("Claude (a backup) is answering"), "{said}");
+    until(&mut events, "backup reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
 }
 
 #[tokio::test]

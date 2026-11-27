@@ -291,12 +291,12 @@ async fn run(
         result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
     }
 
-    // Claude (or Codex) turned the turn away at its usage limit before doing anything: a backup takes it.
+    // The bot's AI ran out of usage, credit or quota (any AI, Moo's ask on 2026-11-27): a backup
+    // takes the turn, and the AI isn't tried again until the limit lifts.
     let mut ran_on = bot.clone();
     let said: String = result.errors.iter().cloned().chain(result.outcome.as_ref().and_then(|o| o.result.clone())).collect::<Vec<_>>().join(" ");
-    let nothing_done = result.steps.iter().all(|s| matches!(s, Step::Error { .. }));
-    if (bot.engine == engines::CLAUDE || bot.engine == engines::CODEX) && !result.stopped && result.reply.trim().is_empty() && nothing_done && super::backups::says_limit(&said) {
-        let until = super::backups::lifts_at(&said).unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::hours(1));
+    if !result.stopped && result.reply.trim().is_empty() && super::backups::says_limit(&said) {
+        let until = super::backups::lifts_at(&said).unwrap_or_else(|| super::backups::lifts_guess(&said));
         app.limited_until.lock().expect("limited lock").insert(bot.engine.clone(), until);
         super::usage::forget(app);
         if let Ok(Some((stand_in, why))) = super::backups::choose(app, bot) {

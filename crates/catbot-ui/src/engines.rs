@@ -19,11 +19,22 @@ const LABEL: &str = "block text-[12px] font-medium text-ink-secondary";
 const FIELD: &str = "mt-1 w-full rounded-lg bg-inset px-3 py-2 text-[14px] text-ink focus:outline-none focus:ring-1 focus:ring-accent";
 const SMALL_BUTTON: &str = "rounded-full px-2.5 py-1 text-[12px] font-medium text-ink-secondary hover:bg-raised hover:text-ink disabled:opacity-50";
 
+/// The models an AI lists, with their names where it gives them (`labels`), else their ids.
+fn listed_models(answer: &Value) -> Vec<(String, String)> {
+    let named = |id: &str| {
+        answer["labels"].as_array().and_then(|l| l.iter().find(|m| m["id"] == id)).and_then(|m| m["label"].as_str().or(m["name"].as_str())).map(str::to_string)
+    };
+    answer["models"]
+        .as_array()
+        .map(|l| l.iter().filter_map(|m| m.as_str()).map(|id| (id.to_string(), named(id).unwrap_or_else(|| id.to_string()))).collect())
+        .unwrap_or_default()
+}
+
 #[component]
 pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element {
     let state = use_context::<Signal<State>>();
     let mut engines = use_signal(Vec::<Value>::new);
-    let mut models = use_signal(|| None::<(String, Vec<String>)>);
+    let mut models = use_signal(|| None::<(String, Vec<(String, String)>)>);
     let mut problem = use_signal(|| None::<String>);
 
     // The list, now and whenever a key is saved or forgotten anywhere.
@@ -49,8 +60,7 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
         }
         spawn(async move {
             if let Ok(answer) = api::get(&format!("/api/engines/{wanted}/models")).await {
-                let list = answer["models"].as_array().map(|l| l.iter().filter_map(|m| m.as_str().map(str::to_string)).collect()).unwrap_or_default();
-                models.set(Some((wanted, list)));
+                models.set(Some((wanted, listed_models(&answer))));
             }
         });
     }));
@@ -66,7 +76,7 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
     let suggested: Vec<(String, String)> =
         engine["models"].as_array().map(|l| l.iter().map(|m| (str_of(m, "id"), str_of(m, "label"))).collect()).unwrap_or_default();
     let mut options: Vec<(String, String)> = match models() {
-        Some((id, list)) if id == engine_id && !list.is_empty() => list.into_iter().map(|m| (m.clone(), m)).collect(),
+        Some((id, list)) if id == engine_id && !list.is_empty() => list,
         _ => suggested.into_iter().filter(|(id, _)| !id.is_empty()).collect(),
     };
     let default_model = str_of(&engine, "defaultModel");
@@ -114,8 +124,9 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
                 }
             }
         }
-        if agent {
-            // An agent program takes the model by name, or uses its own.
+        if agent && listed.unwrap_or(0) == 0 {
+            // An agent program takes the model by name, or uses its own; once it has said which
+            // models it has (Antigravity does, Moo's ask on 2026-11-27), they're a menu below.
             label { class: "mt-3 {LABEL}", "Model"
                 input {
                     key: "{engine_id}",
@@ -145,6 +156,9 @@ pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element 
                     option { key: "{id}", value: "{id}", selected: id == bot.model, "{label}" }
                 }
             }
+        }
+        if agent {
+            AgentBox { engine: engine.clone() }
         }
         if engine["kind"] == "api" {
             KeyBox { engine: engine.clone() }
@@ -1003,3 +1017,15 @@ pub fn Backups(bot: Bot, saving: bool, change: Callback<Value>) -> Element {
 
 const SMALL: &str = "flex size-6 shrink-0 items-center justify-center rounded text-ink-secondary hover:bg-control disabled:opacity-30";
 const SMALL_FIELD: &str = "h-8 rounded-lg bg-raised px-2 text-[13px] text-ink outline-none";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn models_are_shown_by_their_names_where_given() {
+        let answer = json!({ "models": ["fake-pro", "plain"], "labels": [{ "id": "fake-pro", "label": "Fake Pro" }] });
+        assert_eq!(listed_models(&answer), [("fake-pro".to_string(), "Fake Pro".to_string()), ("plain".to_string(), "plain".to_string())]);
+        assert!(listed_models(&json!({})).is_empty());
+    }
+}

@@ -190,7 +190,6 @@ pub fn BotSettings(bot: Bot) -> Element {
             }
         });
     };
-    let full = bot.approval_mode == "full";
     let channel = bot.channel.is_some();
     let team_chat = bot.is_team_chat();
     rsx! {
@@ -201,42 +200,13 @@ pub fn BotSettings(bot: Bot) -> Element {
                             BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
                             div { class: "min-w-0",
                                 div { class: "text-[15px] font-semibold text-ink truncate", "{bot.name}" }
-                                div { class: "text-[12px] text-ink-secondary", if channel { "Pick a colour" } else { "Pick a picture and a colour" } }
+                                div { class: "text-[12px] text-ink-secondary", if channel { "Pick a colour" } else { "Its picture is in the Look tab" } }
                             }
                         }
-                        div { role: "radiogroup", "aria-label": "Picture", class: "grid grid-cols-4 gap-2", hidden: channel,
-                            for (mark, label) in MARKS {
-                                button {
-                                    key: "{mark}",
-                                    r#type: "button",
-                                    role: "radio",
-                                    "aria-checked": "{bot.mark == mark}",
-                                    "aria-label": "{label}",
-                                    title: "{label}",
-                                    class: if bot.mark == mark { "flex items-center justify-center rounded-xl bg-raised p-2 ring-2 ring-accent" } else { "flex items-center justify-center rounded-xl p-2 hover:bg-raised" },
-                                    "data-cat-follow": true,
-                                    onclick: move |_| change(json!({ "mark": mark })),
-                                    BotMark { color: bot.color.clone(), initial: bot.initial(), size: 44, mark: mark.to_string() }
-                                }
-                            }
-                        }
-                        div { role: "radiogroup", "aria-label": "Colour", class: "mt-3 flex flex-wrap gap-2",
-                            for color in COLORS {
-                                button {
-                                    key: "{color}",
-                                    r#type: "button",
-                                    role: "radio",
-                                    "aria-checked": "{bot.color == color}",
-                                    "aria-label": "{color}",
-                                    title: "{color}",
-                                    class: if bot.color == color { "size-7 rounded-full ring-2 ring-accent ring-offset-2 ring-offset-card" } else { "size-7 rounded-full hover:scale-110 transition-transform" },
-                                    background: "var(--identity-{color})",
-                                    onclick: move |_| change(json!({ "color": color })),
-                                }
-                            }
-                        }
-                        if !channel {
-                            crate::profile::PictureEditor { key: "{bot.id}-picture", bot: bot.clone(), change }
+                        // A bot's picture and colour are in its panel's Look tab (Moo, 2026-11-27); a
+                        // channel, which has no tabs, keeps its colour here.
+                        if channel {
+                            Colours { bot: bot.clone(), change }
                         }
                         label { class: "mt-4 {LABEL}", "Name"
                             input {
@@ -285,51 +255,12 @@ pub fn BotSettings(bot: Bot) -> Element {
                     if channel {
                         crate::channels::ChannelSettings { key: "{bot.id}-members", bot: bot.clone(), saving: saving(), change }
                     }
-                    // Which AI, its model, and approval level.
+                    // Which AI, its model, backups and skills (the approval level is in its panel's
+                    // Approvals tab, Moo, 2026-11-27).
                     div { class: CARD, hidden: channel,
                         crate::engines::EnginePicker { bot: bot.clone(), saving: saving(), change }
                         crate::engines::Backups { bot: bot.clone(), saving: saving(), change }
                         crate::skills::BotSkills { bot: bot.clone(), saving: saving(), change }
-                        div { class: "mt-4 {LABEL}", "Approval level" }
-                        div { role: "radiogroup", "aria-label": "Approval level", class: "mt-1 flex flex-col gap-1",
-                            for (level, label, desc) in LEVELS {
-                                button {
-                                    key: "{level}",
-                                    r#type: "button",
-                                    role: "radio",
-                                    "aria-checked": "{bot.approval_mode == level}",
-                                    class: if bot.approval_mode == level { "flex w-full items-start gap-2.5 rounded-lg bg-raised px-3 py-2 text-start" } else { "flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-start hover:bg-raised/50" },
-                                    onclick: move |_| change(json!({ "approvalMode": level })),
-                                    span { class: if bot.approval_mode == level { "mt-1 size-3.5 shrink-0 rounded-full border-4 border-accent" } else { "mt-1 size-3.5 shrink-0 rounded-full border border-hairline" } }
-                                    span { class: "min-w-0",
-                                        span { class: "block text-[14px] text-ink", "{label}" }
-                                        span { class: if level == "full" { "block text-[12px] leading-snug text-warning" } else { "block text-[12px] leading-snug text-ink-secondary" }, "{desc}" }
-                                    }
-                                }
-                            }
-                        }
-                        if full {
-                            p { class: "mt-2 text-[12px] text-warning", "{bot.name} acts without asking, anywhere it can reach." }
-                        }
-                        // What "Always allow" on its approval cards let it do (allowed.rs).
-                        if !bot.allowed.is_empty() {
-                            div { class: "mt-4 {LABEL}", "Always allowed" }
-                            p { class: "mt-0.5 text-[12px] leading-snug text-ink-secondary", "{bot.name} does these without asking, in its own chat, channels and other bots' chats." }
-                            ul { "data-always-allowed": true, class: "mt-1 flex flex-col gap-1",
-                                for (rule, label) in bot.allowed.clone() {
-                                    li { key: "{rule}", class: "flex items-center justify-between gap-2 rounded-lg bg-raised px-3 py-1.5",
-                                        span { class: "min-w-0 truncate text-[13px] text-ink", "{label}" }
-                                        button {
-                                            r#type: "button",
-                                            "aria-label": "Stop always allowing: {label}",
-                                            class: "h-7 shrink-0 rounded-full px-3 text-[12px] font-medium text-ink-secondary hover:bg-ink/[0.07] hover:text-ink",
-                                            onclick: move |_| change(json!({ "forgetAllowed": rule })),
-                                            "Remove"
-                                        }
-                                    }
-                                }
-                            }
-                        }
                     }
                     // Codex.
                     div { class: "flex items-center justify-between gap-4 {CARD}", hidden: channel || !bot.codex_here,
@@ -637,6 +568,136 @@ fn Glyph(d: &'static str, size: u32) -> Element {
     rsx! {
         svg { "aria-hidden": "true", width: "{size}", height: "{size}", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", stroke_linecap: "round", stroke_linejoin: "round",
             path { d }
+        }
+    }
+}
+
+/// A bot's settings changed from somewhere other than its settings page (its panel's tabs): the
+/// same save, with whether one is going and what went wrong.
+pub fn use_change(id: String) -> (Callback<Value>, Signal<bool>, Signal<Option<String>>) {
+    let state = use_context::<Signal<State>>();
+    let mut saving = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let change = use_callback(move |change: Value| {
+        let id = id.clone();
+        spawn(async move {
+            saving.set(true);
+            problem.set(None);
+            if let Err(err) = save(state, &id, change).await {
+                problem.set(Some(err));
+            }
+            saving.set(false);
+        });
+    });
+    (change, saving, problem)
+}
+
+/// The colour swatches.
+#[component]
+fn Colours(bot: Bot, change: Callback<Value>) -> Element {
+    rsx! {
+        div { role: "radiogroup", "aria-label": "Colour", class: "mt-3 flex flex-wrap gap-2",
+            for color in COLORS {
+                button {
+                    key: "{color}",
+                    r#type: "button",
+                    role: "radio",
+                    "aria-checked": "{bot.color == color}",
+                    "aria-label": "{color}",
+                    title: "{color}",
+                    class: if bot.color == color { "size-7 rounded-full ring-2 ring-accent ring-offset-2 ring-offset-card" } else { "size-7 rounded-full hover:scale-110 transition-transform" },
+                    background: "var(--identity-{color})",
+                    onclick: move |_| change(json!({ "color": color })),
+                }
+            }
+        }
+    }
+}
+
+/// A bot's picture and colour (its panel's Look tab, Moo's ask on 2026-11-27): the cat
+/// pictures, its own picture, and the colours.
+#[component]
+pub fn LookSettings(bot: Bot) -> Element {
+    let (change, _, problem) = use_change(bot.id.clone());
+    rsx! {
+        div { "data-panel-tabpanel": "look", class: "flex flex-col gap-3 px-2 pt-2",
+            p { class: "text-[13px] text-ink-secondary", "How {bot.name} looks in the list, its chats and on your desktop." }
+            div { role: "radiogroup", "aria-label": "Picture", class: "grid grid-cols-4 gap-2",
+                for (mark, label) in MARKS {
+                    button {
+                        key: "{mark}",
+                        r#type: "button",
+                        role: "radio",
+                        "aria-checked": "{bot.mark == mark}",
+                        "aria-label": "{label}",
+                        title: "{label}",
+                        class: if bot.mark == mark { "flex items-center justify-center rounded-xl bg-raised p-2 ring-2 ring-accent" } else { "flex items-center justify-center rounded-xl p-2 hover:bg-raised" },
+                        "data-cat-follow": true,
+                        onclick: move |_| change(json!({ "mark": mark })),
+                        BotMark { color: bot.color.clone(), initial: bot.initial(), size: 44, mark: mark.to_string() }
+                    }
+                }
+            }
+            Colours { bot: bot.clone(), change }
+            crate::profile::PictureEditor { key: "{bot.id}-picture", bot: bot.clone(), change }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "text-[12px] text-danger", "{err}" }
+            }
+        }
+    }
+}
+
+/// How much a bot does without asking, and what it was always allowed (its panel's Approvals
+/// tab, Moo's ask on 2026-11-27).
+#[component]
+pub fn ApprovalSettings(bot: Bot) -> Element {
+    let (change, _, problem) = use_change(bot.id.clone());
+    let full = bot.approval_mode == "full";
+    rsx! {
+        div { "data-panel-tabpanel": "approvals", class: "flex flex-col px-2 pt-2",
+            div { class: LABEL, "Approval level" }
+            div { role: "radiogroup", "aria-label": "Approval level", class: "mt-1 flex flex-col gap-1",
+                for (level, label, desc) in LEVELS {
+                    button {
+                        key: "{level}",
+                        r#type: "button",
+                        role: "radio",
+                        "aria-checked": "{bot.approval_mode == level}",
+                        class: if bot.approval_mode == level { "flex w-full items-start gap-2.5 rounded-lg bg-raised px-3 py-2 text-start" } else { "flex w-full items-start gap-2.5 rounded-lg px-3 py-2 text-start hover:bg-raised/50" },
+                        onclick: move |_| change(json!({ "approvalMode": level })),
+                        span { class: if bot.approval_mode == level { "mt-1 size-3.5 shrink-0 rounded-full border-4 border-accent" } else { "mt-1 size-3.5 shrink-0 rounded-full border border-hairline" } }
+                        span { class: "min-w-0",
+                            span { class: "block text-[14px] text-ink", "{label}" }
+                            span { class: if level == "full" { "block text-[12px] leading-snug text-warning" } else { "block text-[12px] leading-snug text-ink-secondary" }, "{desc}" }
+                        }
+                    }
+                }
+            }
+            if full {
+                p { class: "mt-2 text-[12px] text-warning", "{bot.name} acts without asking, anywhere it can reach." }
+            }
+            // What "Always allow" on its approval cards let it do (allowed.rs).
+            if !bot.allowed.is_empty() {
+                div { class: "mt-4 {LABEL}", "Always allowed" }
+                p { class: "mt-0.5 text-[12px] leading-snug text-ink-secondary", "{bot.name} does these without asking, in its own chat, channels and other bots' chats." }
+                ul { "data-always-allowed": true, class: "mt-1 flex flex-col gap-1",
+                    for (rule, label) in bot.allowed.clone() {
+                        li { key: "{rule}", class: "flex items-center justify-between gap-2 rounded-lg bg-raised px-3 py-1.5",
+                            span { class: "min-w-0 truncate text-[13px] text-ink", "{label}" }
+                            button {
+                                r#type: "button",
+                                "aria-label": "Stop always allowing: {label}",
+                                class: "h-7 shrink-0 rounded-full px-3 text-[12px] font-medium text-ink-secondary hover:bg-ink/[0.07] hover:text-ink",
+                                onclick: move |_| change(json!({ "forgetAllowed": rule })),
+                                "Remove"
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(err) = problem() {
+                p { role: "alert", class: "mt-2 text-[12px] text-danger", "{err}" }
+            }
         }
     }
 }

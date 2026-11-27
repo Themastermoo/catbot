@@ -208,12 +208,12 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: 
     let cwd = turn.workspace.folder.display().to_string();
     let can_load = init["agentCapabilities"]["loadSession"] == true;
     let mut session = None;
-    let mut options = Value::Null;
+    let mut opened = Value::Null;
     if let (true, Some(id)) = (can_load, turn.session.as_ref())
         && let Ok(loaded) = link.call("session/load", json!({ "sessionId": id, "cwd": cwd, "mcpServers": turn.mcp }), Some(START_TIME)).await
     {
         session = Some(id.clone());
-        options = loaded["configOptions"].clone();
+        opened = loaded;
     }
     let prompt = match &session {
         Some(_) => turn.text.clone(),
@@ -223,10 +223,27 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: 
         Some(id) => id,
         None => {
             let made = link.call("session/new", json!({ "cwd": cwd, "mcpServers": turn.mcp }), Some(START_TIME)).await?;
-            options = made["configOptions"].clone();
-            made["sessionId"].as_str().map(str::to_string).ok_or("the agent made no session")?
+            let id = made["sessionId"].as_str().map(str::to_string).ok_or("the agent made no session")?;
+            opened = made;
+            id
         }
     };
+    let options = opened["configOptions"].clone();
+    // Its models, if it says (Antigravity takes no model on its command line, so this is the
+    // only way to pick one, Moo's ask on 2026-11-27): kept for the model menu, the bot's picked.
+    if let Some(models) = agent_models(&opened) {
+        remember_models(turn.engine, &models);
+        let wanted = turn.model.trim();
+        if !wanted.is_empty() && models.current.as_deref() != Some(wanted) && models.options.iter().any(|(id, _)| id == wanted) {
+            let set = match &models.via {
+                ModelVia::Option(config) => link.call("session/set_config_option", json!({ "sessionId": session, "configId": config, "value": wanted }), Some(START_TIME)).await,
+                ModelVia::SetModel => link.call("session/set_model", json!({ "sessionId": session, "modelId": wanted }), Some(START_TIME)).await,
+            };
+            if let Err(problem) = set {
+                eprintln!("catbot: {} didn't take the model {wanted}: {problem}", turn.engine.name);
+            }
+        }
+    }
     // Its thinking levels, if it has them: kept for the model menu, and the bot's level picked.
     if let Some(levels) = thought_levels(&options) {
         remember_levels(turn.engine, &levels);
@@ -299,6 +316,74 @@ pub fn known_levels(engine: &Engine) -> Option<ThoughtLevels> {
     }
     let text = std::fs::read_to_string(levels_file(engine)?).ok()?;
     serde_json::from_str(&text).ok()
+}
+
+/// How an agent takes a model: through a config option of category `model`, or ACP's
+/// `session/set_model`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ModelVia {
+    Option(String),
+    SetModel,
+}
+
+/// The models an agent offers a session: their ids and names, and the one it's on.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct AgentModels {
+    pub options: Vec<(String, String)>,
+    pub current: Option<String>,
+    pub via: ModelVia,
+}
+
+/// The models in a session's answer (session/new or session/load): a config option of category
+/// `model`, or the `models` it lists (`availableModels`, `currentModelId`).
+pub fn agent_models(opened: &Value) -> Option<AgentModels> {
+    if let Some(option) = opened["configOptions"].as_array().and_then(|o| o.iter().find(|o| o["category"] == "model")) {
+        let id = option["id"].as_str().or(option["configId"].as_str())?.to_string();
+        let mut values = Vec::new();
+        for entry in option["options"].as_array()? {
+            for value in entry["options"].as_array().cloned().unwrap_or_else(|| vec![entry.clone()]) {
+                if let Some(v) = value["value"].as_str() {
+                    values.push((v.to_string(), value["name"].as_str().unwrap_or(v).to_string()));
+                }
+            }
+        }
+        return (!values.is_empty()).then(|| AgentModels { options: values, current: option["currentValue"].as_str().map(str::to_string), via: ModelVia::Option(id) });
+    }
+    let listed = opened["models"]["availableModels"].as_array()?;
+    let options: Vec<(String, String)> = listed
+        .iter()
+        .filter_map(|m| {
+            let id = m["modelId"].as_str()?;
+            Some((id.to_string(), m["name"].as_str().unwrap_or(id).to_string()))
+        })
+        .collect();
+    (!options.is_empty()).then(|| AgentModels { options, current: opened["models"]["currentModelId"].as_str().map(str::to_string), via: ModelVia::SetModel })
+}
+
+/// The models seen since Catbot started, by engine, as `SEEN` for thinking levels.
+static SEEN_MODELS: std::sync::Mutex<Option<std::collections::HashMap<String, AgentModels>>> = std::sync::Mutex::new(None);
+
+fn models_file(engine: &Engine) -> Option<PathBuf> {
+    crate::engines::agents_dir().map(|dir| dir.join(engine.id).join("models.json"))
+}
+
+fn remember_models(engine: &Engine, models: &AgentModels) {
+    SEEN_MODELS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(engine.id.to_string(), models.clone());
+    let Some(file) = models_file(engine) else { return };
+    if let Some(dir) = file.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(models) {
+        let _ = std::fs::write(file, text);
+    }
+}
+
+/// The models this agent offered last time it ran. Unknown until a bot has used it once.
+pub fn known_models(engine: &Engine) -> Option<AgentModels> {
+    if let Some(seen) = SEEN_MODELS.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|s| s.get(engine.id)) {
+        return Some(seen.clone());
+    }
+    serde_json::from_str(&std::fs::read_to_string(models_file(engine)?).ok()?).ok()
 }
 
 /// A new session's first message: the bot's instructions, the conversation so far (the agent
@@ -723,6 +808,24 @@ mod tests {
         assert!(deliver_callback(link, "http://localhost:9/other?code=c").await.unwrap_err().contains("isn't the address"));
         let away = "https://accounts.google.com/o/oauth2/auth?redirect_uri=https%3A%2F%2Fexample.com%2Fcb";
         assert!(deliver_callback(away, "https://example.com/cb?code=c").await.unwrap_err().contains("isn't the address"));
+    }
+
+    #[test]
+    fn an_agent_says_which_models_it_has() {
+        // As a config option of category `model`, grouped or not.
+        let opened = json!({ "configOptions": [{ "id": "model", "category": "model", "type": "select", "currentValue": "gemini-3-pro", "options": [
+            { "group": "Gemini", "options": [{ "value": "gemini-3-pro", "name": "Gemini 3 Pro" }, { "value": "gemini-3-flash", "name": "Gemini 3 Flash" }] },
+            { "value": "claude-sonnet", "name": "Claude Sonnet" }
+        ] }] });
+        let models = agent_models(&opened).unwrap();
+        assert_eq!(models.options.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["gemini-3-pro", "gemini-3-flash", "claude-sonnet"]);
+        assert_eq!((models.current.as_deref(), models.via), (Some("gemini-3-pro"), ModelVia::Option("model".into())));
+        // As ACP's `models` list.
+        let opened = json!({ "models": { "currentModelId": "a", "availableModels": [{ "modelId": "a", "name": "Model A" }, { "modelId": "b" }] } });
+        let models = agent_models(&opened).unwrap();
+        assert_eq!(models.options, [("a".to_string(), "Model A".to_string()), ("b".to_string(), "b".to_string())]);
+        assert_eq!(models.via, ModelVia::SetModel);
+        assert_eq!(agent_models(&json!({ "configOptions": [] })), None);
     }
 
     #[test]

@@ -215,6 +215,13 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
         (&Method::GET, [id, "models"]) => {
             let engine = find(id)?;
             let fallback: Vec<&str> = engine.models.iter().map(|(id, _)| *id).filter(|id| !id.is_empty()).collect();
+            // An agent program's own models, as it listed them the last time it ran.
+            if engine.kind == Kind::Agent
+                && let Some(known) = crate::acp::known_models(engine)
+            {
+                let labels: Vec<Value> = known.options.iter().map(|(id, label)| json!({ "id": id, "label": label })).collect();
+                return Ok((StatusCode::OK, json!({ "models": known.options.iter().map(|(id, _)| id).collect::<Vec<_>>(), "labels": labels, "live": true })));
+            }
             if engine.kind != Kind::Api {
                 return Ok((StatusCode::OK, json!({ "models": fallback, "live": false })));
             }
