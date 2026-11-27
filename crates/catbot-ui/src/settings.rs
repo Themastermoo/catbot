@@ -331,10 +331,6 @@ pub fn BotSettings(bot: Bot) -> Element {
                             }
                         }
                     }
-                    // Desktop pet.
-                    if !channel {
-                        div { class: CARD, crate::pets::PetSwitch { bot: bot.clone() } }
-                    }
                     // Codex.
                     div { class: "flex items-center justify-between gap-4 {CARD}", hidden: channel || !bot.codex_here,
                         div { class: "min-w-0",

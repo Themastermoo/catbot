@@ -1,6 +1,7 @@
 //! Desktop pets, in the interface: the switch that makes a bot a pet (with a word about the
-//! computer when it's not the first), Settings › This app's list, and the little tutorial
-//! window about the desktop pet ([[Catbot Desktop Pet]] in the Codex).
+//! computer when it's not the first), which opens from the bot's picture in the list, Settings ›
+//! This app's list, and the little tutorial window about the desktop pet ([[Catbot Desktop Pet]]
+//! in the Codex).
 //!
 //! The pets themselves are windows of the Linux and Windows app, which come out when its main
 //! window closes; the server keeps which bots are pets (`server::pets`).
@@ -128,6 +129,79 @@ pub fn PetSwitch(bot: Bot, #[props(default)] listed: bool) -> Element {
         }
         if tutorial() {
             PetTutorial { bot: bot.clone(), on_close: move |_| tutorial.set(false) }
+        }
+    }
+}
+
+/// A bot's picture in the list: clicking it opens a small card with its desktop pet switch
+/// (Moo's choice: the switch lives here, not in the bot's settings), and a paw sits on it while
+/// the bot is a pet. The card stops clicks and keys on the way out, so the row behind it
+/// doesn't open the chat.
+#[component]
+pub fn PetPicture(
+    bot: Bot,
+    /// The colour behind the picture, for the paw's ring.
+    ring: &'static str,
+    /// Under a centred picture (the Chief of Staff's tile) rather than one at the row's start.
+    #[props(default)]
+    centered: bool,
+    children: Element,
+) -> Element {
+    let mut open = use_signal(|| false);
+    let name = bot.name.clone();
+    // The card is 248px; under the 60px tile picture it's centred, otherwise it starts at the picture.
+    let place = if centered { "-left-[94px]" } else { "-left-1" };
+    rsx! {
+        span { class: "relative flex",
+            span {
+                role: "button",
+                tabindex: 0,
+                class: "relative flex cursor-pointer rounded-full focus-visible:outline-2 focus-visible:outline-accent",
+                title: if bot.pet { "{name} is a desktop pet" } else { "Desktop pet" },
+                "aria-label": "{name} as a desktop pet",
+                "aria-haspopup": "dialog",
+                "aria-expanded": "{open()}",
+                "data-pet-picture": "{bot.id}",
+                onclick: move |e| {
+                    e.stop_propagation();
+                    open.toggle();
+                },
+                onkeydown: move |e| {
+                    if e.key() == Key::Enter || e.key() == Key::Character(" ".into()) {
+                        e.stop_propagation();
+                        e.prevent_default();
+                        open.toggle();
+                    }
+                },
+                {children}
+                if bot.pet {
+                    span { "aria-hidden": "true", "data-pet-paw": true, class: "pointer-events-none absolute -bottom-0.5 -left-0.5 flex size-[15px] items-center justify-center rounded-full text-accent", background: "{ring}",
+                        crate::sidebar::Icon { name: "paw", size: 10, filled: true }
+                    }
+                }
+            }
+            if open() {
+                div { class: "fixed inset-0 z-30", "data-pet-backdrop": true,
+                    onclick: move |e| {
+                        e.stop_propagation();
+                        open.set(false);
+                    },
+                }
+                div {
+                    role: "dialog",
+                    "aria-label": "{name} as a desktop pet",
+                    "data-pet-card": "{bot.id}",
+                    class: "absolute {place} top-full z-40 mt-1.5 w-[248px] cursor-default rounded-2xl border-[0.5px] border-edge bg-panel p-3 text-left shadow-xl",
+                    onclick: move |e| e.stop_propagation(),
+                    onkeydown: move |e| {
+                        e.stop_propagation();
+                        if e.key() == Key::Escape {
+                            open.set(false);
+                        }
+                    },
+                    PetSwitch { bot: bot.clone() }
+                }
+            }
         }
     }
 }

@@ -432,7 +432,9 @@ fn ChiefTile(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Eleme
                 }
             },
             span { class: "relative flex",
-                BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 60, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
+                crate::pets::PetPicture { bot: bot.clone(), ring: "var(--tile)", centered: true,
+                    BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 60, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
+                }
                 span { "data-chief-badge": true, "aria-hidden": "true", class: "absolute -bottom-px -right-px flex size-4 items-center justify-center rounded-full text-white ring-2 ring-[var(--tile)] {CROWN}",
                     Icon { name: "crown", size: 10, filled: true }
                 }
@@ -490,7 +492,7 @@ fn BotRow(
     let preview = if waiting { "Waiting for you…".to_string() } else { bot.preview() };
     let line_color = if waiting { "text-warning" } else { "text-ink-secondary" };
     let fold_label = if expanded { format!("Hide {} chats", bot.name) } else { format!("Show {} chats", bot.name) };
-    let status = [status_label(&bot), if bot.unread { "Unread" } else { "" }].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(", ");
+    let status = [status_label(&bot), if bot.unread { "Unread" } else { "" }, if is_bot && bot.pet { "Desktop pet" } else { "" }].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(", ");
     rsx! {
         div { class: "group relative",
             div {
@@ -512,8 +514,15 @@ fn BotRow(
                         on_select.call(key_id.clone());
                     }
                 },
-                span { class: "relative -m-[3px] flex shrink-0", title: "{bot.name}",
-                    BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 42, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
+                span { class: "relative -m-[3px] flex shrink-0", title: if !is_bot { "{bot.name}" },
+                    // A bot's picture opens its desktop pet switch; a channel's is just its picture.
+                    if is_bot {
+                        crate::pets::PetPicture { bot: bot.clone(), ring: "var(--row)",
+                            BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 42, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
+                        }
+                    } else {
+                        BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 42, mark: bot.mark.clone(), state: bot.activity.mood().to_string() }
+                    }
                     if working {
                         span { "data-testid": "working-dot", "aria-hidden": "true", title: "Working", class: "absolute bottom-0.5 right-0.5 size-2 rounded-full bg-success ring-2 ring-[var(--row)]" }
                     }
@@ -831,6 +840,12 @@ pub fn Icon(name: &'static str, size: u32, #[props(default)] filled: bool) -> El
         "minimize" => &["m14 10 7-7", "M20 10h-6V4", "m3 21 7-7", "M4 14h6v6"],
         "reply" => &["M20 20v-7a4 4 0 0 0-4-4H4", "M9 14 4 9l5-5"],
         "external" => &["M15 3h6v6", "M10 14 21 3", "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"],
+        "paw" => &[
+            "M9 4a2 2 0 1 0 4 0a2 2 0 1 0-4 0",
+            "M16 8a2 2 0 1 0 4 0a2 2 0 1 0-4 0",
+            "M18 16a2 2 0 1 0 4 0a2 2 0 1 0-4 0",
+            "M9 10a5 5 0 0 1 5 5v3.5a3.5 3.5 0 0 1-6.84 1.045Q6.52 17.48 4.46 16.84A3.5 3.5 0 0 1 5.5 10Z",
+        ],
         "check-circle" => &["M21.801 10A10 10 0 1 1 17 3.335", "m9 11 3 3L22 4"],
         _ => &[],
     };
