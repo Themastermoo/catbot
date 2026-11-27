@@ -95,7 +95,39 @@ pub enum Body {
         tool: Option<String>,
         /// The "Always allow" button's words, when this kind of question can be always allowed.
         always: Option<String>,
+        /// A question in words instead (stage 32.5): what's asked, and once answered, the answers.
+        questions: Vec<Asked>,
+        answers: Vec<(String, String)>,
     },
+}
+
+/// One question a bot asks in words, with the choices it offers.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Asked {
+    pub question: String,
+    pub header: String,
+    pub multi: bool,
+    /// Each choice's label and what it means.
+    pub options: Vec<(String, String)>,
+}
+
+impl Asked {
+    pub fn list(wire: &Value) -> Vec<Asked> {
+        let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
+        wire.as_array()
+            .map(|all| {
+                all.iter()
+                    .filter(|q| q["question"].as_str().is_some_and(|t| !t.trim().is_empty()))
+                    .map(|q| Asked {
+                        question: text(&q["question"]),
+                        header: text(&q["header"]),
+                        multi: q["multiSelect"] == true,
+                        options: q["options"].as_array().map(|o| o.iter().map(|o| (text(&o["label"]), text(&o["description"]))).collect()).unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -147,7 +179,7 @@ impl Msg {
             ("options", _) => {
                 let card = &wire["card"];
                 let answer = match card["answered"].as_str() {
-                    Some("allow" | "always") if card["dismissed"] != true => Answer::Allowed,
+                    Some("allow" | "always" | "answer") if card["dismissed"] != true => Answer::Allowed,
                     Some(_) if card["dismissed"] == true => Answer::Dismissed,
                     Some(_) => Answer::Denied,
                     None if card["dismissed"] == true => Answer::Dismissed,
@@ -160,6 +192,8 @@ impl Msg {
                     request_id: card["requestId"].as_str().map(str::to_string),
                     tool: card["tool"].as_str().map(str::to_string),
                     always: card["always"].as_str().filter(|_| card["options"].as_array().is_some_and(|o| o.iter().any(|x| x == "Always allow"))).map(str::to_string),
+                    questions: if card["requestType"] == "question" { Asked::list(&card["questions"]) } else { Vec::new() },
+                    answers: card["answers"].as_object().map(|a| a.iter().filter_map(|(q, v)| Some((q.clone(), v.as_str()?.to_string()))).collect()).unwrap_or_default(),
                 }
             }
             _ => return None,
@@ -740,7 +774,9 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
         });
     });
 
-    let placeholder = if waiting_on_you {
+    let placeholder = if waiting_on_you && pending.first().is_some_and(|p| !p.questions.is_empty()) {
+        "Type your answer, or pick one above".to_string()
+    } else if waiting_on_you {
         "Answer the approval above to continue".to_string()
     } else if working {
         format!("{} is working. Sends when this turn finishes", bot.name)
@@ -796,7 +832,11 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, on_send: EventHandle
                     }
                 }
                 if let Some(question) = pending.first() {
-                    ApprovalPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len(), on_cancel_turn: move |_| stop(()) }
+                    if question.questions.is_empty() {
+                        ApprovalPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len(), on_cancel_turn: move |_| stop(()) }
+                    } else {
+                        QuestionPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len() }
+                    }
                 }
                 crate::scheduled::List { bot_id: bot.id.clone(), thread_id: bot.thread_id.clone() }
                 div { class: "relative",
@@ -1431,6 +1471,10 @@ fn Row(
         Body::Changes { summary, files, undone } => rsx! {
             crate::changes::ChangesRow { thread: thread.clone(), message: message.id.clone(), summary: summary.clone(), files: files.clone(), undone: *undone, working }
         },
+        Body::Card { questions, answers, answer, .. } if !questions.is_empty() => {
+            let answer = settled_answer(*answer, asking);
+            rsx! { QuestionRow { name: bot_name.clone(), questions: questions.clone(), answers: answers.clone(), answer } }
+        }
         Body::Card { subtitle, answer, tool, .. } => {
             let answer = settled_answer(*answer, asking);
             rsx! { ApprovalRow { line: approval_line(&bot_name, tool.as_deref()), detail: approval_detail(subtitle, tool.as_deref()), answer } }
@@ -1842,6 +1886,8 @@ pub struct Pending {
     pub subtitle: String,
     /// The "Always allow" button's words, if it can be offered.
     pub always: Option<String>,
+    /// A question in words, when it's one (stage 32.5).
+    pub questions: Vec<Asked>,
 }
 
 /// Unanswered approval cards, oldest first (their `pendingApprovals`).
@@ -1849,8 +1895,8 @@ pub fn pending_approvals(messages: &[Msg]) -> Vec<Pending> {
     messages
         .iter()
         .filter_map(|m| match &m.body {
-            Body::Card { answer: Answer::Waiting, request_id: Some(id), tool, subtitle, always, .. } => {
-                Some(Pending { request_id: id.clone(), tool: tool.clone(), subtitle: subtitle.clone(), always: always.clone() })
+            Body::Card { answer: Answer::Waiting, request_id: Some(id), tool, subtitle, always, questions, .. } => {
+                Some(Pending { request_id: id.clone(), tool: tool.clone(), subtitle: subtitle.clone(), always: always.clone(), questions: questions.clone() })
             }
             _ => None,
         })
@@ -1899,6 +1945,170 @@ pub fn approval_detail(subtitle: &str, tool: Option<&str>) -> String {
 
 /// Their code chip for a request's detail (`APPROVAL_CODE_CHIP`).
 const APPROVAL_CODE_CHIP: &str = "inline-flex min-w-0 max-w-full items-baseline rounded-full bg-inset px-2 pb-px pt-[3px] font-mono text-[13px] leading-5 text-ink";
+
+/// A question in words in the conversation (stage 32.5): what was asked, and once answered, the
+/// answers. While it waits, the panel above the typing box asks it.
+#[component]
+fn QuestionRow(name: String, questions: Vec<Asked>, answers: Vec<(String, String)>, answer: Answer) -> Element {
+    if answer == Answer::Waiting {
+        return rsx! {
+            div { "data-question-row": "pending", class: "sr-only", "{name} asks: {questions[0].question}. Waiting for your answer below" }
+        };
+    }
+    let (status, icon, icon_class) = match answer {
+        Answer::Allowed => ("You answered", CHECK, "text-success"),
+        Answer::Denied => ("Closed without an answer", CROSS, ""),
+        _ => ("No answer before the turn ended", CLOCK, ""),
+    };
+    rsx! {
+        div { "data-question-row": "settled", class: "w-full max-w-[840px] text-[13px] text-ink-tertiary",
+            div { class: "flex min-w-0 items-baseline gap-2 leading-5",
+                span { class: "shrink-0 self-center", Icon { path: icon, class: icon_class, size: 14 } }
+                span { class: "min-w-0", "{name} asked · {status}" }
+            }
+            ul { class: "mt-1 space-y-1 ps-6",
+                for asked in questions {
+                    li { key: "{asked.question}", class: "leading-5",
+                        span { class: "text-ink-secondary", "{asked.question}" }
+                        if let Some((_, said)) = answers.iter().find(|(q, _)| *q == asked.question) {
+                            span { class: "text-ink", " → {said}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A bot's question in words, above the typing box (stage 32.5; their `AskCard`): each question
+/// with its choices. One question with one pick sends on the click; otherwise Send once each
+/// has an answer. What's typed in the box answers them too.
+#[component]
+fn QuestionPanel(bot: Bot, pending: Pending, count: usize) -> Element {
+    let questions = pending.questions.clone();
+    // Each question's picks, in its choices' order.
+    let mut picked = use_signal(|| vec![Vec::<String>::new(); questions.len()]);
+    let mut answering = use_signal(|| false);
+    let mut problem = use_signal(|| None::<String>);
+    let thread = bot.thread_id.clone();
+    let request = pending.request_id.clone();
+    let send = move |body: Value| {
+        if answering() {
+            return;
+        }
+        answering.set(true);
+        problem.set(None);
+        let (thread, request) = (thread.clone(), request.clone());
+        spawn(async move {
+            let mut body = body;
+            body["requestId"] = serde_json::json!(request);
+            if let Err(err) = api::post(&format!("/api/threads/{thread}/respond"), &body).await {
+                problem.set(Some(err));
+                answering.set(false);
+            }
+        });
+    };
+    let answers = {
+        let questions = questions.clone();
+        move || -> serde_json::Map<String, Value> {
+            questions.iter().zip(picked.read().iter()).filter(|(_, p)| !p.is_empty()).map(|(q, p)| (q.question.clone(), serde_json::json!(p.join(", ")))).collect()
+        }
+    };
+    let quick = questions.len() == 1 && !questions[0].multi;
+    let ready = answers().len() == questions.len();
+    let line = if questions.len() == 1 { format!("{} asks", bot.name) } else { format!("{} asks {} questions", bot.name, questions.len()) };
+    let (mut send_all, mut skip) = (send.clone(), send.clone());
+    let style = format!("--bot-button: var(--identity-{c}); --bot-button-ink: #ffffff; --bot-button-hover: color-mix(in srgb, var(--identity-{c}) 88%, #000000);", c = bot.color);
+    rsx! {
+        div { class: "mb-2 max-h-[50vh] overflow-y-auto rounded-[18px] bg-composer ring-[0.5px] ring-ink/10",
+            div { role: "region", "aria-label": "A question for you", "data-ask-card": "question", class: "px-4 pb-3.5 pt-3",
+                div { class: "flex min-w-0 items-center gap-2 text-[13px] leading-[18px] text-ink-secondary",
+                    span { "aria-hidden": "true", class: "flex shrink-0", BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 16, mark: bot.mark.clone(), state: bot.activity.mood() } }
+                    span { class: "min-w-0 flex-1 truncate", "{line}" }
+                    if count > 1 {
+                        span { class: "shrink-0 rounded-full bg-ink/[0.06] px-2 text-[12px] leading-5 tabular-nums", "1 of {count}" }
+                    }
+                }
+                for (at, asked) in questions.iter().cloned().enumerate() {
+                    div { key: "{at}", class: "mt-3",
+                        if !asked.header.is_empty() {
+                            span { class: "rounded-full bg-ink/[0.06] px-2 py-0.5 text-[11px] font-medium uppercase tracking-wide text-ink-secondary", "{asked.header}" }
+                        }
+                        p { dir: "auto", class: "mt-1.5 text-[15px] leading-6 text-ink", "{asked.question}" }
+                        if asked.multi {
+                            p { class: "text-[12px] text-ink-tertiary", "Pick any that fit" }
+                        }
+                        div { class: "mt-2 flex flex-wrap gap-2",
+                            for (label, meaning) in asked.options.iter().cloned() {
+                                {
+                                    let on = picked.read().get(at).is_some_and(|p| p.contains(&label));
+                                    let (label_for, multi, question) = (label.clone(), asked.multi, asked.question.clone());
+                                    let mut send_one = send.clone();
+                                    let order: Vec<String> = asked.options.iter().map(|(l, _)| l.clone()).collect();
+                                    rsx! {
+                                        button {
+                                            key: "{label}",
+                                            r#type: "button",
+                                            "aria-pressed": "{on}",
+                                            title: "{meaning}",
+                                            disabled: answering(),
+                                            class: if on { "{ASK_BUTTON_SHAPE} {ASK_LOOK} bot-button flex-col !items-start text-start" } else { "{ASK_BUTTON_SHAPE} {ASK_LOOK} {ASK_SECONDARY} flex-col !items-start text-start" },
+                                            style: if on { "{style}" } else { "" },
+                                            onclick: move |_| {
+                                                if quick {
+                                                    send_one(serde_json::json!({ "behavior": "answer", "answers": { question.clone(): label_for.clone() } }));
+                                                    return;
+                                                }
+                                                let mut all = picked.write();
+                                                let mine = &mut all[at];
+                                                if mine.contains(&label_for) {
+                                                    mine.retain(|l| l != &label_for);
+                                                } else if multi {
+                                                    mine.push(label_for.clone());
+                                                    mine.sort_by_key(|l| order.iter().position(|o| o == l));
+                                                } else {
+                                                    *mine = vec![label_for.clone()];
+                                                }
+                                            },
+                                            span { "{label}" }
+                                            if !meaning.is_empty() {
+                                                span { class: "text-[12px] font-normal opacity-75", "{meaning}" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(err) = problem() {
+                    p { role: "alert", class: "mt-2 text-[13px] leading-[18px] text-warning", "Couldn't answer: {err}" }
+                }
+                div { class: "mt-3 flex flex-wrap items-center gap-2",
+                    span { class: "min-w-0 flex-1 text-[12px] text-ink-tertiary", "Or type your answer below." }
+                    button {
+                        r#type: "button",
+                        disabled: answering(),
+                        title: "{bot.name} goes on with its own judgement",
+                        class: "{ASK_BUTTON_SHAPE} {ASK_LOOK} {ASK_QUIET}",
+                        onclick: move |_| skip(serde_json::json!({ "behavior": "deny" })),
+                        "Skip"
+                    }
+                    if !quick {
+                        button {
+                            r#type: "button",
+                            disabled: answering() || !ready,
+                            class: "bot-button {ASK_BUTTON_SHAPE} {ASK_LOOK}",
+                            style: "{style}",
+                            onclick: move |_| send_all(serde_json::json!({ "behavior": "answer", "answers": Value::Object(answers()) })),
+                            "Send"
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// An approval in the conversation, as their `CompactApprovalRow`: who wanted what, and how it
 /// ended. While the question is open the row stays out of sight; the panel above the typing
@@ -2222,6 +2432,27 @@ mod tests {
         assert_eq!(card(json!({ "answered": "deny" })), Answer::Denied);
         assert_eq!(card(json!({ "answered": "deny", "dismissed": true })), Answer::Dismissed);
         assert!(Msg::from_wire(&json!({ "id": "x", "kind": "screen" })).is_none());
+    }
+
+    #[test]
+    fn a_question_card_is_read_with_its_questions_and_answers() {
+        let wire = json!({ "id": "cb-9", "at": 7.0, "role": "bot", "kind": "options", "card": {
+            "title": "A question for you", "subtitle": "Which colour?", "requestId": "q1", "requestType": "question", "tool": "AskUserQuestion",
+            "questions": [{ "question": "Which colour?", "header": "Colour", "multiSelect": false, "options": [{ "label": "Red", "description": "Warm" }] }, { "question": "  " }],
+        } });
+        let waiting = Msg::from_wire(&wire).unwrap();
+        let pending = pending_approvals(std::slice::from_ref(&waiting));
+        assert_eq!(pending[0].questions, [Asked { question: "Which colour?".into(), header: "Colour".into(), multi: false, options: vec![("Red".into(), "Warm".into())] }]);
+        let mut answered = wire.clone();
+        answered["card"]["answered"] = json!("answer");
+        answered["card"]["answers"] = json!({ "Which colour?": "Red" });
+        match Msg::from_wire(&answered).unwrap().body {
+            Body::Card { answer, answers, .. } => assert_eq!((answer, answers), (Answer::Allowed, vec![("Which colour?".to_string(), "Red".to_string())])),
+            other => panic!("{other:?}"),
+        }
+        // An approval card has no questions.
+        let approval = Msg::from_wire(&json!({ "id": "cb-8", "kind": "options", "card": { "requestId": "r1", "tool": "Bash" } })).unwrap();
+        assert!(pending_approvals(&[approval])[0].questions.is_empty());
     }
 
     fn bot_said(id: &str, by: Option<&str>, text: &str) -> Msg {

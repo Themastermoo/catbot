@@ -19,6 +19,11 @@
 //!   password asked by the desktop (pkexec); the AppImage replaces its own file, keeping the old
 //!   ones in `updates/appimages/` to go back to. Either restarts the app afterwards.
 //! * **The home PC** builds itself from its repo through the Claude helper, so it only checks.
+//!   Since stage 32.8 (Moo, 2026-11-27: "My PC too", and "Keep asking first"): a build that
+//!   hasn't run here yet copies the chats before it opens them; a build that keeps running for
+//!   20 seconds is kept as the last one that worked (`updates/last-good/`); and when a new one
+//!   won't start, nothing changes by itself: the service gives up after a few tries and the
+//!   desktop says how to go back (`scripts/go-back.sh`, which asks about the chats too).
 //!
 //! Routes, beside `version.rs`'s:
 //! * `POST /api/version/download`  fetch the offered release for this device, check it
@@ -755,6 +760,91 @@ async fn deb_back(app: &std::sync::Arc<App>, to: &str, use_snapshot: bool) -> An
     Ok((StatusCode::ACCEPTED, answer))
 }
 
+// ---- The home PC's builds (stage 32.8) ----
+
+/// This program as built: its size and when it was written (each build from the repo changes it).
+fn build_mark() -> Option<String> {
+    let meta = std::env::current_exe().ok()?.metadata().ok()?;
+    let written = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    Some(format!("{written}:{}", meta.len()))
+}
+
+/// Before the chats are opened on the home PC: a build that hasn't run here yet takes a copy of
+/// them first (the installed versions take theirs as they install). Returns the copy's notes.
+pub fn copy_before_new_build(home: &Path) -> Option<Value> {
+    if Place::here().platform != Platform::Home {
+        return None;
+    }
+    let mark = build_mark()?;
+    let updates = home.join("updates");
+    let seen = updates.join("last-started.json");
+    if read_json(&seen).is_some_and(|s| s["build"] == mark.as_str()) {
+        return None;
+    }
+    let _ = write_json(&seen, &json!({ "build": mark, "version": VERSION, "at": chrono::Utc::now().to_rfc3339() }));
+    let db = home.join("catbot.db");
+    if !db.is_file() {
+        return None;
+    }
+    let dir = updates.join("snapshots");
+    let file = dir.join(format!("{}-before-build-{VERSION}.db", chrono::Utc::now().format("%Y%m%d-%H%M%S")));
+    let copied = std::fs::create_dir_all(&dir).map_err(|e| e.to_string()).and_then(|_| {
+        let conn = rusqlite::Connection::open(&db).map_err(|e| e.to_string())?;
+        let format: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap_or(0);
+        conn.execute("VACUUM INTO ?1", [file.to_string_lossy()]).map_err(|e| e.to_string())?;
+        Ok(format)
+    });
+    let format = match copied {
+        Ok(format) => format,
+        Err(err) => {
+            eprintln!("catbot: couldn't copy the chats before this new build ({err}); going on");
+            return None;
+        }
+    };
+    let good = read_json(&updates.join("last-good").join("about.json"));
+    let from = good.as_ref().and_then(|g| g["version"].as_str()).unwrap_or("the last build").to_string();
+    let meta = json!({ "file": file.to_string_lossy(), "from": from, "to": VERSION, "store": format, "at": chrono::Utc::now().to_rfc3339(), "build": mark, "kind": "build" });
+    let _ = write_json(&file.with_extension("json"), &meta);
+    prune_snapshots(&dir);
+    eprintln!("catbot: a new build: copied the chats first, to {}", file.display());
+    Some(meta)
+}
+
+/// The copies before updates and builds: the last few kept.
+fn prune_snapshots(dir: &Path) {
+    let mut all: Vec<Value> = std::fs::read_dir(dir).into_iter().flatten().flatten().filter(|e| e.path().extension().is_some_and(|x| x == "json")).filter_map(|e| read_json(&e.path())).collect();
+    all.sort_by(|a, b| a["at"].as_str().cmp(&b["at"].as_str()));
+    while all.len() > KEPT {
+        let old = all.remove(0);
+        if let Some(file) = old["file"].as_str() {
+            let _ = std::fs::remove_file(file);
+            let _ = std::fs::remove_file(Path::new(file).with_extension("json"));
+        }
+    }
+}
+
+/// On the home PC, once a build has kept running: kept as the last one that worked, for
+/// `scripts/go-back.sh` to start when a newer one won't.
+fn keep_good_build(home: &Path) {
+    if Place::here().platform != Platform::Home {
+        return;
+    }
+    let (Some(mark), Ok(exe)) = (build_mark(), std::env::current_exe()) else { return };
+    let shelf = home.join("updates").join("last-good");
+    if read_json(&shelf.join("about.json")).is_some_and(|g| g["build"] == mark.as_str()) {
+        return;
+    }
+    let copy = shelf.join(if cfg!(windows) { "catbot.exe" } else { "catbot" });
+    let partial = shelf.join("catbot.partial");
+    let kept = std::fs::create_dir_all(&shelf).and_then(|_| std::fs::copy(&exe, &partial)).and_then(|_| std::fs::rename(&partial, &copy));
+    match kept {
+        Ok(()) => {
+            let _ = write_json(&shelf.join("about.json"), &json!({ "build": mark, "version": VERSION, "at": chrono::Utc::now().to_rfc3339(), "program": copy.to_string_lossy() }));
+        }
+        Err(err) => eprintln!("catbot: couldn't keep this build as the last one that worked ({err})"),
+    }
+}
+
 /// Before the chats are opened: if going back asked for the copy from before an update, today's
 /// data is set aside (not deleted) and the copy put in its place. Returns where it was set aside.
 pub fn restore_if_asked(home: &Path) -> Option<PathBuf> {
@@ -805,6 +895,10 @@ pub fn started(app: std::sync::Arc<App>) {
     tokio::spawn(async move {
         tokio::time::sleep(SETTLED).await;
         settle(&settling);
+        // The home PC's build kept running: the last one that worked (stage 32.8).
+        if let Some(home) = settling.with_store(|store| Ok(store.home().to_path_buf())) {
+            tokio::task::spawn_blocking(move || keep_good_build(&home));
+        }
     });
     // Asking first means knowing there's something to ask about: look a minute after starting,
     // then every few hours, when there's a repository to look at.
@@ -951,6 +1045,24 @@ pub async fn route(app: &std::sync::Arc<App>, rest: &[&str], body: Value) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_new_build_copies_the_chats_before_it_opens_them_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        assert!(copy_before_new_build(home).is_none(), "no chats yet: nothing to copy");
+        // A store from before, then this build seen as new.
+        std::fs::remove_file(home.join("updates/last-started.json")).unwrap();
+        let conn = rusqlite::Connection::open(home.join("catbot.db")).unwrap();
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA user_version=7; CREATE TABLE said (words TEXT); INSERT INTO said VALUES ('hello');").unwrap();
+        let meta = copy_before_new_build(home).expect("copied");
+        assert_eq!((meta["kind"].as_str(), meta["store"].as_i64()), (Some("build"), Some(7)));
+        let copy = rusqlite::Connection::open(meta["file"].as_str().unwrap()).unwrap();
+        let words: String = copy.query_row("SELECT words FROM said", [], |r| r.get(0)).unwrap();
+        assert_eq!(words, "hello", "the copy holds what the WAL held too");
+        drop(conn);
+        assert!(copy_before_new_build(home).is_none(), "the same build again: no second copy");
+    }
 
     #[test]
     fn going_back_sets_today_aside_and_puts_the_copy_in_place() {

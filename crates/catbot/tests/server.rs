@@ -85,6 +85,8 @@ async fn setup() -> Setup {
     app.local.set(addr).unwrap();
     let away = listen(server::remote::router(app.clone())).await;
     app.remote.set(away).unwrap();
+    // As `serve` does: messages a broken AI stopped go again once it's fixed (stage 32.6).
+    tokio::spawn(server::health::keep_watch(app.clone()));
     Setup { base: format!("http://{addr}"), away: format!("http://{away}"), memory, app, _dir: dir }
 }
 
@@ -238,6 +240,74 @@ async fn everything_else_goes_to_the_reference_server() {
     let s = setup().await;
     assert_eq!(s.call("GET", "/api/config", None).await.1, json!({ "from": "reference" }));
     assert_eq!(s.call("POST", "/api/bots/their-bot/read", Some(json!({}))).await.1, json!({ "read": "by reference" }));
+}
+
+#[tokio::test]
+async fn a_question_in_words_is_answered_on_its_card_or_by_typing() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    // Full access, and still asked: a question is the person's to answer (stage 32.5).
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Quill", "approvalMode": "full" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    let thread = made["bot"]["threadId"].as_str().unwrap().to_string();
+    let send = async |text: &str| s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": text, "threadId": thread }))).await;
+    let reply = async |events: &mut tokio::sync::mpsc::UnboundedReceiver<Value>| {
+        let said = until(events, "reply", |f| f["kind"] == "message" && f["message"]["kind"] == "text" && f["message"]["role"] == "bot").await;
+        until(events, "idle", |f| f["kind"] == "bot" && f["bot"]["busy"] == false).await;
+        said["message"]["text"].as_str().unwrap().to_string()
+    };
+
+    // One question, answered by typing in the message box.
+    assert_eq!(send("question").await.0, 202);
+    let asked = until(&mut events, "asked", |f| runtime(f, "request.opened")).await;
+    assert_eq!(asked["event"]["requestType"], "question");
+    let card = until(&mut events, "card", |f| f["kind"] == "message" && f["message"]["card"]["requestType"] == "question").await;
+    assert_eq!(card["message"]["card"]["questions"][0]["question"], "Which colour?");
+    assert_eq!(card["message"]["card"]["questions"][0]["options"][1], json!({ "label": "Blue", "description": "Cool" }));
+    until(&mut events, "waiting", |f| f["kind"] == "bot" && f["bot"]["activity"] == "waiting-on-you").await;
+    let (status, typed) = send("Blue, the pale one").await;
+    assert_eq!(status, 202, "{typed}");
+    assert_eq!(typed["answered"], asked["event"]["requestId"], "typing answered it, not held: {typed}");
+    let settled = until(&mut events, "settled", |f| f["kind"] == "message.patch" && f["message"]["card"]["answered"] == "answer").await;
+    assert_eq!(settled["message"]["card"]["answers"], json!({ "Which colour?": "Blue, the pale one" }));
+    assert_eq!(reply(&mut events).await, r#"Answers: {"Which colour?": "Blue, the pale one"}"#);
+
+    // Two, answered on the card.
+    send("questions").await;
+    let asked = until(&mut events, "asked", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    assert_eq!(asked["event"]["questions"].as_array().unwrap().len(), 2);
+    let answers = json!({ "Which colour?": "Red", "Which beds?": "North, South", "Not asked": "x" });
+    let (status, _) = s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "answer", "answers": answers }))).await;
+    assert_eq!(status, 200);
+    assert_eq!(reply(&mut events).await, r#"Answers: {"Which beds?": "North, South", "Which colour?": "Red"}"#);
+
+    // Closed without an answer: the bot goes on with its own judgement.
+    send("question").await;
+    let asked = until(&mut events, "asked", |f| runtime(f, "request.opened")).await;
+    let request = asked["event"]["requestId"].as_str().unwrap().to_string();
+    assert_eq!(s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "allow" }))).await.0, 400, "a question isn't allowed or denied");
+    s.call("POST", &format!("/api/threads/{thread}/respond"), Some(json!({ "requestId": request, "behavior": "deny" }))).await;
+    assert!(reply(&mut events).await.starts_with("Skipped: The person closed this question without answering."));
+    // Nothing waiting on a question: a message sent while busy waits as before.
+    let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=30"), None).await;
+    let typed = page["messages"].as_array().unwrap().iter().find(|m| m["text"] == "Blue, the pale one").unwrap();
+    assert_eq!(typed["role"], "user");
+}
+
+#[tokio::test]
+async fn a_turn_goes_on_when_catbots_tools_dont_start() {
+    let s = setup().await;
+    let mut events = s.events().await;
+    until(&mut events, "hello", |f| f["kind"] == "hello").await;
+    let (_, made) = s.call("POST", "/api/bots", Some(json!({ "name": "Scout", "soul": "fake-mcp-down" }))).await;
+    let bot = made["bot"]["id"].as_str().unwrap().to_string();
+    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hi" }))).await;
+    let note = until(&mut events, "note", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.starts_with("notice: Catbot's tools didn't start"))).await;
+    assert!(note["message"]["tool"]["name"].as_str().unwrap().contains("goes on without them"), "{note}");
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Hello, hi", "the turn still answers (stage 32.7)");
 }
 
 #[tokio::test]
@@ -4225,18 +4295,19 @@ async fn a_bot_on_codex_signs_in_streams_asks_and_resumes() {
     let (_, models) = s.call("GET", "/api/engines/codex/models", None).await;
     assert_eq!((models["models"].clone(), models["live"].as_bool()), (json!(["gpt-5.5-codex"]), Some(true)), "{models}");
 
-    // A first message: a new thread in Catbot's own Codex home, with the sign-in linked in.
-    s.call("POST", &format!("/api/bots/{bot}/messages"), Some(json!({ "text": "hello", "threadId": thread }))).await;
+    // The first message, which the sign-in stopped, goes again by itself (stage 32.6): a new
+    // thread in Catbot's own Codex home, with the sign-in linked in.
+    until(&mut events, "sent again", |f| f["kind"] == "message" && f["message"]["tool"]["name"] == "notice: Codex (ChatGPT) works again, so Catbot is sending your message again.").await;
     let thought = until(&mut events, "thinking", |f| runtime(f, "content.delta") && f["event"]["streamKind"] == "reasoning_text").await;
     assert_eq!(thought["event"]["delta"], "hmm");
     let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
     assert_eq!(reply["message"]["text"], "Echo: hello (new)");
     until(&mut events, "done", |f| runtime(f, "turn.completed")).await;
     let lines = logged();
-    let opened = lines.iter().rev().find(|l| l.get("home").is_some()).unwrap();
+    // The bot's turn (Catbot also asks Codex for its models in the background).
+    let opened = lines.iter().rev().find(|l| l["cwd"].as_str().is_some_and(|c| c.ends_with("bots/cody"))).expect("the turn ran in the bot's folder");
     let ours = s._dir.path().join("home/codex");
     assert_eq!(opened["home"].as_str(), Some(ours.to_str().unwrap()), "the bots' chats stay out of the person's Codex");
-    assert!(opened["cwd"].as_str().unwrap().ends_with("bots/cody"));
     assert!(std::fs::symlink_metadata(ours.join("auth.json")).unwrap().file_type().is_symlink());
     let begun = lines.iter().find(|l| l["method"] == "thread/start").unwrap()["params"].clone();
     assert_eq!((begun["sandbox"].as_str(), begun["approvalPolicy"].as_str()), (Some("workspace-write"), Some("untrusted")), "{begun}");
@@ -5240,6 +5311,9 @@ async fn an_ai_that_stops_working_is_told_retried_and_handed_to_a_backup() {
     say("hi").await;
     let told = until(&mut events, "ai-trouble", |f| f["kind"] == "ai-trouble").await;
     assert_eq!((told["trouble"]["engine"].as_str(), told["trouble"]["what"].as_str()), (Some("openai"), Some("key")));
+    assert!(told["trouble"]["text"].as_str().unwrap().ends_with("Scout is on it."), "the bots on it are named (stage 32.6): {told}");
+    // With no backup, "hi" waits for the fix, and the chat says so.
+    until(&mut events, "will send again", |f| f["kind"] == "message" && f["message"]["tool"]["name"] == "notice: Catbot will send this again by itself once OpenAI has a key that works.").await;
     until(&mut events, "turn.completed", |f| runtime(f, "turn.completed")).await;
     let (_, inbox) = s.call("GET", "/api/inbox", None).await;
     let fix = inbox["rows"].as_array().unwrap().iter().find(|r| r["kind"] == "fix").cloned().expect("a fix row");
@@ -5259,10 +5333,26 @@ async fn an_ai_that_stops_working_is_told_retried_and_handed_to_a_backup() {
     until(&mut events, "turn.completed", |f| runtime(f, "turn.completed")).await;
     assert!(openai_row(&s.call("GET", "/api/engines", None).await.1)["trouble"].is_object(), "the backup answering doesn't fix OpenAI");
 
-    // A new key clears it.
+    // A new key clears it, and "hi", which it stopped, goes again by itself.
     s.call("PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-new-9999", "url": format!("http://{openai}/v1") }))).await;
     assert!(openai_row(&s.call("GET", "/api/engines", None).await.1)["trouble"].is_null());
     assert!(!s.call("GET", "/api/inbox", None).await.1["rows"].as_array().unwrap().iter().any(|r| r["kind"] == "fix"));
+    until(&mut events, "sent again", |f| f["kind"] == "message" && f["message"]["tool"]["name"] == "notice: OpenAI works again, so Catbot is sending your message again.").await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot").await;
+    assert_eq!(reply["message"]["text"], "Hello from OpenAI.");
+    until(&mut events, "turn.completed", |f| runtime(f, "turn.completed")).await;
+    assert_eq!(s.app.with_store(|store| store.setting("stopped-by-trouble")).flatten(), Some(json!([])), "nothing still waits");
+    // The same trouble again the same day is in the Inbox, but not told again.
+    s.call("PATCH", &format!("/api/bots/{bot}"), Some(json!({ "backups": [] }))).await;
+    plan.lock().unwrap().push_back(401);
+    say("fourth").await;
+    until(&mut events, "will send again", |f| f["kind"] == "message" && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.starts_with("notice: Catbot will send this again"))).await;
+    let more = until(&mut events, "turn.completed", |f| f["kind"] == "ai-trouble" || runtime(f, "turn.completed")).await;
+    assert_ne!(more["kind"], "ai-trouble", "told once a day");
+    s.call("PUT", "/api/engines/openai/key", Some(json!({ "key": "sk-new-0000", "url": format!("http://{openai}/v1") }))).await;
+    let reply = until(&mut events, "reply", |f| f["kind"] == "message" && f["message"]["role"] == "bot" && f["message"]["kind"] == "text").await;
+    assert_eq!(reply["message"]["text"], "Hello from OpenAI.");
+    until(&mut events, "turn.completed", |f| runtime(f, "turn.completed")).await;
 
     // An outage is tried again after a few seconds, and OpenAI answers itself.
     plan.lock().unwrap().push_back(503);

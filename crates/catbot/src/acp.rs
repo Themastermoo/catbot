@@ -222,7 +222,18 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: 
     let session = match session {
         Some(id) => id,
         None => {
-            let made = link.call("session/new", json!({ "cwd": cwd, "mcpServers": turn.mcp }), Some(START_TIME)).await?;
+            let made = match link.call("session/new", json!({ "cwd": cwd, "mcpServers": turn.mcp }), Some(START_TIME)).await {
+                Ok(made) => made,
+                // Catbot's tools wouldn't start in the agent: it goes on without them, and the
+                // chat says so (stage 32.7).
+                Err(why) if !turn.mcp.is_empty() => {
+                    eprintln!("catbot: {} wouldn't start with Catbot's tools ({why}); going on without them", turn.engine.name);
+                    let names: Vec<String> = turn.mcp.iter().filter_map(|m| m["name"].as_str().map(str::to_string)).collect();
+                    let _ = tx.send(Event::Notice { text: crate::claude::tools_missing(&names) }).await;
+                    link.call("session/new", json!({ "cwd": cwd, "mcpServers": [] }), Some(START_TIME)).await?
+                }
+                Err(why) => return Err(why),
+            };
             let id = made["sessionId"].as_str().map(str::to_string).ok_or("the agent made no session")?;
             opened = made;
             id

@@ -352,6 +352,9 @@ fn line(message: &Value) -> Option<String> {
             let card = &message["card"];
             Some(match card["answered"].as_str() {
                 Some("allow" | "always") => "Allowed".into(),
+                Some("answer") => "Answered".into(),
+                Some(_) if card["requestType"] == "question" => "Skipped".into(),
+                None if card["requestType"] == "question" && card["dismissed"] != true => card["subtitle"].as_str().unwrap_or("A question for you").to_string(),
                 Some(_) => "Denied".into(),
                 None if card["dismissed"] == true => "Denied".into(),
                 None => card["title"].as_str().unwrap_or("Approval needed").to_string(),

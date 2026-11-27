@@ -39,6 +39,9 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
             let url = app
                 .chatgpt
                 .start(move || {
+                    if told.chatgpt.signed_in() {
+                        super::health::works(&told, engines::CHATGPT);
+                    }
                     told.hub.send(json!({ "kind": "engines" }));
                 })
                 .await
@@ -87,6 +90,9 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], req: Request,
                 *state = if outcome["success"] == true { Value::Null } else { json!({ "error": outcome["error"].as_str().unwrap_or("the sign-in didn't finish") }) };
                 drop(state);
                 eprintln!("catbot: Codex sign-in {}", if outcome["success"] == true { "finished" } else { "didn't finish" });
+                if outcome["success"] == true {
+                    super::health::works(&done, engines::CODEX);
+                }
                 done.hub.send(json!({ "kind": "engines" }));
             })
             .await
@@ -398,6 +404,8 @@ async fn start_acp_sign_in(app: &Arc<App>, engine: &'static Engine) -> Result<()
         let state = match outcome {
             Ok(()) => {
                 engines::note_signed_in(engine);
+                // Signed in: what it stopped goes again (stage 32.6).
+                super::health::works(&done, engine.id);
                 Value::Null
             }
             Err(problem) => json!({ "problem": format!("The sign-in didn't finish: {problem}") }),
@@ -414,6 +422,7 @@ async fn start_acp_sign_in(app: &Arc<App>, engine: &'static Engine) -> Result<()
         }
         None => {
             engines::note_signed_in(engine);
+            super::health::works(app, engine.id);
             set_work(app, engine.id, Value::Null, None)
         }
     }
@@ -461,6 +470,8 @@ async fn start_cli_sign_in(app: &Arc<App>, engine: &'static Engine) -> Result<()
         let state = match outcome {
             Ok(()) => {
                 engines::note_signed_in(engine);
+                // Signed in: what it stopped goes again (stage 32.6).
+                super::health::works(&done, engine.id);
                 Value::Null
             }
             Err(problem) => json!({ "problem": format!("The sign-in didn't finish: {problem}. Try “Open sign-in in Terminal”.") }),

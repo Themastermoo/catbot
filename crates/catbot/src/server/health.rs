@@ -7,6 +7,11 @@
 //! its fix), on the AI's row in Settings › AI, once as a desktop notification, and on the phone.
 //! It clears itself when that AI answers again, when its key is changed, or on Check again.
 //!
+//! Stage 32.6 (OpenMausBot 0.1.182): the notification comes at most once a day for the same
+//! trouble, naming the bots on that AI; and a message it stopped (no backup could answer) goes
+//! again by itself once the AI is fixed: it answers, passes Check again, gets a new key, or its
+//! sign-in file changes (someone signed in), looked at every 20 seconds while one waits.
+//!
 //! - `POST /api/ai-trouble/:engine/check`: a free check (an API's model list; whether a program
 //!   is there and signed in); clears the trouble when it passes.
 
@@ -102,13 +107,30 @@ fn fix(engine: &Engine, what: &str) -> Value {
     }
 }
 
-/// Files the trouble for an AI. True when it's new (so it's told once).
+/// How long the same trouble goes untold again (Moo's plan: one notice a day).
+const TOLD_EVERY_MS: i64 = 24 * 60 * 60 * 1000;
+
+/// The bots that run on an AI, by name.
+fn bots_on(app: &App, engine_id: &str) -> Vec<String> {
+    let mut names: Vec<String> = app.with_store(|store| store.bots()).unwrap_or_default().into_iter().filter(|b| b.engine == engine_id).map(|b| b.name).collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
+/// Files the trouble for an AI. True when it's told (at most once a day for the same trouble).
 pub fn broke(app: &App, engine: &Engine, what: &str, said: &str, bot_id: &str, thread: &str) -> bool {
+    let bots = bots_on(app, engine.id);
+    let text = match bots.as_slice() {
+        [] => words(engine, what),
+        [one] => format!("{} {one} is on it.", words(engine, what)),
+        many => format!("{} Bots on it: {}.", words(engine, what), many.join(", ")),
+    };
     let trouble = json!({
         "engine": engine.id,
         "name": engine.name,
         "what": what,
-        "text": words(engine, what),
+        "text": text,
+        "bots": bots,
         "said": said.chars().take(400).collect::<String>(),
         "fix": fix(engine, what),
         "botId": bot_id,
@@ -121,18 +143,30 @@ pub fn broke(app: &App, engine: &Engine, what: &str, said: &str, bot_id: &str, t
         all.insert(engine.id.to_string(), trouble.clone());
         new
     };
-    if new {
+    // Told once a day at most, across restarts too.
+    let key = format!("trouble-told:{}:{what}", engine.id);
+    let now = chrono::Utc::now().timestamp_millis();
+    let last = app.with_store(|store| store.setting(&key)).flatten().and_then(|v| v.as_i64());
+    let due = new && last.is_none_or(|at| now - at >= TOLD_EVERY_MS);
+    if due {
+        app.with_store(|store| store.set_setting(&key, &json!(now)));
+    }
+    if due {
         eprintln!("catbot: {} stopped working ({what}): {}", engine.name, said.chars().take(200).collect::<String>());
         app.hub.send(json!({ "kind": "ai-trouble", "trouble": trouble }));
     }
     app.hub.send(json!({ "kind": "inbox" }));
     app.hub.send(json!({ "kind": "engines" }));
-    new
+    due
 }
 
-/// An AI answered (or was fixed): its trouble, if any, is over.
+/// An AI answered (or was fixed): its trouble, if any, is over, and what it stopped goes again.
 pub fn works(app: &App, engine_id: &str) {
+    app.worked.lock().expect("worked lock").insert(engine_id.to_string(), chrono::Utc::now().timestamp_millis());
     let gone = app.troubles.lock().expect("troubles lock").remove(engine_id).is_some();
+    if gone {
+        app.fixed.notify_one();
+    }
     if gone {
         eprintln!("catbot: {engine_id} works again");
         app.hub.send(json!({ "kind": "inbox" }));
@@ -146,6 +180,87 @@ pub fn of(app: &App, engine_id: &str) -> Option<Value> {
 
 pub fn is_broken(app: &App, engine_id: &str) -> bool {
     app.troubles.lock().expect("troubles lock").contains_key(engine_id)
+}
+
+/// Where messages stopped by an AI wait (a setting, so a restart keeps them).
+const STOPPED: &str = "stopped-by-trouble";
+
+/// The person's fix that lets a stopped message go again: signing in, or a key that works.
+pub fn waits_for_fix(what: &str) -> bool {
+    matches!(what, "sign-in" | "key")
+}
+
+/// An AI's sign-in, as its file is now (when it has one Catbot can see): a change means someone
+/// signed in.
+fn sign_in_mark(engine: &Engine) -> Option<String> {
+    let file = match engine.kind {
+        Kind::Claude => std::env::var_os("CLAUDE_CONFIG_DIR").filter(|d| !d.is_empty()).map(std::path::PathBuf::from).unwrap_or_else(|| crate::store::user_home().join(".claude")).join(".credentials.json"),
+        Kind::Codex => crate::codex::person_home().join("auth.json"),
+        _ => return None,
+    };
+    let meta = file.metadata().ok()?;
+    let changed = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    Some(format!("{changed}:{}", meta.len()))
+}
+
+/// A message the AI stopped, with no backup to answer: it goes again once the AI is fixed. The
+/// chat says so.
+pub fn stopped(app: &App, engine: &Engine, what: &str, thread: &str, message: i64, text: &str) {
+    let mut all = app.with_store(|store| store.setting(STOPPED)).flatten().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    all.retain(|s| s["thread"] != thread);
+    all.push(json!({
+        "engine": engine.id,
+        "thread": thread,
+        "message": message,
+        "text": text,
+        "at": chrono::Utc::now().timestamp_millis(),
+        "mark": sign_in_mark(engine),
+    }));
+    app.with_store(|store| store.set_setting(STOPPED, &Value::Array(all)));
+    let when = if what == "sign-in" { format!("once {} is signed in again", engine.name) } else { format!("once {} has a key that works", engine.name) };
+    super::turns::save_and_send(app, thread, crate::store::Role::Note, &format!("Catbot will send this again by itself {when}."), None);
+}
+
+/// Sends again the stopped messages whose AI is fixed. Ones older than three days are let go.
+pub fn send_again(app: &Arc<App>) {
+    let all = app.with_store(|store| store.setting(STOPPED)).flatten().and_then(|v| v.as_array().cloned()).unwrap_or_default();
+    if all.is_empty() {
+        return;
+    }
+    let now = chrono::Utc::now().timestamp_millis();
+    let worked = app.worked.lock().expect("worked lock").clone();
+    let (mut ready, mut waiting) = (Vec::new(), Vec::new());
+    for stop in all {
+        let at = stop["at"].as_i64().unwrap_or(0);
+        if now - at > 3 * TOLD_EVERY_MS {
+            continue;
+        }
+        let Some(engine) = stop["engine"].as_str().and_then(engines::find) else { continue };
+        let fixed = worked.get(engine.id).is_some_and(|w| *w > at) || sign_in_mark(engine).is_some_and(|mark| stop["mark"].as_str() != Some(mark.as_str()));
+        if fixed { ready.push((engine, stop)) } else { waiting.push(stop) }
+    }
+    app.with_store(|store| store.set_setting(STOPPED, &Value::Array(waiting)));
+    for (engine, stop) in ready {
+        let (Some(thread), Some(message), Some(text)) = (stop["thread"].as_str(), stop["message"].as_i64(), stop["text"].as_str()) else { continue };
+        if app.with_store(|store| store.conversation(thread)).flatten().is_none() {
+            continue;
+        }
+        eprintln!("catbot: {} is fixed: sending the message it stopped in {thread} again", engine.name);
+        super::turns::save_and_send(app, thread, crate::store::Role::Note, &format!("{} works again, so Catbot is sending your message again.", engine.name), None);
+        app.held.lock().expect("held lock").entry(thread.to_string()).or_default().push((message, text.to_string()));
+        super::release_held(app, thread);
+    }
+}
+
+/// Looks for fixed AIs while a stopped message waits: when told one is, and every 20 seconds.
+pub async fn keep_watch(app: Arc<App>) {
+    loop {
+        tokio::select! {
+            _ = app.fixed.notified() => {}
+            _ = tokio::time::sleep(std::time::Duration::from_secs(20)) => {}
+        }
+        send_again(&app);
+    }
 }
 
 /// Every AI in trouble, newest first.

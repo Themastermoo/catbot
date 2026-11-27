@@ -31,6 +31,8 @@ pub enum Card {
     Change { title: String, lines: Vec<String>, warning: Option<String> },
     /// A picture whose AI is still to be chosen, in its chat.
     Picture,
+    /// A question in words, answered in its chat (stage 32.5).
+    Question,
     /// An AI that stopped working (stage 27): its fix ("sign-in", "key", "install" or
     /// "status"), the button's words, and the status page for an outage.
     Fix { engine: String, how: String, label: String, url: Option<String> },
@@ -74,6 +76,7 @@ impl Row {
                 warning: card["warning"].as_str().filter(|w| !w.is_empty()).map(str::to_string),
             }),
             Some("picture") => Some(Card::Picture),
+            Some("question") => Some(Card::Question),
             Some("fix") => Some(Card::Fix {
                 engine: card["engine"].as_str().unwrap_or_default().to_string(),
                 how: card["fix"]["how"].as_str().unwrap_or("key").to_string(),
@@ -115,6 +118,7 @@ impl Row {
             (Some(Card::Approval { .. }), _) => "Approval".into(),
             (Some(Card::Change { .. }), _) => "Asks to make a change".into(),
             (Some(Card::Picture), _) => "A picture to draw".into(),
+            (Some(Card::Question), _) => "Asks you a question".into(),
             (Some(Card::Fix { .. }), _) => "Needs fixing".into(),
             (_, "result") => "Trigger report".into(),
             (_, "notice") => "Needs a look".into(),
@@ -175,7 +179,7 @@ pub fn actions(row: &Row) -> Vec<Action> {
     match (&row.card, row.asks()) {
         (Some(Card::Fix { .. }), _) => vec![Action::Fix, Action::Check],
         (Some(Card::Approval { .. }) | Some(Card::Change { .. }), true) => vec![Action::Allow, Action::Deny, Action::Open],
-        (Some(Card::Picture), true) => vec![Action::Open],
+        (Some(Card::Picture | Card::Question), true) => vec![Action::Open],
         _ if row.tab == "info" && row.kind == "message" => vec![Action::Reply, Action::Done, Action::Open],
         _ if row.tab == "info" => vec![Action::Done, Action::Open],
         _ => vec![Action::Open],

@@ -4,6 +4,7 @@ The prompt picks the behaviour:
   "crash"  -> writes to stderr and exits 1 with no result line
   "tool"   -> calls a tool that is refused, like an unapproved Bash command
   "approve" -> asks the permission prompt tool (as the real CLI does), and obeys the answer;
+  "question"/"questions" -> asks AskUserQuestion through it, and replies with the answers;
                user lines written meanwhile (steering) end its reply as "Steered: …"
   "draw me <what>" -> asks Catbot for a picture of it in its reply
   (asked as Catbot's drawer, for SVG or a Blender script) -> answers with one
@@ -110,8 +111,10 @@ if prompt == "crash":
     print("Error: something broke inside the CLI", file=sys.stderr)
     sys.exit(1)
 
+# "fake-mcp-down" (in its instructions): Catbot's tool server didn't start, as the CLI reports it.
+servers = [{"name": "catbot", "status": "failed" if "fake-mcp-down" in system else "connected"}]
 out({"type": "system", "subtype": "init", "session_id": session, "model": arg_after("--model") or "claude-fake",
-     "permissionMode": arg_after("--permission-mode"), "args": sys.argv[1:]})
+     "permissionMode": arg_after("--permission-mode"), "args": sys.argv[1:], "mcp_servers": servers})
 out({"type": "user", "isReplay": True, "message": message["message"]})
 denials = []
 if prompt == "tool":
@@ -143,6 +146,20 @@ if prompt.startswith("write ") and ":" in prompt.splitlines()[0]:
     with open(os.path.join(os.getcwd(), name.strip()), "w") as f:
         f.write(words.strip() + "\n")
 reply = f"Hello, {prompt}"
+# "question" / "questions" ask the person through AskUserQuestion (stage 32.5) and say what came back.
+if prompt in ("question", "questions"):
+    asked = [{"question": "Which colour?", "header": "Colour", "multiSelect": False,
+              "options": [{"label": "Red", "description": "Warm"}, {"label": "Blue", "description": "Cool"}]}]
+    if prompt == "questions":
+        asked.append({"question": "Which beds?", "header": "Beds", "multiSelect": True,
+                      "options": [{"label": "North", "description": ""}, {"label": "South", "description": ""}]})
+    tool_input = {"questions": asked}
+    out({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "q1", "name": "AskUserQuestion", "input": tool_input}]}})
+    verdict = ask_permission("AskUserQuestion", tool_input)
+    if verdict["behavior"] == "allow":
+        reply = "Answers: " + json.dumps(verdict["updatedInput"].get("answers", {}), sort_keys=True)
+    else:
+        reply = "Skipped: " + verdict["message"]
 if "steered" in dir() and steered:
     reply += "\n\nSteered: " + " / ".join(steered)
 # "fake-mode" (in its instructions) says what approval level it was run at.

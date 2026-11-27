@@ -151,6 +151,11 @@ pub async fn drive(running: &mut Running, approvals_on: bool, json: bool) -> Res
                     *kept = note;
                 }
             }
+            Event::Notice { text } => {
+                if !json {
+                    eprintln!("{text}");
+                }
+            }
             Event::Error { message } => {
                 if !json {
                     eprintln!("{}", paint.red(&format!("✗ {message}")));

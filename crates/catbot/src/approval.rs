@@ -42,6 +42,9 @@ pub enum Decision {
     Allow,
     /// Refused, with what the person said (passed on to the bot).
     Deny(String),
+    /// A question answered (Claude's AskUserQuestion): each question's text → the answer
+    /// (stage 32.5). Goes back as an allow, with the answers in the tool's own `answers`.
+    Answer(Value),
 }
 
 /// What the bot is told after a refusal, so it explains instead of looking for a way around.
@@ -164,6 +167,8 @@ impl Drop for Broker {
 fn decision_from(answer: &Value) -> Decision {
     if answer["behavior"] == "allow" {
         Decision::Allow
+    } else if answer["behavior"] == "answer" {
+        Decision::Answer(answer["answers"].clone())
     } else {
         let said = answer["message"].as_str().filter(|m| !m.trim().is_empty()).unwrap_or("The person refused this step.");
         let stop = if said.ends_with(['.', '!', '?']) { "" } else { "." };
@@ -175,6 +180,7 @@ fn answer_line(id: &str, decision: &Decision) -> String {
     let answer = match decision {
         Decision::Allow => json!({ "t": "answer", "id": id, "behavior": "allow" }),
         Decision::Deny(message) => json!({ "t": "answer", "id": id, "behavior": "deny", "message": message }),
+        Decision::Answer(answers) => json!({ "t": "answer", "id": id, "behavior": "answer", "answers": answers }),
     };
     format!("{answer}\n")
 }
@@ -393,6 +399,13 @@ pub async fn serve_mcp(socket: &Path) -> std::io::Result<()> {
                 let text = match decision {
                     Decision::Allow => json!({ "behavior": "allow", "updatedInput": input }),
                     Decision::Deny(message) => json!({ "behavior": "deny", "message": message }),
+                    // A bare allow would run AskUserQuestion with no one to answer it: the answers
+                    // go in its own `answers`, keyed by question.
+                    Decision::Answer(answers) => {
+                        let mut input = input;
+                        input["answers"] = answers;
+                        json!({ "behavior": "allow", "updatedInput": input })
+                    }
                 };
                 Some(json!({ "content": [{ "type": "text", "text": text.to_string() }] }))
             }

@@ -31,6 +31,8 @@ struct Handle {
     cancel: Arc<Notify>,
     /// Approval cards still waiting for the person: request id → the card's message id.
     open_cards: HashMap<String, i64>,
+    /// Of those, the ones asking questions in words (stage 32.5): request id → each question.
+    questions: HashMap<String, Vec<String>>,
 }
 
 /// The turns running now, one at most per conversation.
@@ -73,7 +75,29 @@ impl Turns {
 
     /// Takes a card off the open list, returning its message id.
     fn close_card(&self, thread_id: &str, request_id: &str) -> Option<i64> {
-        self.running.lock().expect("turns lock").get_mut(thread_id)?.open_cards.remove(request_id)
+        let mut running = self.running.lock().expect("turns lock");
+        let handle = running.get_mut(thread_id)?;
+        handle.questions.remove(request_id);
+        handle.open_cards.remove(request_id)
+    }
+
+    fn add_question(&self, thread_id: &str, request_id: &str, questions: Vec<String>) {
+        if let Some(handle) = self.running.lock().expect("turns lock").get_mut(thread_id) {
+            handle.questions.insert(request_id.to_string(), questions);
+        }
+    }
+
+    /// A question card's questions, if the request is one.
+    pub fn question_of(&self, thread_id: &str, request_id: &str) -> Option<Vec<String>> {
+        self.running.lock().expect("turns lock").get(thread_id)?.questions.get(request_id).cloned()
+    }
+
+    /// The question in words waiting in this chat (the first asked, if several), and its questions.
+    pub fn open_question(&self, thread_id: &str) -> Option<(String, Vec<String>)> {
+        let running = self.running.lock().expect("turns lock");
+        let handle = running.get(thread_id)?;
+        let first = handle.questions.keys().min_by_key(|id| handle.open_cards.get(*id).copied().unwrap_or(i64::MAX))?;
+        Some((first.clone(), handle.questions[first].clone()))
     }
 
     /// Every approval card waiting now: its chat, the bot asking, the request and the card's message.
@@ -195,7 +219,7 @@ fn register(app: &App, thread: &str, bot_id: &str) -> Result<(String, Arc<Notify
     if running.contains_key(thread) {
         return Err("this bot is still working on the last message");
     }
-    running.insert(thread.to_string(), Handle { turn_id: turn_id.clone(), bot_id: bot_id.to_string(), answerer: None, steer: None, cancel: cancel.clone(), open_cards: HashMap::new() });
+    running.insert(thread.to_string(), Handle { turn_id: turn_id.clone(), bot_id: bot_id.to_string(), answerer: None, steer: None, cancel: cancel.clone(), open_cards: HashMap::new(), questions: HashMap::new() });
     Ok((turn_id, cancel))
 }
 
@@ -340,6 +364,9 @@ async fn run(
                 let fresh = Session::New(uuid::Uuid::new_v4().to_string());
                 result = drive(app, &stand_in, &fresh, text, codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
                 ran_on = stand_in;
+            } else if !guest && conversation.channel_id.is_none() && super::health::waits_for_fix(what) {
+                // No backup: it goes again once the person has fixed the AI (stage 32.6).
+                super::health::stopped(app, engine, what, thread, request_id, text);
             }
         }
     }
@@ -568,6 +595,12 @@ async fn drive(
                 }
             }
             Event::ApprovalRequested { id, tool, input } => {
+                // A question in words (Claude's AskUserQuestion) is the person's to answer, at any
+                // approval level: a card of its questions, answered there or by typing (stage 32.5).
+                if tool == ASK_USER_QUESTION {
+                    ask_question(app, bot, thread, &id, &input, &emit);
+                    continue;
+                }
                 let summary = format!("{tool} {}", summarize(&input)).trim().to_string();
                 // Its approval level as it is now, or an "Always allow" it was given: no card.
                 if super::allowed::covers(app, &bot.id, lifted, &tool, &input) && app.turns.answer(thread, &id, Decision::Allow).is_some() {
@@ -600,6 +633,9 @@ async fn drive(
                     super::inbox::changed(app);
                     super::team_chat::waiting(app, bot, thread, &summary);
                 }
+            }
+            Event::Notice { text } => {
+                save_and_send(app, thread, Role::Note, &text, None);
             }
             Event::Error { message } => {
                 emit(json!({ "type": "runtime.error", "message": message }));
@@ -740,6 +776,102 @@ fn start_pi(app: &Arc<App>, bot: &Bot, thread: &str, session: &Session, codex: O
 }
 
 /// Marks an approval card answered (`dismissed` when nobody answered it) and shows the change.
+/// Claude Code's tool for asking the person questions.
+pub const ASK_USER_QUESTION: &str = "AskUserQuestion";
+
+/// A question in words: as many as six, each with its choices (as many as twelve).
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Question {
+    pub question: String,
+    pub header: String,
+    #[serde(rename = "multiSelect")]
+    pub multi_select: bool,
+    pub options: Vec<Choice>,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct Choice {
+    pub label: String,
+    pub description: String,
+}
+
+/// AskUserQuestion's questions, the ones with words in them.
+pub fn questions_in(input: &Value) -> Vec<Question> {
+    let text = |v: &Value| v.as_str().map(str::trim).unwrap_or_default().to_string();
+    input["questions"]
+        .as_array()
+        .map(|all| {
+            all.iter()
+                .filter(|q| !text(&q["question"]).is_empty())
+                .take(6)
+                .map(|q| Question {
+                    question: text(&q["question"]),
+                    header: text(&q["header"]),
+                    multi_select: q["multiSelect"] == true,
+                    options: q["options"]
+                        .as_array()
+                        .map(|o| o.iter().filter(|o| !text(&o["label"]).is_empty()).take(12).map(|o| Choice { label: text(&o["label"]), description: text(&o["description"]) }).collect())
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// What the person typed, as the answers to every question asked (stage 32.5).
+pub fn typed_answers(questions: &[String], typed: &str) -> Value {
+    Value::Object(questions.iter().map(|q| (q.clone(), json!(typed.trim()))).collect())
+}
+
+/// Opens a question card for the bot's AskUserQuestion.
+fn ask_question(app: &Arc<App>, bot: &Bot, thread: &str, id: &str, input: &Value, emit: &impl Fn(Value)) {
+    let questions = questions_in(input);
+    if questions.is_empty() {
+        let why = "Catbot: this AskUserQuestion had no question text, so nobody was shown it. Ask again with the question in it, or go on without it.";
+        app.turns.answer(thread, id, Decision::Deny(why.into()));
+        return;
+    }
+    let summary = match questions.as_slice() {
+        [one] => one.question.clone(),
+        [first, ..] => format!("{} (and {} more)", first.question, questions.len() - 1),
+        [] => unreachable!(),
+    };
+    emit(json!({ "type": "request.opened", "requestId": id, "requestType": "question", "tool": ASK_USER_QUESTION, "summary": summary, "questions": questions }));
+    let card = json!({
+        "title": if questions.len() == 1 { "A question for you" } else { "Questions for you" },
+        "subtitle": summary,
+        "requestId": id,
+        "requestType": "question",
+        "tool": ASK_USER_QUESTION,
+        "questions": questions,
+    });
+    if let Some(message) = save_and_send(app, thread, Role::Card, &summary, Some(&json!({ "card": card })))
+        && let Some(message_id) = message["id"].as_str().and_then(wire::parse_message_id)
+    {
+        app.turns.add_card(thread, id, message_id);
+        app.turns.add_question(thread, id, questions.iter().map(|q| q.question.clone()).collect());
+        app.announce_bot(&bot.id);
+        super::inbox::changed(app);
+        super::team_chat::waiting(app, bot, thread, &summary);
+    }
+}
+
+/// Answers a question card: the bot goes on with the answers, and the card shows them.
+/// None if no such question is open.
+pub fn answer_question(app: &App, thread: &str, request_id: &str, answers: Value) -> Option<String> {
+    let turn_id = app.turns.answer(thread, request_id, Decision::Answer(answers.clone()))?;
+    app.hub.send(runtime(thread, &turn_id, json!({ "type": "request.resolved", "requestId": request_id, "behavior": "answer", "source": "user" })));
+    if let Some(message_id) = app.turns.card_of(thread, request_id).map(|(_, m)| m) {
+        app.with_store(|store| {
+            let mut detail = store.message(message_id)?.and_then(|m| m.detail).unwrap_or_else(|| json!({}));
+            detail["card"]["answers"] = answers;
+            store.update_detail(message_id, &detail)
+        });
+    }
+    settle_card(app, thread, request_id, "answer", false);
+    Some(turn_id)
+}
+
 pub fn settle_card(app: &App, thread: &str, request_id: &str, behavior: &str, dismissed: bool) {
     let Some(message_id) = app.turns.close_card(thread, request_id) else { return };
     let wire = app.with_store(|store| {

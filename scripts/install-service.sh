@@ -18,13 +18,16 @@ REPO="$(pwd)"
 NAME=catbot
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT="$UNIT_DIR/$NAME.service"
+# When a new build won't start, the service gives up after a few tries and this tells the
+# desktop how to go back (stage 32.8).
+STUCK="$UNIT_DIR/$NAME-stuck.service"
 PORT=8788
 
 say() { printf '\033[1;36m%s\033[0m\n' "$*"; }
 
 if [[ "${1:-}" == "--remove" ]]; then
   systemctl --user disable --now "$NAME.service" 2>/dev/null || true
-  rm -f "$UNIT"
+  rm -f "$UNIT" "$STUCK"
   systemctl --user daemon-reload
   say "Catbot's service is gone. Start Catbot by hand with: cargo run -- serve"
   exit 0
@@ -63,6 +66,10 @@ cat >"$UNIT" <<EOF
 [Unit]
 Description=Catbot: your bots, running in the background
 After=network.target
+# Four failed starts in a minute: it stops trying, and the desktop is told (stage 32.8).
+StartLimitIntervalSec=60
+StartLimitBurst=4
+OnFailure=$NAME-stuck.service
 
 [Service]
 Type=simple
@@ -74,6 +81,16 @@ RestartSec=3
 
 [Install]
 WantedBy=default.target
+EOF
+
+cat >"$STUCK" <<EOF
+# Made by $REPO/scripts/install-service.sh. Run that again rather than editing this file.
+[Unit]
+Description=Catbot won't start: tell the desktop how to go back
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env notify-send --urgency=critical --app-name=Catbot "Catbot won't start" "The new build keeps failing to start. To go back to the last one that worked, run: bash $REPO/scripts/go-back.sh"
 EOF
 
 systemctl --user daemon-reload

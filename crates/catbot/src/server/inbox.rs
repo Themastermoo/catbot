@@ -170,7 +170,12 @@ fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
                 "from": from(store, &bot_id, None),
                 "origin": origin(store, &conversation, Some(message_id)),
                 "text": clip(card["subtitle"].as_str().unwrap_or(&message.body)),
-                "card": { "type": "approval", "requestId": request, "tool": card["tool"], "always": card["always"] },
+                // A question in words is answered in its chat (stage 32.5); an approval, here too.
+                "card": if card["requestType"] == "question" {
+                    json!({ "type": "question", "requestId": request })
+                } else {
+                    json!({ "type": "approval", "requestId": request, "tool": card["tool"], "always": card["always"] })
+                },
             }),
             id,
         });

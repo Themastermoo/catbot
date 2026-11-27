@@ -105,6 +105,9 @@ pub enum Event {
     ApprovalRequested { id: String, tool: String, input: Value },
     /// Something went wrong that the person should see (signed out, usage limit, API error).
     Error { message: String },
+    /// Something the person should know that doesn't stop the turn (stage 32.7: Catbot's tools
+    /// didn't start, so the bot goes on without them).
+    Notice { text: String },
     /// The turn is over.
     Finished(Outcome),
 }
@@ -200,16 +203,37 @@ pub fn user_message(prompt: &str) -> String {
     json!({ "type": "user", "message": { "role": "user", "content": prompt } }).to_string()
 }
 
+/// The note for tool servers that didn't start: Catbot's own (pages, connected apps, approvals),
+/// or another by name.
+pub fn tools_missing(names: &[String]) -> String {
+    let theirs: Vec<&str> = names.iter().map(String::as_str).filter(|n| *n != crate::approval::SERVER_NAME).collect();
+    let ours = theirs.len() < names.len();
+    match (ours, theirs.as_slice()) {
+        (true, []) => "Catbot's tools didn't start for this turn, so it goes on without them: no pages, connected apps or asking you first (a step that needs a yes is refused).".into(),
+        (true, others) => format!("Catbot's tools and {} didn't start for this turn, so it goes on without them.", others.join(", ")),
+        (false, others) => format!("{} didn't start for this turn, so it goes on without {}.", others.join(", "), if others.len() == 1 { "it" } else { "them" }),
+    }
+}
+
 /// Turns one stdout line into the events it carries (often none: the CLI also reports
 /// housekeeping we don't need).
 pub fn parse_line(line: &str) -> Vec<Event> {
     let Ok(o) = serde_json::from_str::<Value>(line) else { return Vec::new() };
     let s = |v: &Value| v.as_str().map(str::to_string);
     match o["type"].as_str() {
-        Some("system") if o["subtype"] == "init" => vec![Event::Started {
-            session_id: s(&o["session_id"]).unwrap_or_default(),
-            model: s(&o["model"]),
-        }],
+        Some("system") if o["subtype"] == "init" => {
+            let mut events = vec![Event::Started { session_id: s(&o["session_id"]).unwrap_or_default(), model: s(&o["model"]) }];
+            // A server that didn't start: Claude Code goes on without it, and the chat is told
+            // which (stage 32.7).
+            let failed: Vec<String> = o["mcp_servers"]
+                .as_array()
+                .map(|all| all.iter().filter(|m| m["status"] == "failed").filter_map(|m| s(&m["name"])).collect())
+                .unwrap_or_default();
+            if !failed.is_empty() {
+                events.push(Event::Notice { text: tools_missing(&failed) });
+            }
+            events
+        }
         Some("stream_event") => {
             // A subagent's narration would interleave with the main reply.
             if !o["parent_tool_use_id"].is_null() {
@@ -595,6 +619,15 @@ mod tests {
         // Housekeeping lines carry nothing.
         assert!(parse_line(r#"{"type":"autocompact_state","value":{}}"#).is_empty());
         assert!(parse_line("not json").is_empty());
+    }
+
+    #[test]
+    fn a_tool_server_that_didnt_start_is_told() {
+        let line = r#"{"type":"system","subtype":"init","session_id":"s1","mcp_servers":[{"name":"catbot","status":"failed"},{"name":"github","status":"connected"}]}"#;
+        assert_eq!(parse_line(line)[1], Event::Notice { text: tools_missing(&["catbot".into()]) });
+        assert!(tools_missing(&["catbot".into()]).starts_with("Catbot's tools didn't start"));
+        assert_eq!(tools_missing(&["github".into()]), "github didn't start for this turn, so it goes on without it.");
+        assert_eq!(parse_line(r#"{"type":"system","subtype":"init","session_id":"s1","mcp_servers":[{"name":"catbot","status":"connected"}]}"#).len(), 1);
     }
 
     #[test]

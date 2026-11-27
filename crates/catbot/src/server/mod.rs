@@ -141,6 +141,10 @@ pub struct App {
     pub limited_until: std::sync::Mutex<std::collections::HashMap<String, chrono::DateTime<chrono::Utc>>>,
     /// AIs that stopped working, by engine id: what went wrong and its fix (`health.rs`).
     pub troubles: std::sync::Mutex<std::collections::BTreeMap<String, Value>>,
+    /// When each AI last answered or was fixed, and a nudge when one is (stage 32.6): messages it
+    /// stopped go again.
+    pub worked: std::sync::Mutex<std::collections::HashMap<String, i64>>,
+    pub fixed: tokio::sync::Notify,
     /// Updates with rollback (stage 28): where this Catbot runs, and a download or install under way.
     pub updates: updates::Updates,
     /// Where the home door listens, once it does: how a turn's tools reach Catbot (`bot_tools.rs`).
@@ -186,6 +190,8 @@ impl App {
             chatgpt,
             held: std::sync::Mutex::new(std::collections::HashMap::new()),
             troubles: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            worked: std::sync::Mutex::new(std::collections::HashMap::new()),
+            fixed: tokio::sync::Notify::new(),
             updates: updates::Updates::default(),
             local: std::sync::OnceLock::new(),
             tool_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -285,6 +291,8 @@ impl App {
 pub async fn serve(options: Options) -> Result<(), BoxError> {
     // Going back to an older Catbot can ask for the chats as they were before an update.
     updates::restore_if_asked(&options.home);
+    // A build that hasn't run here yet copies the chats before it opens them (stage 32.8).
+    updates::copy_before_new_build(&options.home);
     let store = Store::open(&options.home)?;
     let recorder = match &options.record {
         Some(dir) => {
@@ -377,6 +385,8 @@ pub async fn serve(options: Options) -> Result<(), BoxError> {
     scheduled::start(app.clone());
     // Messages that were waiting for a turn when Catbot stopped (stage 32, Moo, 2026-11-27).
     resume_held(&app);
+    // Messages a signed-out AI stopped go again once it's signed in (stage 32.6).
+    tokio::spawn(health::keep_watch(app.clone()));
     axum::serve(listener, router(app)).await?;
     Ok(())
 }
@@ -1317,8 +1327,12 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
     if !reacted.is_empty() {
         detail["reactionNote"] = json!(reacted);
     }
-    // Waiting for the turn to end, with Steer now in the app (stage 29.14).
-    if busy {
+    // The bot is waiting on a question in words: what's typed answers it (stage 32.5).
+    let answering = if busy && !text.is_empty() && attached.is_empty() { app.turns.open_question(&conversation.id) } else { None };
+    if let Some((request, _)) = &answering {
+        detail["answers"] = json!(request);
+    } else if busy {
+        // Waiting for the turn to end, with Steer now in the app (stage 29.14).
         detail["held"] = json!(true);
     }
     let detail = (detail != json!({})).then_some(detail);
@@ -1330,6 +1344,21 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
         let named = if text.is_empty() { attached[0].name.clone() } else { text.clone() };
         let first = app.with_store(|store| store.first_words(&conversation.id)).flatten().filter(|w| !w.trim().is_empty()).unwrap_or(named);
         name_chat(app, &bot, &conversation.id, &first);
+    }
+    if let Some((request, questions)) = answering {
+        if turns::answer_question(app, &conversation.id, &request, turns::typed_answers(&questions, &text)).is_some() {
+            app.announce_bot(&bot.id);
+            return Ok((StatusCode::ACCEPTED, json!({ "ok": true, "threadId": conversation.id, "message": message, "answered": request })));
+        }
+        // Answered or ended in the meantime: it waits for the turn like any other message.
+        if let Some(id) = message["id"].as_str().and_then(wire::parse_message_id) {
+            app.with_store(|store| {
+                let mut detail = store.message(id)?.and_then(|m| m.detail).unwrap_or_else(|| json!({}));
+                detail.as_object_mut().map(|d| d.remove("answers"));
+                detail["held"] = json!(true);
+                store.update_detail(id, &detail)
+            });
+        }
     }
     let request_id = message["id"].as_str().and_then(wire::parse_message_id).unwrap_or_default();
     let thread = conversation.id.clone();
@@ -1511,6 +1540,40 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
         (Method::POST, ["respond"]) => {
             let body = json_body(req).await?;
             let request_id = body["requestId"].as_str().ok_or_else(|| bad("which request?"))?;
+            // A question in words (stage 32.5): answered with each question's answer, or typed
+            // words for all of them; closed without an answer, the bot uses its own judgement.
+            if let Some(questions) = app.turns.question_of(thread, request_id) {
+                let answers = match body["behavior"].as_str() {
+                    Some("answer") if body["answers"].is_object() => {
+                        let given = &body["answers"];
+                        let answers: serde_json::Map<String, Value> = questions
+                            .iter()
+                            .filter_map(|q| given[q].as_str().map(str::trim).filter(|a| !a.is_empty()).map(|a| (q.clone(), json!(a))))
+                            .collect();
+                        if answers.is_empty() {
+                            return Err(bad("no answer given"));
+                        }
+                        Value::Object(answers)
+                    }
+                    Some("answer") => match body["message"].as_str().map(str::trim).filter(|m| !m.is_empty()) {
+                        Some(typed) => turns::typed_answers(&questions, typed),
+                        None => return Err(bad("no answer given")),
+                    },
+                    Some("deny") => {
+                        let skipped = "The person closed this question without answering. Use your best judgement and go on.";
+                        let turn_id = app.turns.answer(thread, request_id, Decision::Deny(skipped.into())).ok_or((StatusCode::NOT_FOUND, "that question was already answered, or its turn is over".to_string()))?;
+                        app.hub.send(hub::runtime(thread, &turn_id, json!({ "type": "request.resolved", "requestId": request_id, "behavior": "deny", "source": "user" })));
+                        turns::settle_card(app, thread, request_id, "deny", true);
+                        return Ok((StatusCode::OK, json!({ "ok": true })));
+                    }
+                    other => return Err(bad(format!("a question takes an answer, not {other:?}"))),
+                };
+                turns::answer_question(app, thread, request_id, answers).ok_or((StatusCode::NOT_FOUND, "that question was already answered, or its turn is over".to_string()))?;
+                if let Some(conversation) = app.try_store(|store| store.conversation(thread)).ok().flatten() {
+                    app.announce_bot(&conversation.bot_id);
+                }
+                return Ok((StatusCode::OK, json!({ "ok": true })));
+            }
             // "Always allow": the bot keeps this kind of action, wherever it works (allowed.rs).
             let always = body["behavior"] == "always";
             if always {
