@@ -1237,10 +1237,11 @@ fn Row(
                 "check-in" => "Timed check-in",
                 "brief" => "Daily brief",
                 "trigger" => "Trigger",
+                "board" => "Task board",
                 _ => "Catbot",
             };
-            // The Chief's notes are for the Chief; a trigger's are for whichever bot it starts.
-            let whom = if from == "trigger" { "" } else { " · for the Chief" };
+            // The Chief's notes are for the Chief; a trigger's or a board item's are for whichever bot it starts.
+            let whom = if matches!(from.as_str(), "trigger" | "board") { "" } else { " · for the Chief" };
             rsx! {
                 div { class: "flex w-full justify-start", "data-from-catbot": "{from}",
                     div { class: "flex w-full max-w-[min(var(--chat-prose-max),var(--chat-card-pct))] flex-col gap-1 rounded-xl border border-dashed border-hairline/60 px-3 py-2.5 text-[13px]", title: "{full_time}",

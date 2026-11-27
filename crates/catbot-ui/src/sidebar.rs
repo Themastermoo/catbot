@@ -100,8 +100,9 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     // On a phone the list gives way to the open chat.
     let phone = if (ui.showing_chat)() { "max-md:hidden" } else { "" };
     let pick = move |id: String| {
-        let mut map = ui.map;
+        let (mut map, mut board) = (ui.map, ui.board);
         map.set(false);
+        board.set(false);
         selected.set(Some(id));
         let mut showing = ui.showing_chat;
         showing.set(true);
@@ -198,6 +199,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                 if let Some(team) = team_chat {
                     TeamChatRow { selected: selected.read().as_deref() == Some(team.id.as_str()), bot: team, on_select: pick }
                 }
+                BoardRow {}
             }
             div { class: "min-h-0 flex-1 overflow-y-auto",
                 if let Some(chief) = chief {
@@ -295,14 +297,53 @@ fn TeamMapRow() -> Element {
             button { r#type: "button", "data-sidebar-team-map": true, "aria-pressed": "{open}", title: "Team map",
                 class: "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left outline-none hover:bg-raised/60 focus-visible:ring-2 focus-visible:ring-accent/60",
                 onclick: move |_| {
-                    let (mut map, mut showing) = (ui.map, ui.showing_chat);
+                    let (mut map, mut board, mut showing) = (ui.map, ui.board, ui.showing_chat);
                     map.set(!open);
+                    board.set(false);
                     showing.set(!open);
                 },
                 span { class: if open { "grid size-9 shrink-0 place-items-center rounded-full bg-ink/[0.16] text-ink" } else { "grid size-9 shrink-0 place-items-center rounded-full bg-raised text-ink-secondary" },
                     Icon { name: "users", size: 16 }
                 }
                 span { class: "min-w-0 flex-1 truncate text-[14px] font-medium leading-5 text-ink", "Team map" }
+            }
+        }
+    }
+}
+
+/// The task board, below the Team Chat (stage 30.3): how many items are open.
+#[component]
+fn BoardRow() -> Element {
+    let ui = use_context::<Ui>();
+    let state = use_context::<Signal<State>>();
+    let open = (ui.board)();
+    let mut count = use_signal(|| 0usize);
+    use_effect(move || {
+        let _ = state.read().board_changed;
+        spawn(async move {
+            if let Ok(found) = crate::api::get("/api/board").await {
+                let open = found["items"].as_array().into_iter().flatten().filter(|i| !matches!(i["state"].as_str(), Some("done" | "failed" | "cancelled"))).count();
+                count.set(open);
+            }
+        });
+    });
+    rsx! {
+        div { class: "px-3 pb-1",
+            button { r#type: "button", "data-sidebar-board": true, "aria-pressed": "{open}", title: "Task board",
+                class: "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left outline-none hover:bg-raised/60 focus-visible:ring-2 focus-visible:ring-accent/60",
+                onclick: move |_| {
+                    let (mut board, mut map, mut showing) = (ui.board, ui.map, ui.showing_chat);
+                    board.set(!open);
+                    map.set(false);
+                    showing.set(!open);
+                },
+                span { class: if open { "grid size-9 shrink-0 place-items-center rounded-full bg-ink/[0.16] text-ink" } else { "grid size-9 shrink-0 place-items-center rounded-full bg-raised text-ink-secondary" },
+                    Icon { name: "check-circle", size: 16 }
+                }
+                span { class: "min-w-0 flex-1 truncate text-[14px] font-medium leading-5 text-ink", "Task board" }
+                if count() > 0 {
+                    span { class: "shrink-0 text-[12px] tabular-nums text-ink-tertiary", "{count}" }
+                }
             }
         }
     }
@@ -322,8 +363,9 @@ fn TeamChatRow(bot: Bot, selected: bool, on_select: EventHandler<String>) -> Ele
             button { r#type: "button", "data-sidebar-team-chat": true, "aria-current": if selected { "true" } else { "false" }, title: "Team Chat: every bot, together",
                 class: "flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-1.5 text-left outline-none hover:bg-raised/60 focus-visible:ring-2 focus-visible:ring-accent/60",
                 onclick: move |_| {
-                    let mut map = ui.map;
+                    let (mut map, mut board) = (ui.map, ui.board);
                     map.set(false);
+                    board.set(false);
                     on_select.call(id.clone());
                 },
                 span { class: "grid size-9 shrink-0 place-items-center rounded-full {ring}",

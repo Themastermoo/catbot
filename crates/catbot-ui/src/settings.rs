@@ -33,6 +33,8 @@ pub struct Ui {
     pub find: Signal<Option<String>>,
     /// The Team map shows in place of the chat.
     pub map: Signal<bool>,
+    /// The task board shows in place of the chat (stage 30.3).
+    pub board: Signal<bool>,
 }
 
 /// Their approval levels, in their words.

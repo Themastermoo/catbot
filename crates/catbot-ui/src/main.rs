@@ -57,6 +57,7 @@ mod inbox;
 mod mapcomposer;
 mod model_menu;
 mod teammap;
+mod board;
 mod panel;
 mod pets;
 #[cfg(feature = "desktop")]
@@ -202,7 +203,8 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let prefs = use_signal(|| None::<String>);
     let find = use_signal(|| None::<String>);
     let map = use_signal(|| false);
-    let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat, prefs, find, map });
+    let board = use_signal(|| false);
+    let ui = use_context_provider(|| settings::Ui { selected, settings_open, showing_chat, prefs, find, map, board });
     let notify_prefs = use_context_provider(|| Signal::new(notify::load()));
     let inbox = use_context_provider(inbox::Inbox::new);
     let depts = use_context_provider(|| Signal::new(departments::Depts::default()));
@@ -366,7 +368,9 @@ fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, proble
     let phone = if (ui.showing_chat)() { "" } else { "max-md:hidden" };
     rsx! {
         div { class: "relative flex h-full min-w-0 flex-1 {phone}",
-            if (ui.map)() {
+            if (ui.board)() {
+                board::Board {}
+            } else if (ui.map)() {
                 teammap::TeamMap {}
             } else {
                 MainView { open, problem: problem() }
