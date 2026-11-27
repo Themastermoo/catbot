@@ -194,39 +194,50 @@ pub fn BotSettings(bot: Bot) -> Element {
     let team_chat = bot.is_team_chat();
     rsx! {
                 div { class: "flex flex-col gap-4 pt-4",
-                    // Picture, colour and name.
-                    div { class: CARD,
-                        div { class: "mb-4 flex items-center gap-3",
-                            BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
-                            div { class: "min-w-0",
-                                div { class: "text-[15px] font-semibold text-ink truncate", "{bot.name}" }
-                                div { class: "text-[12px] text-ink-secondary", if channel { "Pick a colour" } else { "Its picture is in the Look tab" } }
+                    // Moo's order (2026-11-27): AI, instructions, name and role, then the rest. A
+                    // channel, which has no AI of its own, starts with its name.
+                    // Which AI, its model, backups and skills (the approval level is in its panel's
+                    // Approvals tab, Moo, 2026-11-27).
+                    div { class: CARD, hidden: channel,
+                        crate::engines::EnginePicker { bot: bot.clone(), saving: saving(), change }
+                        crate::engines::Backups { bot: bot.clone(), saving: saving(), change }
+                        crate::skills::BotSkills { bot: bot.clone(), saving: saving(), change }
+                    }
+                    if channel {
+                        // Its colour and name.
+                        div { class: CARD,
+                            div { class: "mb-4 flex items-center gap-3",
+                                BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
+                                div { class: "min-w-0",
+                                    div { class: "text-[15px] font-semibold text-ink truncate", "{bot.name}" }
+                                    div { class: "text-[12px] text-ink-secondary", if channel { "Pick a colour" } else { "Its picture is in the Look tab" } }
+                                }
                             }
-                        }
-                        // A bot's picture and colour are in its panel's Look tab (Moo, 2026-11-27); a
-                        // channel, which has no tabs, keeps its colour here.
-                        if channel {
-                            Colours { bot: bot.clone(), change }
-                        }
-                        label { class: "mt-4 {LABEL}", "Name"
-                            input {
-                                key: "{bot.id}-name",
-                                class: FIELD,
-                                maxlength: 60,
-                                value: "{bot.name}",
-                                onchange: {
-                                    let current = bot.name.clone();
-                                    move |e: FormEvent| {
-                                        let name = e.value().trim().to_string();
-                                        if !name.is_empty() && name != current {
-                                            change(json!({ "name": name }));
+                            // A bot's picture and colour are in its panel's Look tab (Moo, 2026-11-27); a
+                            // channel, which has no tabs, keeps its colour here.
+                            if channel {
+                                Colours { bot: bot.clone(), change }
+                            }
+                            label { class: "mt-4 {LABEL}", "Name"
+                                input {
+                                    key: "{bot.id}-name",
+                                    class: FIELD,
+                                    maxlength: 60,
+                                    value: "{bot.name}",
+                                    onchange: {
+                                        let current = bot.name.clone();
+                                        move |e: FormEvent| {
+                                            let name = e.value().trim().to_string();
+                                            if !name.is_empty() && name != current {
+                                                change(json!({ "name": name }));
+                                            }
                                         }
-                                    }
-                                },
+                                    },
+                                }
                             }
-                        }
-                        if !channel {
-                            crate::profile::RoleFields { bot: bot.clone(), change, field: FIELD, label_class: LABEL }
+                            if !channel {
+                                crate::profile::RoleFields { bot: bot.clone(), change, field: FIELD, label_class: LABEL }
+                            }
                         }
                     }
                     // Instructions.
@@ -252,15 +263,45 @@ pub fn BotSettings(bot: Bot) -> Element {
                             if team_chat { "The department's shared instructions. Saved when you click away; a bot can propose changes, which you approve." } else { "Saved when you click away. Used from its next message." }
                         }
                     }
+                    if !channel {
+                        // Its name and role.
+                        div { class: CARD,
+                            div { class: "mb-4 flex items-center gap-3",
+                                BotMark { picture: bot.picture.clone(), color: bot.color.clone(), initial: bot.initial(), size: 64, mark: bot.mark.clone(), state: bot.activity.mood() }
+                                div { class: "min-w-0",
+                                    div { class: "text-[15px] font-semibold text-ink truncate", "{bot.name}" }
+                                    div { class: "text-[12px] text-ink-secondary", if channel { "Pick a colour" } else { "Its picture is in the Look tab" } }
+                                }
+                            }
+                            // A bot's picture and colour are in its panel's Look tab (Moo, 2026-11-27); a
+                            // channel, which has no tabs, keeps its colour here.
+                            if channel {
+                                Colours { bot: bot.clone(), change }
+                            }
+                            label { class: "mt-4 {LABEL}", "Name"
+                                input {
+                                    key: "{bot.id}-name",
+                                    class: FIELD,
+                                    maxlength: 60,
+                                    value: "{bot.name}",
+                                    onchange: {
+                                        let current = bot.name.clone();
+                                        move |e: FormEvent| {
+                                            let name = e.value().trim().to_string();
+                                            if !name.is_empty() && name != current {
+                                                change(json!({ "name": name }));
+                                            }
+                                        }
+                                    },
+                                }
+                            }
+                            if !channel {
+                                crate::profile::RoleFields { bot: bot.clone(), change, field: FIELD, label_class: LABEL }
+                            }
+                        }
+                    }
                     if channel {
                         crate::channels::ChannelSettings { key: "{bot.id}-members", bot: bot.clone(), saving: saving(), change }
-                    }
-                    // Which AI, its model, backups and skills (the approval level is in its panel's
-                    // Approvals tab, Moo, 2026-11-27).
-                    div { class: CARD, hidden: channel,
-                        crate::engines::EnginePicker { bot: bot.clone(), saving: saving(), change }
-                        crate::engines::Backups { bot: bot.clone(), saving: saving(), change }
-                        crate::skills::BotSkills { bot: bot.clone(), saving: saving(), change }
                     }
                     // Codex.
                     div { class: "flex items-center justify-between gap-4 {CARD}", hidden: channel || !bot.codex_here,
