@@ -357,6 +357,10 @@ pub fn message(m: &Message, parent: Option<i64>) -> Value {
             if detail["teamUpdate"].is_object() {
                 note["teamUpdate"] = detail["teamUpdate"].clone();
             }
+            // A hand-off held back by the limits: shown as a full line, not a folded step.
+            if detail["handoffHeld"] == true {
+                note["held"] = json!(true);
+            }
             note
         }
         Role::Card => json!({ "role": "bot", "kind": "options", "card": detail["card"] }),

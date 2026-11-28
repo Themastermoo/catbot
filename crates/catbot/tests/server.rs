@@ -2402,7 +2402,7 @@ async fn a_bot_hands_work_on_within_the_limits_set() {
         ids.push(made["bot"]["id"].as_str().unwrap().to_string());
     }
     let (_, limits) = s.call("GET", "/api/handoffs", None).await;
-    assert_eq!(limits["handoffs"], json!({ "unlimited": false, "depth": 3, "replies": 6 }));
+    assert_eq!(limits["handoffs"], json!({ "unlimited": false, "depth": 3, "replies": 6, "roomDepth": 6, "roomReplies": 12 }));
     let replies = |page: &Value| -> Vec<String> {
         page["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "bot" && m["kind"] == "text").map(|m| m["botId"].as_str().unwrap_or_default().to_string()).collect()
     };
@@ -2447,12 +2447,16 @@ async fn a_bot_hands_work_on_within_the_limits_set() {
     let edges: Vec<(String, String)> = map["edges"].as_array().unwrap().iter().map(|e| (e["from"].as_str().unwrap().to_string(), e["to"].as_str().unwrap().to_string())).collect();
     assert!(edges.contains(&(ids[0].clone(), ids[1].clone())), "{map}");
 
-    // Bots of one department talk in its team chat, within the limits: three hand-offs deep.
+    // Bots of one department talk in its team chat, within the room limits (stage 32.20), here
+    // set to three hand-offs deep.
+    let (_, set) = s.call("PUT", "/api/handoffs", Some(json!({ "roomDepth": 3 }))).await;
+    assert_eq!((set["handoffs"]["depth"].as_u64(), set["handoffs"]["roomDepth"].as_u64()), (Some(3), Some(3)), "{set}");
     s.call("POST", "/api/departments", Some(json!({ "name": "Garden", "botIds": [ids[0], ids[1]] }))).await;
     let (_, list) = s.call("GET", "/api/bots", None).await;
     let room = list["bots"].as_array().unwrap().iter().find(|b| b["channel"]["teamChat"] == true && b["channel"]["department"] == "Garden").unwrap()["threadId"].as_str().unwrap().to_string();
     s.call("POST", &format!("/api/bots/{}/messages", ids[0]), Some(json!({ "text": "Again", "threadId": thread }))).await;
-    until(&mut events, "too deep", |f| f["kind"] == "message" && f["threadId"] == room.as_str() && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("3 deep"))).await;
+    let held = until(&mut events, "too deep", |f| f["kind"] == "message" && f["threadId"] == room.as_str() && f["message"]["tool"]["name"].as_str().is_some_and(|t| t.contains("3 deep"))).await;
+    assert_eq!(held["message"]["held"], true, "shown as a full line: {held}");
     until(&mut events, "report", |f| f["kind"] == "message" && f["threadId"] == thread.as_str() && f["message"]["role"] == "bot" && f["message"]["text"].as_str().is_some_and(|t| t.contains("in #Garden]"))).await;
     until(&mut events, "idle", |f| f["kind"] == "bot" && f["bot"]["id"] == ids[0].as_str() && f["bot"]["activity"] == "idle").await;
     let (_, page) = s.call("GET", &format!("/api/threads/{thread}/messages?limit=80"), None).await;

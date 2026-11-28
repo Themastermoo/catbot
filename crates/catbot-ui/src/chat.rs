@@ -70,6 +70,9 @@ pub enum Body {
     Reply(String),
     /// A step of the bot's work: a tool it used, or a note. `ok` is None while it runs.
     Step { name: String, ok: Option<bool> },
+    /// A hand-off the limits held back (stage 32.20): a full line, so the reason and where to
+    /// change it can be read.
+    Held(String),
     /// One bot handing the work to another (stage 29.12), by name: drawn as a chip with both.
     Handoff { from: String, to: String },
     /// A line about the team in its team chat (stage 30.2): whose, what kind ("handoff",
@@ -158,6 +161,10 @@ impl Msg {
                 let field = |k: &str| update[k].as_str().unwrap_or_default().to_string();
                 let name = wire["tool"]["name"].as_str().unwrap_or_default();
                 Body::TeamUpdate { bot_id: field("botId"), kind: field("kind"), thread: field("threadId"), chat_of: field("chatOf"), text: name.strip_prefix("notice: ").unwrap_or(name).to_string() }
+            }
+            ("activity", _) if wire["held"] == true => {
+                let name = wire["tool"]["name"].as_str().unwrap_or_default();
+                Body::Held(name.strip_prefix("notice: ").unwrap_or(name).to_string())
             }
             ("activity", _) if wire["handoff"].is_object() => Body::Handoff {
                 from: wire["handoff"]["from"].as_str().unwrap_or_default().to_string(),
@@ -1525,6 +1532,14 @@ fn Row(
             }
         }
         Body::Step { name, ok } => rsx! { Step { name: name.clone(), ok: *ok } },
+        Body::Held(text) => rsx! {
+            div { class: "flex w-full justify-start", "data-handoff-held": true,
+                p { class: "flex max-w-[min(var(--chat-prose-max),var(--chat-card-pct))] items-start gap-2 rounded-lg bg-inset px-3 py-1.5 text-[13px] leading-snug text-ink-secondary",
+                    span { class: "shrink-0 text-warning", "aria-hidden": "true", "⏸" }
+                    span { class: "min-w-0", "{text}" }
+                }
+            }
+        },
         Body::Handoff { from, to } => rsx! { HandoffChip { from: from.clone(), to: to.clone(), going: handing, at: full_time.clone() } },
         Body::TeamUpdate { bot_id: whose, kind, thread: there, chat_of, text } => rsx! {
             TeamUpdateLine { bot_id: whose.clone(), kind: kind.clone(), thread: there.clone(), chat_of: chat_of.clone(), text: text.clone(), at: full_time.clone(), when: when.clone() }
@@ -2623,6 +2638,8 @@ mod tests {
 
     #[test]
     fn a_team_update_knows_its_bot_and_chat() {
+        let held = Msg::from_wire(&json!({ "id": "n3", "at": 1.0, "role": "bot", "kind": "activity", "tool": { "name": "notice: Consultant asked Gamewright to help, but hand-offs go only 6 deep (Settings › Hand-offs).", "ok": true }, "held": true })).unwrap();
+        assert_eq!(held.body, Body::Held("Consultant asked Gamewright to help, but hand-offs go only 6 deep (Settings › Hand-offs).".into()));
         let line = Msg::from_wire(&json!({ "id": "n2", "at": 1.0, "role": "bot", "kind": "activity", "tool": { "name": "notice: Kiwi is waiting for you in its chat: Bash echo hi.", "ok": true }, "teamUpdate": { "botId": "k", "kind": "waiting", "threadId": "t9", "chatOf": "k" } })).unwrap();
         assert_eq!(line.body, Body::TeamUpdate { bot_id: "k".into(), kind: "waiting".into(), thread: "t9".into(), chat_of: "k".into(), text: "Kiwi is waiting for you in its chat: Bash echo hi.".into() });
         assert!(!line.is_step());

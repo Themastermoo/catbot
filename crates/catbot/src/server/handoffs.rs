@@ -32,11 +32,22 @@ pub struct Rules {
     pub depth: u32,
     /// How many bot replies one message may bring (the ones the person asked for always answer).
     pub replies: u32,
+    /// The same two in channels and team chats, where a lead hands out work and the bots it
+    /// asked answer back, so a chain runs longer (Moo, 2026-11-28: "Raise the limit for team chats").
+    pub room_depth: u32,
+    pub room_replies: u32,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Rules { unlimited: false, depth: 3, replies: 6 }
+        Rules { unlimited: false, depth: 3, replies: 6, room_depth: 6, room_replies: 12 }
+    }
+}
+
+impl Rules {
+    /// The limits for a channel or a team chat.
+    pub fn in_room(&self) -> Rules {
+        Rules { depth: self.room_depth, replies: self.room_replies, ..self.clone() }
     }
 }
 
@@ -44,7 +55,7 @@ pub fn rules(app: &App) -> Rules {
     app.with_store(|store| store.setting("handoffs")).flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
 }
 
-/// `GET /api/handoffs` and `PUT /api/handoffs` (`{ unlimited, depth, replies }`).
+/// `GET /api/handoffs` and `PUT /api/handoffs` (`{ unlimited, depth, replies, roomDepth, roomReplies }`).
 pub fn route(app: &App, body: Option<Value>) -> Answer {
     let Some(body) = body else {
         return Ok((StatusCode::OK, json!({ "handoffs": rules(app) })));
@@ -52,6 +63,8 @@ pub fn route(app: &App, body: Option<Value>) -> Answer {
     let mut wanted: Rules = serde_json::from_value(body).map_err(|e| bad(format!("hand-off limits: {e}")))?;
     wanted.depth = wanted.depth.clamp(1, 50);
     wanted.replies = wanted.replies.clamp(1, 200);
+    wanted.room_depth = wanted.room_depth.clamp(1, 50);
+    wanted.room_replies = wanted.room_replies.clamp(1, 200);
     app.try_store(|store| store.set_setting("handoffs", &json!(wanted))).map_err(super::fail)?;
     app.hub.send(json!({ "kind": "handoffs", "handoffs": wanted }));
     Ok((StatusCode::OK, json!({ "handoffs": wanted })))
@@ -341,7 +354,7 @@ async fn in_team_chat(app: &Arc<App>, owner: &Bot, target: &Bot, thread: &str, c
     let Some(asked) = turns::save_and_send(app, room, Role::Bot, ask, Some(&json!({ "botId": owner.id }))) else { return Vec::new() };
     let Some(asked_id) = asked["id"].as_str().and_then(super::wire::parse_message_id) else { return Vec::new() };
     let mut queue = VecDeque::new();
-    hand(app, room, &rules(app), &mut queue, 0, 1, Turn { bot: target.clone(), depth: 1, from: Some((owner.name.clone(), ask.to_string())), level: Some(owner.mode) });
+    hand(app, room, &rules(app).in_room(), &mut queue, 0, 1, Turn { bot: target.clone(), depth: 1, from: Some((owner.name.clone(), ask.to_string())), level: Some(owner.mode) });
     app.set_channel_busy(channel, true);
     channels::announce(app, channel);
     follow(app, channel, room, asked_id, queue, Place::Channel(channel.to_string()), 1, 0).await;
@@ -494,7 +507,7 @@ fn hand(app: &App, thread: &str, rules: &Rules, queue: &mut VecDeque<Turn>, done
     let from = turn.from.as_ref().map(|(name, _)| name.clone()).unwrap_or_default();
     if !rules.unlimited && turn.depth > rules.depth {
         let note = format!("{from} asked {} to help, but hand-offs go only {} deep (Settings › Hand-offs).", turn.bot.name, rules.depth);
-        turns::save_and_send(app, thread, Role::Note, &note, None);
+        turns::save_and_send(app, thread, Role::Note, &note, Some(&json!({ "handoffHeld": true })));
         return;
     }
     if !rules.unlimited && done + queue.len() as u32 >= allowed.max(rules.replies) {
@@ -502,7 +515,7 @@ fn hand(app: &App, thread: &str, rules: &Rules, queue: &mut VecDeque<Turn>, done
             "{from} asked {} to help, but one message brings at most {} bot replies (Settings › Hand-offs).",
             turn.bot.name, rules.replies
         );
-        turns::save_and_send(app, thread, Role::Note, &note, None);
+        turns::save_and_send(app, thread, Role::Note, &note, Some(&json!({ "handoffHeld": true })));
         return;
     }
     turns::save_and_send(app, thread, Role::Note, &format!("{from} handed this to {}.", turn.bot.name), None);
@@ -520,7 +533,10 @@ fn hand(app: &App, thread: &str, rules: &Rules, queue: &mut VecDeque<Turn>, done
 /// person asked for, who always answer; `done` how many have answered already.
 #[allow(clippy::too_many_arguments)]
 pub async fn follow(app: &Arc<App>, key: &str, thread: &str, request_id: i64, mut queue: VecDeque<Turn>, place: Place, asked: u32, mut done: u32) {
-    let rules = rules(app);
+    let rules = match &place {
+        Place::Channel(_) => rules(app).in_room(),
+        Place::Chat(_) => rules(app),
+    };
     let mut first = true;
     while let Some(turn) = queue.pop_front() {
         if !app.channel_busy(key) {
@@ -645,8 +661,11 @@ mod tests {
 
     #[test]
     fn the_limits_have_defaults_and_can_be_lifted() {
-        assert_eq!(Rules::default(), Rules { unlimited: false, depth: 3, replies: 6 });
+        assert_eq!(Rules::default(), Rules { unlimited: false, depth: 3, replies: 6, room_depth: 6, room_replies: 12 });
         let lifted: Rules = serde_json::from_value(json!({ "unlimited": true })).unwrap();
         assert!(lifted.unlimited && lifted.depth == 3);
+        // Limits saved before stage 32.20 get the room ones too.
+        let saved: Rules = serde_json::from_value(json!({ "unlimited": false, "depth": 4, "replies": 8 })).unwrap();
+        assert_eq!((saved.in_room().depth, saved.in_room().replies, saved.depth), (6, 12, 4));
     }
 }
