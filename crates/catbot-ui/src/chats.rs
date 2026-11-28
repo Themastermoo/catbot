@@ -20,6 +20,7 @@ const MENU_ITEM: &str = "flex w-full items-center gap-2 rounded-md px-2 py-1.5 t
 /// Shows a chat in this window, and has the bot open to it next time.
 pub fn open(mut state: Signal<State>, mut ui: Ui, bot_id: &str, thread: &str) {
     ui.map.set(false);
+    ui.board.set(false);
     if let Some(bot) = state.write().bots.iter_mut().find(|b| b.id == bot_id) {
         bot.thread_id = thread.to_string();
     }
@@ -34,6 +35,7 @@ pub fn open(mut state: Signal<State>, mut ui: Ui, bot_id: &str, thread: &str) {
 
 /// Branches a chat from one of its messages (`POST …/tasks/:thread/branch`) and shows the branch.
 pub fn branch(mut state: Signal<State>, mut ui: Ui, bot_id: String, thread: String, message: String) {
+    let started_selected = ui.selected.peek().clone();
     spawn(async move {
         let path = format!("/api/bots/{bot_id}/tasks/{thread}/branch");
         let Ok(answer) = api::post(&path, &json!({ "messageId": message })).await else { return };
@@ -44,13 +46,18 @@ pub fn branch(mut state: Signal<State>, mut ui: Ui, bot_id: String, thread: Stri
             }
             bot.thread_id = branch;
         }
-        ui.selected.set(Some(bot_id));
-        ui.showing_chat.set(true);
+        if *ui.selected.peek() == started_selected {
+            ui.map.set(false);
+            ui.board.set(false);
+            ui.selected.set(Some(bot_id));
+            ui.showing_chat.set(true);
+        }
     });
 }
 
 /// Starts a new chat with the bot and shows it.
 pub fn start(mut state: Signal<State>, mut ui: Ui, bot_id: String) {
+    let started_selected = ui.selected.peek().clone();
     spawn(async move {
         let Ok(answer) = api::post(&format!("/api/bots/{bot_id}/tasks"), &json!({})).await else { return };
         let Some(thread) = answer["task"]["threadId"].as_str().map(str::to_string) else { return };
@@ -60,8 +67,12 @@ pub fn start(mut state: Signal<State>, mut ui: Ui, bot_id: String) {
             }
             bot.thread_id = thread;
         }
-        ui.selected.set(Some(bot_id));
-        ui.showing_chat.set(true);
+        if *ui.selected.peek() == started_selected {
+            ui.map.set(false);
+            ui.board.set(false);
+            ui.selected.set(Some(bot_id));
+            ui.showing_chat.set(true);
+        }
     });
 }
 
@@ -285,7 +296,10 @@ fn ChatRow(bot_id: String, chat: Chat, current: bool, #[props(default)] folders:
         "text-ink-secondary hover:text-ink"
     };
     let faded = if chat.archived && !current { "text-ink-tertiary" } else { "" };
-    let has_draft = use_context::<Signal<crate::drafts::Drafts>>().read().get(&chat.id).is_some();
+    let drafts = use_context::<Signal<crate::drafts::Drafts>>();
+    let draft_chat_id = chat.id.clone();
+    let has_draft_memo = use_memo(use_reactive!(|draft_chat_id| drafts.read().get(&draft_chat_id).is_some()));
+    let has_draft = has_draft_memo();
 
     let (open_bot, open_thread) = (bot_id.clone(), chat.id.clone());
     let path = format!("/api/bots/{bot_id}/tasks/{}", chat.id);
@@ -313,7 +327,8 @@ fn ChatRow(bot_id: String, chat: Chat, current: bool, #[props(default)] folders:
     });
     let in_folder = chat.folder.clone();
     let input_id = format!("rename-{}", chat.id);
-    let select_input = format!(r#"const box = document.getElementById("{input_id}"); if (box) {{ box.focus(); box.select(); }}"#);
+    let input_id_js = serde_json::to_string(&input_id).unwrap_or_else(|_| "\"\"".into());
+    let select_input = format!(r#"const box = document.getElementById({input_id_js}); if (box) {{ box.focus(); box.select(); }}"#);
 
     // Saves the new name, unless it's empty or unchanged.
     let original = chat.title.clone();

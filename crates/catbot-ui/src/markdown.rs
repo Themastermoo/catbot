@@ -14,6 +14,29 @@ pub fn to_html(text: &str) -> String {
     render(text, false)
 }
 
+/// Cached `(is_formatted, html)` for historical chat replies so re-renders never re-parse
+/// unchanged Markdown. Bounded to 512 entries per UI thread.
+pub fn to_html_cached(text: &str) -> (bool, String) {
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, (bool, String)>> = RefCell::new(HashMap::new());
+    }
+    CACHE.with(|cell| {
+        if let Some(hit) = cell.borrow().get(text) {
+            return hit.clone();
+        }
+        let formatted = is_formatted(text);
+        let html = render(text, false);
+        let mut map = cell.borrow_mut();
+        if map.len() >= 512 {
+            map.clear();
+        }
+        map.insert(text.to_string(), (formatted, html.clone()));
+        (formatted, html)
+    })
+}
+
 /// A memory note as HTML: like a reply, with its `[[wikilinks]]` as links to other notes
 /// (`<a data-note="target">`, opened by the memory viewer).
 pub fn note_html(text: &str) -> String {
@@ -257,7 +280,7 @@ pub fn decode(text: &str) -> String {
 }
 
 /// Only addresses that open a web page or a mail: no `javascript:`, no `data:`, nothing local.
-fn safe_href(href: &str) -> bool {
+pub fn safe_href(href: &str) -> bool {
     let lower = href.trim().to_ascii_lowercase();
     lower.starts_with("https://") || lower.starts_with("http://") || lower.starts_with("mailto:")
 }

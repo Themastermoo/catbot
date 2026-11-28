@@ -5,7 +5,6 @@ use dioxus::prelude::*;
 use serde_json::{Value, json};
 
 use crate::api;
-use crate::live::State;
 
 const HEADING: &str = "text-[13px] font-semibold uppercase tracking-wide text-ink-tertiary";
 const FIELD: &str = "w-full rounded-lg bg-inset px-3 py-2 text-[13px] text-ink focus:outline-none focus:ring-1 focus:ring-accent";
@@ -16,7 +15,7 @@ const PRIMARY: &str = "rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibol
 /// Cloudflare's keys. The keys never come back from Catbot; only their last four characters.
 #[component]
 fn Hosts() -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut hosts = use_signal(|| Value::Null);
     let mut problem = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
@@ -24,7 +23,7 @@ fn Hosts() -> Element {
     let mut cloudflare_token = use_signal(String::new);
     let mut cloudflare_account = use_signal(String::new);
     use_effect(move || {
-        let _ = state.read().pages_changed;
+        let _ = (rev.pages)();
         spawn(async move {
             if let Ok(found) = api::get("/api/pages/hosts").await {
                 hosts.set(found["hosts"].clone());
@@ -124,12 +123,12 @@ fn Hosts() -> Element {
 
 #[component]
 pub fn PagesList() -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut list = use_signal(Vec::<Value>::new);
     let mut problem = use_signal(|| None::<String>);
     let mut confirm = use_signal(|| None::<String>);
     use_effect(move || {
-        let _ = state.read().pages_changed;
+        let _ = (rev.pages)();
         spawn(async move {
             match api::get("/api/pages").await {
                 Ok(found) => list.set(found["pages"].as_array().cloned().unwrap_or_default()),

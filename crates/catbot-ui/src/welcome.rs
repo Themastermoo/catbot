@@ -37,7 +37,7 @@ enum Way {
 
 #[component]
 pub fn Welcome(on_skip: EventHandler<()>) -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut engines = use_signal(Vec::<Value>::new);
     let mut asked = use_signal(|| 0u32);
     let phone = crate::link::is_phone();
@@ -49,7 +49,7 @@ pub fn Welcome(on_skip: EventHandler<()>) -> Element {
     let mut ready_on = use_signal(|| None::<String>);
     use_effect(move || {
         let _ = asked();
-        let _ = state.read().engines_changed;
+        let _ = (rev.engines)();
         spawn(async move {
             if let Ok(found) = api::get("/api/engines").await {
                 engines.set(found["engines"].as_array().cloned().unwrap_or_default());
@@ -137,7 +137,7 @@ pub fn Welcome(on_skip: EventHandler<()>) -> Element {
                                     }
                                 }
                             }
-                            if let Some(engine) = find(&provider()) {
+                            for engine in find(&provider()).into_iter() {
                                 crate::engines::EngineSetup { key: "{provider}", engine }
                             }
                         },

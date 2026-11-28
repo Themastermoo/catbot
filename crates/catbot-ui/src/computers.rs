@@ -44,6 +44,7 @@ fn state_words(state: &str) -> (&'static str, &'static str) {
 #[component]
 pub fn ComputersSettings() -> Element {
     let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut found = use_signal(|| Value::Null);
     let mut problem = use_signal(|| None::<String>);
     let mut confirm = use_signal(|| None::<(String, &'static str)>);
@@ -53,7 +54,7 @@ pub fn ComputersSettings() -> Element {
     // Bumped when a move is called off, so the Where menu shows where it still is.
     let mut kept = use_signal(|| 0u32);
     use_effect(move || {
-        let _ = state.read().computers_changed;
+        let _ = (rev.computers)();
         spawn(async move {
             match api::get("/api/computers").await {
                 Ok(list) => found.set(list),

@@ -93,7 +93,9 @@ pub fn BotPanel(bot: Bot) -> Element {
                                 ActivityPage { bot: bot.clone(), on_open: move |id| page.set(Some(Page::Inspector(Some(id)))) }
                             },
                             Page::Inspector(run) => rsx! {
-                                Inspector { key: "{run:?}", bot: bot.clone(), run }
+                                for run in std::iter::once(run) {
+                                    Inspector { key: "{run:?}", bot: bot.clone(), run }
+                                }
                             },
                         }
                     }
@@ -356,11 +358,13 @@ fn Library(bot: Bot, on_settings: EventHandler<()>) -> Element {
             if !mine.is_empty() {
                 div { class: LABEL, span { "Published pages" } }
                 for page in mine {
-                    a { key: "{page[\"id\"]}", href: "{page[\"url\"].as_str().unwrap_or_default()}", target: "_blank", rel: "noopener", class: "{MENU_ROW}", "data-panel-row": "page",
-                        span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "rocket", size: 14 } }
-                        span { class: "min-w-0 flex-1",
-                            span { class: "block truncate", "{page[\"title\"].as_str().unwrap_or(\"Page\")}" }
-                            span { class: "block truncate text-[12px] text-ink-tertiary", "{page[\"url\"].as_str().unwrap_or_default()}" }
+                    if let Some(url) = page["url"].as_str().filter(|u| crate::markdown::safe_href(u)) {
+                        a { key: "{page[\"id\"]}", href: "{url}", target: "_blank", rel: "noopener", class: "{MENU_ROW}", "data-panel-row": "page",
+                            span { class: "flex size-4 shrink-0 items-center justify-center text-ink-secondary", Icon { name: "rocket", size: 14 } }
+                            span { class: "min-w-0 flex-1",
+                                span { class: "block truncate", "{page[\"title\"].as_str().unwrap_or(\"Page\")}" }
+                                span { class: "block truncate text-[12px] text-ink-tertiary", "{url}" }
+                            }
                         }
                     }
                 }

@@ -5,17 +5,16 @@ use dioxus::prelude::*;
 use serde_json::{Value, json};
 
 use crate::api;
-use crate::live::State;
 
 const FIELD: &str = "w-20 rounded-lg bg-inset px-2 py-1.5 text-right text-[14px] text-ink focus:outline-none focus:ring-1 focus:ring-accent disabled:opacity-40";
 
 #[component]
 pub fn HandoffSettings() -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut rules = use_signal(|| None::<Value>);
     let mut problem = use_signal(|| None::<String>);
     use_effect(move || {
-        let _ = state.read().handoffs_changed;
+        let _ = (rev.handoffs)();
         spawn(async move {
             match api::get("/api/handoffs").await {
                 Ok(found) => rules.set(Some(found["handoffs"].clone())),

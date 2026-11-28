@@ -13,7 +13,6 @@ use serde_json::{Value, json};
 
 use crate::api;
 use crate::bots::Bot;
-use crate::live::State;
 
 const LABEL: &str = "block text-[12px] font-medium text-ink-secondary";
 const FIELD: &str = "mt-1 w-full rounded-lg bg-inset px-3 py-2 text-[14px] text-ink focus:outline-none focus:ring-1 focus:ring-accent";
@@ -32,14 +31,14 @@ fn listed_models(answer: &Value) -> Vec<(String, String)> {
 
 #[component]
 pub fn EnginePicker(bot: Bot, saving: bool, change: Callback<Value>) -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut engines = use_signal(Vec::<Value>::new);
     let mut models = use_signal(|| None::<(String, Vec<(String, String)>)>);
     let mut problem = use_signal(|| None::<String>);
 
     // The list, now and whenever a key is saved or forgotten anywhere.
     use_effect(move || {
-        let _ = state.read().engines_changed;
+        let _ = (rev.engines)();
         spawn(async move {
             match api::get("/api/engines").await {
                 Ok(answer) => engines.set(answer["engines"].as_array().cloned().unwrap_or_default()),
@@ -654,12 +653,12 @@ fn PlanBox(engine: Value) -> Element {
 /// is the person's own Codex's too, so it's shared both ways.
 #[component]
 fn CodexBox(engine: Value) -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut found = use_signal(|| Value::Null);
     let mut busy = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
     use_effect(move || {
-        let _ = state.read().engines_changed;
+        let _ = (rev.engines)();
         spawn(async move {
             match api::get("/api/engines/codex/account").await {
                 Ok(answer) => found.set(answer),
@@ -926,11 +925,11 @@ fn str_of(value: &Value, key: &str) -> String {
 /// A bot's backup AIs: who takes over, in order, when its own AI is at a limit (Usage → limits).
 #[component]
 pub fn Backups(bot: Bot, saving: bool, change: Callback<Value>) -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut engines = use_signal(Vec::<Value>::new);
     let mut adding = use_signal(|| None::<(String, String)>);
     use_effect(move || {
-        let _ = state.read().engines_changed;
+        let _ = (rev.engines)();
         spawn(async move {
             if let Ok(answer) = api::get("/api/engines").await {
                 engines.set(answer["engines"].as_array().cloned().unwrap_or_default());

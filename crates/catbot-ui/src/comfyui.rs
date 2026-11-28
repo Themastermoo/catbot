@@ -16,13 +16,14 @@ const LINK: &str = "rounded-md px-2 py-1 text-[12px] text-ink-secondary hover:bg
 #[component]
 pub fn ComfyUiSettings() -> Element {
     let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut now = use_signal(|| None::<Value>);
     let mut url = use_signal(String::new);
     let mut busy = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
     let mut refreshed = use_signal(|| 0u32);
     use_effect(move || {
-        let _ = state.read().apps_changed;
+        let _ = (rev.apps)();
         let _ = refreshed();
         spawn(async move {
             match api::get("/api/comfyui").await {

@@ -19,13 +19,13 @@ const LINK: &str = "rounded-md px-2 py-1 text-[12px] text-ink-secondary hover:bg
 
 #[component]
 pub fn AppsSettings() -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut list = use_signal(Vec::<Value>::new);
     let mut problem = use_signal(|| None::<String>);
     // None: the list. Some(Null): adding one. Some(server): changing it.
     let mut editing = use_signal(|| None::<Value>);
     use_effect(move || {
-        let _ = state.read().apps_changed;
+        let _ = (rev.apps)();
         spawn(async move {
             match api::get("/api/apps").await {
                 Ok(found) => list.set(found["servers"].as_array().cloned().unwrap_or_default()),
@@ -299,6 +299,7 @@ fn ServerForm(server: Value, on_done: EventHandler<()>) -> Element {
 #[component]
 fn ComposioSettings() -> Element {
     let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut now = use_signal(|| None::<Value>);
     let mut key = use_signal(String::new);
     let mut busy = use_signal(|| false);
@@ -311,7 +312,7 @@ fn ComposioSettings() -> Element {
     let mut confirm_off = use_signal(|| false);
     let mut refreshed = use_signal(|| 0u32);
     use_effect(move || {
-        let _ = state.read().apps_changed;
+        let _ = (rev.apps)();
         let _ = refreshed();
         spawn(async move {
             match api::get("/api/composio").await {

@@ -34,13 +34,13 @@ fn when_text(at: &str) -> String {
 
 #[component]
 pub fn TriggersDialog(on_close: EventHandler<()>, #[props(default)] edit: Option<Value>) -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut list = use_signal(Vec::<Value>::new);
     let mut problem = use_signal(|| None::<String>);
     // None: the list. Some(Null): a new trigger. Some(trigger): changing that one.
     let mut editing = use_signal(move || edit.clone());
     use_effect(move || {
-        let _ = state.read().triggers_changed;
+        let _ = (rev.triggers)();
         spawn(async move {
             match api::get("/api/triggers").await {
                 Ok(found) => list.set(found["triggers"].as_array().cloned().unwrap_or_default()),
@@ -567,7 +567,7 @@ fn TriggerForm(trigger: Value, on_done: EventHandler<()>) -> Element {
 /// card is how the person sees it and takes it back.
 #[component]
 pub fn TriggerCard(card: Value) -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let id = card["id"].as_str().unwrap_or_default().to_string();
     let action = card["action"].as_str().unwrap_or_default().to_string();
     let said = card["said"].as_str().unwrap_or("A trigger changed").to_string();
@@ -579,7 +579,7 @@ pub fn TriggerCard(card: Value) -> Element {
     let mut editing = use_signal(|| false);
     let look_id = id.clone();
     use_effect(move || {
-        let _ = state.read().triggers_changed;
+        let _ = (rev.triggers)();
         let path = format!("/api/triggers/{look_id}");
         spawn(async move {
             match api::get(&path).await {

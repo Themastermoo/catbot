@@ -62,14 +62,38 @@ pub fn load() -> Drafts {
     read().and_then(|saved| serde_json::from_str(&saved).ok()).unwrap_or_default()
 }
 
-/// Keeps a chat's draft, here and on this device.
+/// Keeps a chat's draft in memory immediately and debounces persistence to disk/storage.
 pub fn keep(mut drafts: Signal<Drafts>, thread: &str, draft: Draft) {
-    if drafts.peek().clone().set(thread, draft.clone())
-        && drafts.write().set(thread, draft)
-        && let Ok(saved) = serde_json::to_string(&*drafts.peek())
-    {
-        write(&saved);
+    let changed = {
+        let current = drafts.peek();
+        let wanted = (!draft.is_empty()).then_some(&draft);
+        current.get(thread) != wanted
+    };
+    if !changed {
+        return;
     }
+    let cleared = draft.is_empty();
+    if !drafts.write().set(thread, draft) {
+        return;
+    }
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SAVE_GEN: AtomicU64 = AtomicU64::new(0);
+    let seq = SAVE_GEN.fetch_add(1, Ordering::SeqCst) + 1;
+    if cleared {
+        if let Ok(saved) = serde_json::to_string(&*drafts.peek()) {
+            write(&saved);
+        }
+        return;
+    }
+    spawn(async move {
+        crate::events::pause(400).await;
+        if SAVE_GEN.load(Ordering::SeqCst) != seq {
+            return;
+        }
+        if let Ok(saved) = serde_json::to_string(&*drafts.peek()) {
+            write(&saved);
+        }
+    });
 }
 
 #[cfg(target_arch = "wasm32")]

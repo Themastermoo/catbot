@@ -54,19 +54,24 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
     let mut unfolded = use_signal(HashSet::<String>::new);
     let state = use_context::<Signal<State>>();
     let ui = use_context::<Ui>();
-    // Ctrl+, (⌘, on a Mac) opens Settings, as in MausBot.
+    // Ctrl+, (⌘, on a Mac) opens Settings, as in MausBot. Deduplicated and cleaned up on unmount.
     use_hook(|| {
         spawn(async move {
             let mut keys = document::eval(
-                r#"document.addEventListener("keydown", (event) => {
+                r#"if (window.__catbotSettingsKey) document.removeEventListener("keydown", window.__catbotSettingsKey);
+                window.__catbotSettingsKey = (event) => {
                     if ((event.ctrlKey || event.metaKey) && !event.shiftKey && !event.altKey && event.key === ",") { event.preventDefault(); dioxus.send("settings"); }
-                });"#,
+                };
+                document.addEventListener("keydown", window.__catbotSettingsKey);"#,
             );
             while keys.recv::<String>().await.is_ok() {
                 let mut prefs = ui.prefs;
                 prefs.set(Some("general".into()));
             }
         });
+    });
+    use_drop(|| {
+        document::eval(r#"if (window.__catbotSettingsKey) { document.removeEventListener("keydown", window.__catbotSettingsKey); delete window.__catbotSettingsKey; }"#);
     });
     let q = query.read().trim().to_lowercase();
     let look = use_context::<Signal<crate::looks::Looks>>();
@@ -213,6 +218,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                         div { class: "px-2 py-6 text-center text-[13px] text-ink-secondary", "Nothing matches “{query}”" }
                     }
                     for (group, members) in grouped {
+                        div { key: "dept-group-{group.as_deref().unwrap_or(\"\")}", class: "contents",
                         if let Some(name) = group.clone() {
                             // The department's team chat opens from its name (Moo, 2026-11-27).
                             {
@@ -266,6 +272,7 @@ pub fn Sidebar(bots: ReadSignal<Vec<Bot>>, selected: Signal<Option<String>>) -> 
                                     on_departments: move |o| department_dialog.set(Some(o)),
                                 }
                             }
+                        }
                         }
                     }
                 }
@@ -326,11 +333,11 @@ fn TeamMapRow() -> Element {
 #[component]
 fn BoardRow() -> Element {
     let ui = use_context::<Ui>();
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let open = (ui.board)();
     let mut count = use_signal(|| 0usize);
     use_effect(move || {
-        let _ = state.read().board_changed;
+        let _ = (rev.board)();
         spawn(async move {
             if let Ok(found) = crate::api::get("/api/board").await {
                 let open = found["items"].as_array().into_iter().flatten().filter(|i| !matches!(i["state"].as_str(), Some("done" | "failed" | "cancelled"))).count();
@@ -461,11 +468,17 @@ fn BotRow(
         "[--row:var(--color-panel)] max-md:[--row:var(--color-app)] bg-[var(--row)] hover:[--row:color-mix(in_srgb,var(--color-ink)_6%,var(--color-panel))]"
     };
     // A draft left in the bot's open chat shows instead, unless the bot is busy or asking.
-    let draft = use_context::<Signal<crate::drafts::Drafts>>()
-        .read()
-        .get(&bot.thread_id)
-        .filter(|_| !selected && bot.activity == Activity::Idle)
-        .map(|d| d.line());
+    // Memoized per row so typing in one chat never re-renders unrelated sidebar rows.
+    let drafts = use_context::<Signal<crate::drafts::Drafts>>();
+    let draft_thread = bot.thread_id.clone();
+    let show_draft = !selected && bot.activity == Activity::Idle;
+    let draft_memo = use_memo(use_reactive!(|(draft_thread, show_draft)| {
+        if !show_draft {
+            return None;
+        }
+        drafts.read().get(&draft_thread).map(|d| d.line())
+    }));
+    let draft = draft_memo();
     let preview = if waiting { "Waiting for you…".to_string() } else { bot.preview() };
     let line_color = if waiting { "text-warning" } else { "text-ink-secondary" };
     let fold_label = if expanded { format!("Hide {} chats", bot.name) } else { format!("Show {} chats", bot.name) };
@@ -599,12 +612,12 @@ fn BotRow(
 #[component]
 fn Footer(bot_count: usize, on_open: EventHandler<Open>) -> Element {
     let mut menu = use_signal(|| false);
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     // Shown on their rows: how many triggers are on, and whether any apps are connected.
     let mut triggers = use_signal(|| (0usize, 0usize));
     let mut apps = use_signal(|| 0usize);
     use_effect(move || {
-        let _ = state.read().triggers_changed;
+        let _ = (rev.triggers)();
         spawn(async move {
             if let Ok(found) = crate::api::get("/api/triggers").await {
                 let list = found["triggers"].as_array().cloned().unwrap_or_default();
@@ -613,7 +626,7 @@ fn Footer(bot_count: usize, on_open: EventHandler<Open>) -> Element {
         });
     });
     use_effect(move || {
-        let _ = state.read().apps_changed;
+        let _ = (rev.apps)();
         spawn(async move {
             if let Ok(found) = crate::api::get("/api/apps").await {
                 apps.set(found["servers"].as_array().map(|s| s.iter().filter(|a| a["enabled"] != false).count()).unwrap_or(0));

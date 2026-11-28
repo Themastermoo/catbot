@@ -6,7 +6,6 @@ use serde_json::{Value, json};
 
 use crate::api;
 use crate::bots::Bot;
-use crate::live::State;
 
 const HEADING: &str = "text-[13px] font-semibold uppercase tracking-wide text-ink-tertiary";
 const FIELD: &str = "w-full rounded-lg bg-inset px-3 py-2 text-[13px] text-ink focus:outline-none focus:ring-1 focus:ring-accent";
@@ -15,10 +14,10 @@ const PRIMARY: &str = "rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibol
 
 /// The library's skills: (name, description).
 fn use_library() -> Signal<Vec<(String, String, Vec<String>)>> {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut found = use_signal(Vec::new);
     use_effect(move || {
-        let _ = state.read().skills_changed;
+        let _ = (rev.skills)();
         spawn(async move {
             if let Ok(answer) = api::get("/api/skills").await {
                 found.set(

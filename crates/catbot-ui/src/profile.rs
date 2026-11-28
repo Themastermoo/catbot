@@ -327,13 +327,13 @@ pub fn HistoryCard(bot: Bot) -> Element {
 /// back, or deleted for good.
 #[component]
 pub fn ArchivedBots() -> Element {
-    let state = use_context::<Signal<crate::live::State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut list = use_signal(Vec::<Value>::new);
     let mut open = use_signal(|| false);
     let mut confirm = use_signal(|| None::<String>);
     let mut problem = use_signal(|| None::<String>);
     use_effect(move || {
-        let _ = state.read().archived_changed;
+        let _ = (rev.archived)();
         spawn(async move {
             if let Ok(found) = api::get("/api/archived-bots").await {
                 list.set(found["bots"].as_array().cloned().unwrap_or_default());

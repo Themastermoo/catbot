@@ -7,7 +7,6 @@ use qrcode::{QrCode, render::svg};
 use serde_json::Value;
 
 use crate::api;
-use crate::live::State;
 
 const ICON_BUTTON: &str = "flex size-10 items-center justify-center rounded-md text-ink-secondary hover:bg-control hover:text-ink";
 
@@ -29,7 +28,7 @@ fn encode(text: &str) -> String {
 
 /// A code shown for typing: "ABCDE-FGHJK".
 fn spaced(code: &str) -> String {
-    if code.len() == 10 { format!("{}-{}", &code[..5], &code[5..]) } else { code.to_string() }
+    if code.is_ascii() && code.len() == 10 { format!("{}-{}", &code[..5], &code[5..]) } else { code.to_string() }
 }
 
 /// The QR code as an SVG picture, dark on light so any camera reads it.
@@ -55,7 +54,7 @@ fn seen(at: Option<&str>) -> String {
 #[component]
 /// `embedded`: as a page of the Settings window, without its own frame.
 pub fn DevicesDialog(on_close: EventHandler<()>, #[props(default)] embedded: bool) -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut overview = use_signal(|| None::<Value>);
     let mut problem = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
@@ -66,7 +65,7 @@ pub fn DevicesDialog(on_close: EventHandler<()>, #[props(default)] embedded: boo
 
     // Fetched when the dialog opens and whenever a `devices` frame says something changed.
     use_effect(move || {
-        let _ = state.read().devices_changed;
+        let _ = (rev.devices)();
         spawn(async move {
             match api::get("/api/devices").await {
                 Ok(answer) => {
@@ -275,14 +274,14 @@ pub fn DevicesDialog(on_close: EventHandler<()>, #[props(default)] embedded: boo
 /// each way in, as MausBot's "How phones reach" group.
 #[component]
 fn Reach() -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut reach = use_signal(|| None::<Value>);
     let mut busy = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
     let mut checks = use_signal(|| None::<Vec<Value>>);
     let mut checking = use_signal(|| false);
     use_effect(move || {
-        let _ = state.read().devices_changed;
+        let _ = (rev.devices)();
         spawn(async move {
             if let Ok(answer) = api::get("/api/devices/reach").await {
                 reach.set(Some(answer));

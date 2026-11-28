@@ -41,7 +41,9 @@ pub async fn own(method: &str, path: &str, body: Option<&Value>) -> Result<(u16,
     #[cfg(not(target_arch = "wasm32"))]
     let (status, text) = if crate::link::has_own() {
         let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-        let mut request = client().request(method, format!("http://{}{path}", crate::local::ADDRESS));
+        let mut request = client()
+            .request(method, format!("http://{}{path}", crate::local::ADDRESS))
+            .timeout(std::time::Duration::from_secs(30));
         if let Some(body) = body {
             request = request.json(body);
         }
@@ -119,7 +121,7 @@ async fn send(method: &str, path: &str, body: Option<&Value>) -> Result<(u16, St
 #[cfg(not(target_arch = "wasm32"))]
 async fn send(method: &str, path: &str, body: Option<&Value>) -> Result<(u16, String), String> {
     let method = reqwest::Method::from_bytes(method.as_bytes()).map_err(|e| e.to_string())?;
-    let mut request = request(method, path);
+    let mut request = request(method, path).timeout(std::time::Duration::from_secs(30));
     if let Some(body) = body {
         request = request.json(body);
     }
@@ -148,6 +150,7 @@ pub async fn upload(path: &str, name: &str, mime: &str, bytes: Vec<u8>) -> Resul
     #[cfg(not(target_arch = "wasm32"))]
     let (status, text) = {
         let response = request(reqwest::Method::POST, path)
+            .timeout(std::time::Duration::from_secs(60))
             .header("content-type", mime)
             .header("x-file-name", name)
             .body(bytes)
@@ -177,7 +180,12 @@ pub async fn post_for_bytes(path: &str, body: &Value) -> Result<(Vec<u8>, String
     };
     #[cfg(not(target_arch = "wasm32"))]
     let (status, kind, bytes) = {
-        let response = request(reqwest::Method::POST, path).json(body).send().await.map_err(|e| format!("Catbot didn't answer at {} ({e})", server()))?;
+        let response = request(reqwest::Method::POST, path)
+            .timeout(std::time::Duration::from_secs(60))
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| format!("Catbot didn't answer at {} ({e})", server()))?;
         let status = response.status().as_u16();
         check_paired(status);
         let kind = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default().to_string();
@@ -195,7 +203,13 @@ pub async fn post_for_bytes(path: &str, body: &Value) -> Result<(Vec<u8>, String
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn from_home(path: &str) -> Result<Vec<u8>, String> {
     let link = crate::link::current().ok_or("this phone isn't paired with your PC")?;
-    let response = client().get(format!("{}{path}", link.url)).bearer_auth(link.key).send().await.map_err(|e| format!("your PC didn't answer ({e})"))?;
+    let response = client()
+        .get(format!("{}{path}", link.url))
+        .timeout(std::time::Duration::from_secs(30))
+        .bearer_auth(link.key)
+        .send()
+        .await
+        .map_err(|e| format!("your PC didn't answer ({e})"))?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         return Err(format!("your PC answered {status}"));
@@ -211,7 +225,11 @@ pub async fn from_home(_path: &str) -> Result<Vec<u8>, String> {
 /// A file's bytes (an attachment, say), with this device's key when it's paired.
 #[cfg(not(target_arch = "wasm32"))]
 pub async fn bytes(path: &str) -> Result<Vec<u8>, String> {
-    let response = request(reqwest::Method::GET, path).send().await.map_err(|e| e.to_string())?;
+    let response = request(reqwest::Method::GET, path)
+        .timeout(std::time::Duration::from_secs(30))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     let status = response.status().as_u16();
     check_paired(status);
     if !(200..300).contains(&status) {
@@ -225,5 +243,12 @@ pub async fn bytes(path: &str) -> Result<Vec<u8>, String> {
 pub fn client() -> reqwest::Client {
     use std::sync::OnceLock;
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new).clone()
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        })
+        .clone()
 }

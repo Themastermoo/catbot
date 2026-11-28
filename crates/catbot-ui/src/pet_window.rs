@@ -205,8 +205,9 @@ fn Opener(others: Vec<PetInfo>) -> Element {
     rsx! {}
 }
 
-/// What the pet is doing.
-#[derive(Clone, Copy, Debug, PartialEq)]
+/// Discrete reactive pose state (no continuous physics floats inside, so physics ticks
+/// never trigger 30 FPS Dioxus re-renders).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Act {
     Walk,
     Idle,
@@ -215,20 +216,23 @@ enum Act {
     /// The long nap (stage 31): curled up after a long while with nothing to do, until its bot
     /// starts work or it has slept enough.
     Nap,
-    /// Falling back to the ground after being put down, at this speed (px/s, physical).
-    Fall(f64),
-    /// Being carried: where it was last tick, and since when it's held still (seconds).
-    Carried(i32, i32, f64),
-    /// Leaping up onto a window (or across), from one window position to another, `t` of the
-    /// way (0..1).
-    Leap((i32, i32), (i32, i32), f64),
-    /// Landing, for this much longer (seconds).
-    Land(f64),
+    Fall,
+    Carried,
+    Leap,
+    Land,
     Chat,
-    /// Ready to pounce on the mouse pointer (stage 29.8): this much longer, then at `x`
-    /// (physical pixels, where the pointer stands).
+    Crouch,
+    Pounce,
+}
+
+/// Continuous physics parameters kept locally inside the animation loop.
+#[derive(Clone, Copy, Debug)]
+enum Motion {
+    Fall(f64),
+    Carried(i32, i32, f64),
+    Leap((i32, i32), (i32, i32), f64),
+    Land(f64),
     Crouch(f64, i32),
-    /// Pouncing, from one window position to another, `t` of the way.
     Pounce((i32, i32), (i32, i32), f64),
 }
 
@@ -333,17 +337,17 @@ fn leap_to(surfaces: &[crate::pet_tops::Surface], x: i32, feet: i32, reach: i32,
 /// work it sits at what its bot is doing (stage 29.8): a laptop, a drafting table or a book.
 fn pose(act: Act, mood: &str, doing: Option<&str>) -> &'static str {
     match act {
-        Act::Crouch(..) => "crouch",
-        Act::Pounce(..) => "jump",
+        Act::Crouch => "crouch",
+        Act::Pounce => "jump",
         Act::Walk => "walk",
         Act::Sit => "sit",
         Act::Sleep => "sleep",
         Act::Nap => "nap",
-        Act::Leap(..) => "jump",
-        Act::Fall(_) => "air",
-        Act::Land(_) => "land",
+        Act::Leap => "jump",
+        Act::Fall => "air",
+        Act::Land => "land",
         // Carried by the scruff, swinging (stage 31; `drag` was the quieter hang before it).
-        Act::Carried(..) => "dangle",
+        Act::Carried => "dangle",
         Act::Chat | Act::Idle => match mood {
             "working" => match doing {
                 Some("coding") => "coding",
@@ -489,10 +493,19 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
             // shows after the hand last moved.
             let mut quiet = 0.0f64;
             let mut swing_left = 0.0f64;
+            let mut cursor_check = 0.0f64;
+            let mut motion: Option<Motion> = None;
             loop {
-                crate::events::pause(TICK.as_millis() as u32).await;
-                let dt = ticked.elapsed().as_secs_f64().min(0.2);
+                let is_quiet_act = matches!(*act.peek(), Act::Idle | Act::Sit | Act::Sleep | Act::Nap | Act::Chat);
+                let sleep_ms = if is_quiet_act { 250u32 } else { TICK.as_millis() as u32 };
+                crate::events::pause(sleep_ms).await;
+                let dt = ticked.elapsed().as_secs_f64().min(0.35);
                 ticked = std::time::Instant::now();
+                let now = *act.peek();
+                if now == Act::Chat {
+                    motion = None;
+                    continue;
+                }
                 let window = &desktop.window;
                 let scale = window.scale_factor();
                 let Ok(at) = window.outer_position() else { continue };
@@ -505,11 +518,10 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                     looked = 0.5;
                     surfaces = crate::pet_tops::surfaces(span(&desktop));
                 }
-                let now = *act.peek();
                 // A bot at work or waiting holds the pet where it stands.
                 let busy = *mood.peek() != "idle";
-                quiet = if busy || matches!(now, Act::Carried(..) | Act::Chat | Act::Nap) { 0.0 } else { quiet + dt };
-                if !matches!(now, Act::Carried(..)) && *swung.peek() != 0 {
+                quiet = if busy || matches!(now, Act::Carried | Act::Chat | Act::Nap) { 0.0 } else { quiet + dt };
+                if now != Act::Carried && *swung.peek() != 0 {
                     swung.set(0);
                 }
                 // A one-shot pose holds it too while it plays; then the next lined up, if any.
@@ -531,13 +543,14 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                     let middle = at.x + w / 2;
                     let same = surfaces.iter().filter(|s| s.id == p.id).min_by_key(|s| (s.y - p.feet).abs() + (s.left - p.left).abs());
                     match same {
-                        Some(s) if !matches!(now, Act::Carried(..) | Act::Chat | Act::Leap(..) | Act::Fall(_)) => {
+                        Some(s) if !matches!(now, Act::Carried | Act::Chat | Act::Leap | Act::Fall) => {
                             let (dx, dy) = (s.left - p.left, s.y - p.feet);
                             if (dx, dy) != (0, 0) && s.right - s.left == p.right - p.left {
                                 window.set_outer_position(PhysicalPosition::new(at.x + dx, at.y + dy));
                             } else if middle < s.left || middle > s.right {
                                 perch = None;
-                                act.set(Act::Fall(0.0));
+                                motion = Some(Motion::Fall(0.0));
+                                act.set(Act::Fall);
                                 continue;
                             }
                             perch = Some(Perch { id: s.id.clone(), left: s.left, right: s.right, feet: s.y });
@@ -545,8 +558,9 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         Some(_) => {}
                         None => {
                             perch = None;
-                            if !matches!(now, Act::Carried(..) | Act::Chat | Act::Leap(..)) {
-                                act.set(Act::Fall(0.0));
+                            if !matches!(now, Act::Carried | Act::Chat | Act::Leap) {
+                                motion = Some(Motion::Fall(0.0));
+                                act.set(Act::Fall);
                                 continue;
                             }
                         }
@@ -558,8 +572,12 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                 };
                 match now {
                     Act::Chat => continue,
-                    Act::Carried(x, y, still) => {
+                    Act::Carried => {
                         perch = None;
+                        let (x, y, still) = match motion {
+                            Some(Motion::Carried(x, y, still)) => (x, y, still),
+                            _ => (at.x, at.y, 0.0),
+                        };
                         let held = if (at.x, at.y) == (x, y) { still + dt } else { 0.0 };
                         // It swings behind the hand, and hangs straight again a moment after.
                         let way = swing(at.x - x, (2.0 * scale) as i32);
@@ -568,14 +586,18 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                             swung.set(way);
                         }
                         if held > 0.35 && pressed.peek().is_none() {
-                            act.set(Act::Fall(0.0));
+                            motion = Some(Motion::Fall(0.0));
+                            act.set(Act::Fall);
                         } else {
-                            act.set(Act::Carried(at.x, at.y, held));
+                            motion = Some(Motion::Carried(at.x, at.y, held));
                         }
                         continue;
                     }
-                    Act::Fall(speed) => {
-                        let speed = speed + 2400.0 * scale * dt;
+                    Act::Fall => {
+                        let speed = match motion {
+                            Some(Motion::Fall(s)) => s,
+                            _ => 0.0,
+                        } + 2400.0 * scale * dt;
                         let y = at.y + (speed * dt) as i32;
                         // Onto the first window top under it, or the ground.
                         let floor = below(&surfaces, at.x + w / 2, at.y + h).filter(|p| p.feet - h <= ground);
@@ -583,40 +605,73 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         if y >= stop {
                             window.set_outer_position(PhysicalPosition::new(at.x, stop));
                             perch = floor;
-                            act.set(Act::Land(LANDING));
+                            motion = Some(Motion::Land(LANDING));
+                            act.set(Act::Land);
                             left_for = 1.5;
                         } else {
                             window.set_outer_position(PhysicalPosition::new(at.x, y));
-                            act.set(Act::Fall(speed));
+                            motion = Some(Motion::Fall(speed));
                         }
                         continue;
                     }
-                    Act::Leap(from, to, t) => {
+                    Act::Leap => {
+                        let Some(Motion::Leap(from, to, t)) = motion else {
+                            act.set(Act::Idle);
+                            continue;
+                        };
                         let t = t + dt / LEAP;
                         let (x, y) = arc(from, to, t, 70.0 * scale);
                         window.set_outer_position(PhysicalPosition::new(x, y));
-                        act.set(if t >= 1.0 { Act::Land(LANDING) } else { Act::Leap(from, to, t) });
-                        continue;
-                    }
-                    Act::Land(left) => {
-                        placed = Some((top, at.y));
-                        act.set(if left - dt <= 0.0 { Act::Idle } else { Act::Land(left - dt) });
-                        continue;
-                    }
-                    Act::Crouch(left, x) => {
-                        if left - dt > 0.0 {
-                            act.set(Act::Crouch(left - dt, x));
+                        if t >= 1.0 {
+                            motion = Some(Motion::Land(LANDING));
+                            act.set(Act::Land);
                         } else {
-                            let to = (x - w / 2).clamp(lo, hi - w);
-                            act.set(Act::Pounce((at.x, at.y), (to, top), 0.0));
+                            motion = Some(Motion::Leap(from, to, t));
                         }
                         continue;
                     }
-                    Act::Pounce(from, to, t) => {
+                    Act::Land => {
+                        placed = Some((top, at.y));
+                        let left = match motion {
+                            Some(Motion::Land(l)) => l - dt,
+                            _ => 0.0,
+                        };
+                        if left <= 0.0 {
+                            motion = None;
+                            act.set(Act::Idle);
+                        } else {
+                            motion = Some(Motion::Land(left));
+                        }
+                        continue;
+                    }
+                    Act::Crouch => {
+                        let Some(Motion::Crouch(left, x)) = motion else {
+                            act.set(Act::Idle);
+                            continue;
+                        };
+                        if left - dt > 0.0 {
+                            motion = Some(Motion::Crouch(left - dt, x));
+                        } else {
+                            let to = (x - w / 2).clamp(lo, hi - w);
+                            motion = Some(Motion::Pounce((at.x, at.y), (to, top), 0.0));
+                            act.set(Act::Pounce);
+                        }
+                        continue;
+                    }
+                    Act::Pounce => {
+                        let Some(Motion::Pounce(from, to, t)) = motion else {
+                            act.set(Act::Idle);
+                            continue;
+                        };
                         let t = t + dt / POUNCE;
                         let (x, y) = arc(from, to, t, 26.0 * scale);
                         window.set_outer_position(PhysicalPosition::new(x, y));
-                        act.set(if t >= 1.0 { Act::Land(LANDING) } else { Act::Pounce(from, to, t) });
+                        if t >= 1.0 {
+                            motion = Some(Motion::Land(LANDING));
+                            act.set(Act::Land);
+                        } else {
+                            motion = Some(Motion::Pounce(from, to, t));
+                        }
                         continue;
                     }
                     _ => {}
@@ -632,7 +687,8 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                 };
                 if (at.y - top).abs() > 2 && (at.y - floor_y).abs() > 2 {
                     perch = None;
-                    act.set(Act::Fall(0.0));
+                    motion = Some(Motion::Fall(0.0));
+                    act.set(Act::Fall);
                     continue;
                 }
                 // Nothing to do for a long while: a yawn, and it curls up for the long nap.
@@ -644,19 +700,22 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                 }
                 // The pointer, still for a moment on the ground ahead: crouch, wiggle, pounce.
                 pounced_ago += dt;
-                if !busy && pounced_ago > POUNCE_EVERY && matches!(now, Act::Walk | Act::Idle | Act::Sit)
-                    && let Some((cx, cy, still)) = crate::pet_tops::cursor(span(&desktop))
-                {
-                    let middle = at.x + w / 2;
-                    let feet = at.y + h;
-                    let off = (cx - middle).abs();
-                    let near_floor = cy <= feet + (10.0 * scale) as i32 && cy >= feet - (150.0 * scale) as i32;
-                    let in_reach = off >= (40.0 * scale) as i32 && off <= (300.0 * scale) as i32 && cx > lo + w / 2 && cx < hi - w / 2;
-                    if near_floor && in_reach && still.as_secs_f64() > 0.6 && still.as_secs_f64() < 4.0 {
-                        pounced_ago = 0.0;
-                        facing_left.set(cx < middle);
-                        act.set(Act::Crouch(1.2, cx));
-                        continue;
+                cursor_check -= dt;
+                if !busy && pounced_ago > POUNCE_EVERY && cursor_check <= 0.0 && matches!(now, Act::Walk | Act::Idle | Act::Sit) {
+                    cursor_check = 0.25;
+                    if let Some((cx, cy, still)) = crate::pet_tops::cursor(span(&desktop)) {
+                        let middle = at.x + w / 2;
+                        let feet = at.y + h;
+                        let off = (cx - middle).abs();
+                        let near_floor = cy <= feet + (10.0 * scale) as i32 && cy >= feet - (150.0 * scale) as i32;
+                        let in_reach = off >= (40.0 * scale) as i32 && off <= (300.0 * scale) as i32 && cx > lo + w / 2 && cx < hi - w / 2;
+                        if near_floor && in_reach && still.as_secs_f64() > 0.6 && still.as_secs_f64() < 4.0 {
+                            pounced_ago = 0.0;
+                            facing_left.set(cx < middle);
+                            motion = Some(Motion::Crouch(1.2, cx));
+                            act.set(Act::Crouch);
+                            continue;
+                        }
                     }
                 }
                 left_for -= dt;
@@ -669,7 +728,8 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                     if edge && perch.is_some() && chance(&mut seed) < 0.35 {
                         // Off the edge of a window: down it hops.
                         perch = None;
-                        act.set(Act::Fall(0.0));
+                        motion = Some(Motion::Fall(0.0));
+                        act.set(Act::Fall);
                         continue;
                     }
                     if x <= lo {
@@ -702,14 +762,16 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         let middle = at.x + w / 2;
                         if let Some((land, onto)) = leap_to(&surfaces, middle, at.y + h, (420.0 * scale) as i32, w / 2, chance(&mut seed)) {
                             facing_left.set(land < middle);
-                            act.set(Act::Leap((at.x, at.y), (land - w / 2, onto.feet - h), 0.0));
+                            motion = Some(Motion::Leap((at.x, at.y), (land - w / 2, onto.feet - h), 0.0));
+                            act.set(Act::Leap);
                             perch = Some(onto);
                             left_for = 3.0 + chance(&mut seed) * 4.0;
                             continue;
                         }
                         if perch.is_some() {
                             perch = None;
-                            act.set(Act::Fall(0.0));
+                            motion = Some(Motion::Fall(0.0));
+                            act.set(Act::Fall);
                             continue;
                         }
                     }
@@ -812,7 +874,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
     let current = act();
     let chatting = current == Act::Chat;
     let shown_pose = match flourish() {
-        Some((p, until)) if std::time::Instant::now() < until && !matches!(current, Act::Carried(..) | Act::Fall(_) | Act::Leap(..) | Act::Pounce(..)) => p,
+        Some((p, until)) if std::time::Instant::now() < until && !matches!(current, Act::Carried | Act::Fall | Act::Leap | Act::Pounce) => p,
         _ => pose(current, &mood(), doing().as_deref()),
     };
     let flip = if facing_left() { "transform: scaleX(-1)" } else { "" };
@@ -887,9 +949,7 @@ fn Pet(pet: PetInfo, index: usize) -> Element {
                         let p = e.screen_coordinates();
                         if (p.x - x).abs() + (p.y - y).abs() > 5.0 && *act.peek() != Act::Chat {
                             pressed.set(None);
-                            if let Ok(at) = drag_window.window.outer_position() {
-                                act.set(Act::Carried(at.x, at.y, 0.0));
-                            }
+                            act.set(Act::Carried);
                             drag_window.drag();
                         }
                     },
@@ -1036,7 +1096,7 @@ mod tests {
         }
         assert!(!nap_due(NAP_AFTER * 2.0, Act::Idle, true, false), "never while its bot works or waits");
         assert!(!nap_due(NAP_AFTER * 2.0, Act::Idle, false, true), "a one-shot pose finishes first");
-        for held in [Act::Carried(0, 0, 0.0), Act::Chat, Act::Fall(0.0), Act::Nap, Act::Crouch(1.0, 0)] {
+        for held in [Act::Carried, Act::Chat, Act::Fall, Act::Nap, Act::Crouch] {
             assert!(!nap_due(NAP_AFTER * 2.0, held, false, false), "{held:?}");
         }
         assert_eq!(pose(Act::Nap, "idle", None), "nap");
@@ -1050,7 +1110,7 @@ mod tests {
 
     #[test]
     fn a_carried_pet_dangles_and_swings_behind_the_hand() {
-        assert_eq!(pose(Act::Carried(10, 10, 0.2), "idle", None), "dangle");
+        assert_eq!(pose(Act::Carried, "idle", None), "dangle");
         assert!(anim(false, "dangle").unwrap().looped);
         assert_eq!((swing(9, 4), swing(-9, 4), swing(3, 4), swing(0, 0)), (1, -1, 0, 0));
         // Going the way it faces, the body trails back; the other way, it swings fore.
@@ -1081,12 +1141,12 @@ mod tests {
         assert_eq!(pose(Act::Walk, "idle", None), "walk");
         assert_eq!(pose(Act::Idle, "working", None), "working");
         assert_eq!(pose(Act::Chat, "waiting", None), "waiting");
-        assert_eq!(pose(Act::Carried(0, 0, 0.0), "working", None), "dangle");
+        assert_eq!(pose(Act::Carried, "working", None), "dangle");
         let mut seed = 7;
         let rolls: Vec<f64> = (0..100).map(|_| chance(&mut seed)).collect();
         assert!(rolls.iter().all(|r| (0.0..1.0).contains(r)));
         assert!(rolls.iter().any(|r| *r < 0.2) && rolls.iter().any(|r| *r > 0.8), "spread out");
-        assert_eq!(pose(Act::Leap((0, 0), (1, 1), 0.5), "idle", None), "jump");
+        assert_eq!(pose(Act::Leap, "idle", None), "jump");
         // A leap starts and ends where it should and rises in between.
         assert_eq!(arc((0, 500), (200, 300), 0.0, 70.0), (0, 500));
         assert_eq!(arc((0, 500), (200, 300), 1.0, 70.0), (200, 300));
@@ -1101,12 +1161,12 @@ mod tests {
         let (land, onto) = leap_to(&tops, 150, 700, 420, 50, 0.0).unwrap();
         assert_eq!((onto.id.as_str(), land), ("a", 150));
         assert_eq!(leap_to(&tops, 2000, 700, 420, 50, 0.0), None, "too far");
-        assert_eq!(pose(Act::Fall(0.0), "idle", None), "air");
+        assert_eq!(pose(Act::Fall, "idle", None), "air");
         // At work, at what its bot is doing; ready to pounce, crouched (stage 29.8).
         assert_eq!(pose(Act::Idle, "working", Some("coding")), "coding");
         assert_eq!(pose(Act::Chat, "working", Some("researching")), "researching");
         assert_eq!(pose(Act::Idle, "idle", Some("coding")), "idle");
-        assert_eq!(pose(Act::Crouch(1.0, 0), "idle", None), "crouch");
+        assert_eq!(pose(Act::Crouch, "idle", None), "crouch");
         // The robot cat's sheets: every pose has something to play, and one-shots lead on.
         for p in ["idle", "walk", "sit", "sleep", "working", "waiting", "jump", "air", "land", "drag",
                   "happy", "stretch", "groom", "yawn", "wave", "crouch", "coding", "designing", "researching",

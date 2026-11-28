@@ -14,31 +14,35 @@ use crate::bots::Bot;
 use crate::live::State;
 use crate::sidebar::{Icon, MENU_ROW, MENU_SHEET};
 
-/// The AIs and the plans' usage, fetched when the pill first shows and as they change.
+/// The AIs and the plans' usage, fetched once at app level and updated only when `engines` or
+/// `limits` frames arrive.
 #[derive(Clone, Default, PartialEq)]
-struct Known {
+pub struct Known {
     engines: Vec<Value>,
     plans: Vec<Value>,
 }
 
-fn use_known() -> Signal<Known> {
+pub fn provide_known(rev: crate::live::Revisions) -> Signal<Known> {
     let mut known = use_signal(Known::default);
-    let state = use_context::<Signal<State>>();
     use_effect(move || {
-        let _ = state.read().engines_changed;
+        let _ = (rev.engines)();
         spawn(async move {
             let engines = api::get("/api/engines").await.ok().and_then(|e| e["engines"].as_array().cloned()).unwrap_or_default();
             known.write().engines = engines;
         });
     });
     use_effect(move || {
-        let _ = state.read().limits_changed;
+        let _ = (rev.limits)();
         spawn(async move {
             let plans = api::get("/api/usage/plans").await.ok().and_then(|p| p["plans"].as_array().cloned()).unwrap_or_default();
             known.write().plans = plans;
         });
     });
     known
+}
+
+fn use_known() -> Signal<Known> {
+    use_context::<Signal<Known>>()
 }
 
 /// A model's name as the menu shows it.
@@ -330,16 +334,25 @@ pub fn Thinking(bot: Bot) -> Element {
     let mut open = use_signal(|| false);
     let mut levels = use_signal(Vec::<(String, String)>::new);
     let mut problem = use_signal(|| None::<String>);
+    let mut req_gen = use_signal(|| 0u64);
     let (engine, model) = (bot.engine.clone(), bot.model.clone());
-    use_hook(move || {
+    use_effect(use_reactive!(|(engine, model)| {
+        let seq = {
+            let mut g = req_gen.write();
+            *g += 1;
+            *g
+        };
+        let (engine, model) = (engine.clone(), model.clone());
         spawn(async move {
             let model = crate::markdown::encode(&model);
-            if let Ok(answer) = api::get(&format!("/api/engines/{engine}/efforts?model={model}")).await {
+            if let Ok(answer) = api::get(&format!("/api/engines/{engine}/efforts?model={model}")).await
+                && *req_gen.peek() == seq
+            {
                 let found = answer["levels"].as_array().into_iter().flatten().filter_map(|l| Some((l["id"].as_str()?.to_string(), l["label"].as_str()?.to_string())));
                 levels.set(found.collect());
             }
         });
-    });
+    }));
     let list = levels();
     if list.is_empty() {
         return rsx! {};

@@ -322,9 +322,17 @@ const FOLLOW_WITHIN: f64 = 120.0;
 pub fn Chat(bot: Bot) -> Element {
     let thread = bot.thread_id.clone();
     let mut state = use_context::<Signal<State>>();
+    let mut live_turns = use_context::<crate::live::LiveTurns>();
+    let thread_live = use_hook({
+        let thread = thread.clone();
+        move || live_turns.signal_for(&thread)
+    });
+    let live_working = use_memo(move || thread_live.read().is_some());
+    let live_steerable = use_memo(move || thread_live.read().as_ref().is_some_and(|l| l.steerable));
     // Reading replies aloud and voice chat (stage 22), one for each chat.
     let speaker = use_context_provider(|| crate::voice::Speaker::new(bot.id.clone()));
-    let mut loading = use_signal(|| false);
+    let mut loading_latest = use_signal(|| false);
+    let mut loading_earlier = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
     // Whether the person is at the end of the conversation; new messages then scroll into view.
     let mut following = use_signal(|| true);
@@ -333,11 +341,11 @@ pub fn Chat(bot: Bot) -> Element {
     let first_thread = thread.clone();
     use_effect(move || {
         let loaded = state.read().threads.get(&first_thread).is_some_and(|t| t.loaded);
-        if loaded || *loading.peek() {
+        if loaded || *loading_latest.peek() {
             return;
         }
         let thread = first_thread.clone();
-        loading.set(true);
+        loading_latest.set(true);
         spawn(async move {
             match api::get(&format!("/api/threads/{thread}/messages?limit={PAGE}")).await {
                 Ok(page) => {
@@ -347,7 +355,7 @@ pub fn Chat(bot: Bot) -> Element {
                 }
                 Err(err) => problem.set(Some(err)),
             }
-            loading.set(false);
+            loading_latest.set(false);
         });
     });
 
@@ -356,9 +364,12 @@ pub fn Chat(bot: Bot) -> Element {
     let load_earlier = move || {
         let thread = older_thread.clone();
         async move {
+            if *loading_earlier.peek() {
+                return;
+            }
             let before = state.peek().threads.get(&thread).and_then(|t| t.messages.iter().find(|m| !m.id.starts_with("optimistic-")).map(|m| m.id.clone()));
             let Some(before) = before else { return };
-            loading.set(true);
+            loading_earlier.set(true);
             let keep = document::eval(
                 r#"const el = document.getElementById("chat-scroll");
                    const height = el.scrollHeight, top = el.scrollTop;
@@ -370,31 +381,32 @@ pub fn Chat(bot: Bot) -> Element {
                 Err(err) => problem.set(Some(err)),
             }
             let _ = keep.send(true);
-            loading.set(false);
+            loading_earlier.set(false);
         }
     };
 
     let earlier_button = load_earlier.clone();
-    let (messages, more, live, loaded) = {
+    let (messages, more, loaded) = {
         let state = state.read();
         match state.threads.get(&thread) {
-            Some(t) => (t.messages.clone(), t.more, t.live.clone(), t.loaded),
-            None => (Vec::new(), false, None, false),
+            Some(t) => (t.messages.clone(), t.more, t.loaded),
+            None => (Vec::new(), false, false),
         }
     };
+    let is_live = live_working();
 
     // The bot's own finished reply, when it's the chat's last word: a suggestion may follow it
     // (stage 32.10).
     let last_reply = match messages.last() {
-        Some(Msg { id, body: Body::Reply(_), bot_id, .. }) if bot.activity == Activity::Idle && live.is_none() && !id.starts_with("optimistic-") && bot_id.as_deref().is_none_or(|by| by == bot.id) => Some(id.clone()),
+        Some(Msg { id, body: Body::Reply(_), bot_id, .. }) if bot.activity == Activity::Idle && !is_live && !id.starts_with("optimistic-") && bot_id.as_deref().is_none_or(|by| by == bot.id) => Some(id.clone()),
         _ => None,
     };
-    // New rows scroll into view while the person is at the end.
-    let size = messages.len() + live.as_ref().map_or(0, |l| l.text.len() + l.steps.len() * 1000);
+    // New saved rows scroll into view while the person is at the end (coalesced via rAF guard).
+    let size = messages.len();
     use_effect(use_reactive!(|size| {
         let _ = size;
         if *following.peek() {
-            document::eval(r#"requestAnimationFrame(() => requestAnimationFrame(() => { const el = document.getElementById("chat-scroll"); if (el) el.scrollTop = el.scrollHeight; }));"#);
+            scroll_chat_to_end();
         }
     }));
 
@@ -411,7 +423,7 @@ pub fn Chat(bot: Bot) -> Element {
             (item, stamp)
         })
         .collect();
-    let working = bot.activity != Activity::Idle || live.is_some();
+    let working = bot.activity != Activity::Idle || is_live;
     // A chat where more than one bot talks (a channel, or guests a hand-off brought in): every
     // reply is named, and the header shows who's in it (stage 29.12).
     let guests = guests_of(&messages, &bot.id);
@@ -422,7 +434,7 @@ pub fn Chat(bot: Bot) -> Element {
         None => Vec::new(),
     };
     // Whether what's waiting can be steered into the running turn (stage 29.14).
-    let steerable = live.as_ref().is_some_and(|l| l.steerable);
+    let steerable = live_steerable();
     // The newest hand-off is still going while the chat works.
     let handing = messages.iter().rev().find(|m| matches!(m.body, Body::Handoff { .. })).map(|m| m.id.clone()).filter(|_| working);
     let replies: Vec<(String, String)> = messages.iter().filter_map(|m| match &m.body {
@@ -447,7 +459,7 @@ pub fn Chat(bot: Bot) -> Element {
                     let data = e.data();
                     let from_end = data.scroll_height() as f64 - data.scroll_top() - data.client_height() as f64;
                     following.set(from_end < FOLLOW_WITHIN);
-                    if data.scroll_top() < LOAD_EARLIER_AT && more && !loading() {
+                    if data.scroll_top() < LOAD_EARLIER_AT && more && !loading_earlier() {
                         spawn(load_earlier.clone()());
                     }
                 },
@@ -457,7 +469,7 @@ pub fn Chat(bot: Bot) -> Element {
                     role: "log",
                     "aria-live": "off",
                     "aria-label": "Conversation with {bot.name}",
-                    if loading() && loaded {
+                    if loading_earlier() && loaded {
                         div { class: "flex items-center justify-center gap-2 py-3 text-xs text-ink-tertiary",
                             span { class: "inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-accent border-t-transparent" }
                             span { "Loading earlier messages…" }
@@ -477,7 +489,7 @@ pub fn Chat(bot: Bot) -> Element {
                             "Couldn't load this conversation: {err}"
                         }
                     }
-                    if loaded && messages.is_empty() && live.is_none() && problem().is_none() {
+                    if loaded && messages.is_empty() && !is_live && problem().is_none() {
                         EmptyChat { bot: bot.clone() }
                     }
                     for (item, stamp) in rows {
@@ -489,15 +501,15 @@ pub fn Chat(bot: Bot) -> Element {
                                 match item {
                                     Item::One(m) => {
                                         let handing = handing.as_deref() == Some(m.id.as_str());
-                                        rsx! { Row { message: m, bot_name: bot.name.clone(), asking, thread: bot.thread_id.clone(), bot_id: bot.id.clone(), working, speakers: bot.channel.clone(), room, handing, steerable } }
+                                        rsx! { Row { message: m, bot_name: bot.name.clone(), bot_color: Some(bot.color.clone()), asking, thread: bot.thread_id.clone(), bot_id: bot.id.clone(), working, speakers: bot.channel.clone(), room, handing, steerable } }
                                     }
                                     Item::Run(steps) => rsx! { Run { steps, bot_name: bot.name.clone(), asking } },
                                 }
                             }
                         }
                     }
-                    if let Some(live) = live {
-                        LiveTurn { live, room, bot_id: bot.id.clone(), speakers: bot.channel.clone() }
+                    if is_live {
+                        LiveTurn { live_signal: thread_live, following, room, bot_id: bot.id.clone(), bot_color: Some(bot.color.clone()), speakers: bot.channel.clone() }
                     } else if working {
                         Working { color: bot.color.clone(), mark: bot.mark.clone() }
                     }
@@ -513,21 +525,46 @@ pub fn Chat(bot: Bot) -> Element {
     }
 }
 
-/// The turn as it happens: its steps, then the reply streaming in.
+/// Coalesces rapid auto-scroll requests to a single animation frame.
+fn scroll_chat_to_end() {
+    document::eval(
+        r#"if (!window.__catbotScrollPending) {
+            window.__catbotScrollPending = true;
+            requestAnimationFrame(() => {
+                window.__catbotScrollPending = false;
+                const el = document.getElementById("chat-scroll");
+                if (el) el.scrollTop = el.scrollHeight;
+            });
+        }"#,
+    );
+}
+
+/// The turn as it happens: its steps, then the reply streaming in. Subscribes ONLY to this
+/// thread's `LiveTurns` signal so token deltas never re-render the rest of the chat.
 #[component]
 fn LiveTurn(
-    live: Live,
+    live_signal: Signal<Option<Live>>,
+    following: Signal<bool>,
     /// A chat with several bots: the reply is named, and so is who's working.
     #[props(default)]
     room: bool,
     #[props(default)] bot_id: String,
+    #[props(default)] bot_color: Option<String>,
     #[props(default)] speakers: Option<crate::bots::ChannelInfo>,
 ) -> Element {
+    let Some(live) = live_signal() else { return rsx! {} };
+    let size = live.text.len() + live.steps.len() * 1000;
+    use_effect(use_reactive!(|size| {
+        let _ = size;
+        if *following.peek() {
+            scroll_chat_to_end();
+        }
+    }));
     let who = live.bot_id.clone().filter(|_| room);
     // The working pill's cat wears the colour of the bot at work (or of the chat's own bot).
     let tint = {
         let state = consume_context::<Signal<State>>();
-        let state = state.read();
+        let state = state.peek();
         let id = live.bot_id.as_deref().unwrap_or(bot_id.as_str());
         state.bots.iter().find(|b| b.id == id).map(|b| (b.color.clone(), b.mark.clone()))
     };
@@ -540,7 +577,7 @@ fn LiveTurn(
             if live.text.is_empty() {
                 Working { who, color: tint, mark: mark.unwrap_or_default() }
             } else {
-                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: live.bot_id, scheduled: None, held: Held::No }, bot_id, speakers, room, live: true }
+                Row { message: Msg { id: "live".into(), at: js_now(), send_id: None, body: Body::Reply(live.text), attachments: Vec::new(), reactions: Vec::new(), bot_id: live.bot_id, scheduled: None, held: Held::No }, bot_id, bot_color, speakers, room, live: true }
             }
         }
     }
@@ -695,6 +732,10 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, after: Option<String
                 }
             });
         }
+    });
+
+    use_drop(|| {
+        document::eval(r#"if (window.__catbotPaste) { document.removeEventListener("paste", window.__catbotPaste, true); delete window.__catbotPaste; }"#);
     });
 
     let send_bot = bot.clone();
@@ -883,11 +924,11 @@ fn Composer(bot: Bot, working: bool, pending: Vec<Pending>, after: Option<String
                     }
                 }
                 HandoffRows { thread: bot.thread_id.clone() }
-                if let Some(question) = pending.first() {
+                for question in pending.first().cloned().into_iter() {
                     if question.questions.is_empty() {
-                        ApprovalPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len(), on_cancel_turn: move |_| stop(()) }
+                        ApprovalPanel { key: "{question.request_id}", bot: bot.clone(), pending: question, count: pending.len(), on_cancel_turn: move |_| stop(()) }
                     } else {
-                        QuestionPanel { key: "{question.request_id}", bot: bot.clone(), pending: question.clone(), count: pending.len() }
+                        QuestionPanel { key: "{question.request_id}", bot: bot.clone(), pending: question, count: pending.len() }
                     }
                 }
                 crate::scheduled::List { bot_id: bot.id.clone(), thread_id: bot.thread_id.clone() }
@@ -1404,6 +1445,7 @@ fn EmptyChat(bot: Bot) -> Element {
 fn Row(
     message: Msg,
     #[props(default)] bot_name: String,
+    #[props(default)] bot_color: Option<String>,
     #[props(default)] asking: bool,
     #[props(default)] thread: String,
     #[props(default)] bot_id: String,
@@ -1428,7 +1470,7 @@ fn Row(
     let full_time = full_date(message.at);
     // Your own messages wear the bot's colour (their default; Settings › Appearance turns it off).
     let looks = use_context::<Signal<crate::looks::Looks>>();
-    let colour = use_context::<Signal<State>>().read().bots.iter().find(|b| b.id == bot_id).map(|b| b.color.clone());
+    let colour = bot_color.or_else(|| use_context::<Signal<State>>().peek().bots.iter().find(|b| b.id == bot_id).map(|b| b.color.clone()));
     // In simple mode theirs is one even fill (no sheen), with white ink on every colour.
     let (own_class, own_style) = match colour.filter(|_| looks.read().color_mine) {
         Some(c) => ("text-ink antialiased user-bubble-colored".to_string(), format!("background-color: var(--identity-{c}); --color-bubble-user: var(--identity-{c}); --color-ink: #ffffff; --color-ink-secondary: rgb(255 255 255 / 0.82); --color-ink-tertiary: rgb(255 255 255 / 0.7)")),
@@ -1488,16 +1530,20 @@ fn Row(
             }
         }
         Body::Reply(text) => {
-            let shape = if markdown::is_formatted(text) {
+            let (formatted, html) = if live {
+                (markdown::is_formatted(text), markdown::to_html(text))
+            } else {
+                markdown::to_html_cached(text)
+            };
+            let shape = if formatted {
                 "w-full max-w-[min(var(--chat-prose-max),var(--chat-card-pct))] rounded-2xl px-1 text-[15px] leading-relaxed text-ink"
             } else {
                 "w-fit min-w-9 max-w-[min(var(--chat-bubble-max),var(--chat-bubble-pct),calc(100%-82px))] rounded-[18px] bg-card bubble-finish px-3 py-[7px] text-[15px] leading-[22px] text-ink"
             };
-            let html = markdown::to_html(text);
             // Who said it, in a chat where several bots talk; and whom it hands to, if anyone.
             let (speaker, to) = {
                 let state = consume_context::<Signal<State>>();
-                let state = state.read();
+                let state = state.peek();
                 let said_by = message.bot_id.clone().unwrap_or_else(|| bot_id.clone());
                 let named = room || message.bot_id.as_deref().is_some_and(|id| id != bot_id);
                 let who = named.then(|| speaker(&state, &said_by).or_else(|| {
@@ -2040,15 +2086,35 @@ const APPROVAL_CODE_CHIP: &str = "inline-flex min-w-0 max-w-full items-baseline 
 #[component]
 fn HandoffRows(thread: String) -> Element {
     let mut state = use_context::<Signal<State>>();
-    let ui = use_context::<crate::settings::Ui>();
     // What's running when the chat opens; the server's frames keep it up to date after.
     use_effect(use_reactive!(|thread| {
+        let already = state.peek().running_handoffs.contains_key(&thread);
+        if already {
+            return;
+        }
         spawn(async move {
             if let Ok(answer) = api::get(&format!("/api/threads/{thread}/handoffs")).await {
-                state.write().running_handoffs.insert(thread.clone(), answer["running"].as_array().cloned().unwrap_or_default());
+                let list = answer["running"].as_array().cloned().unwrap_or_default();
+                let mut s = state.write();
+                // Don't overwrite newer SSE updates that arrived while this GET was in flight.
+                if !s.running_handoffs.contains_key(&thread) && !list.is_empty() {
+                    s.running_handoffs.insert(thread.clone(), list);
+                }
             }
         });
     }));
+    let rows = state.read().running_handoffs.get(&thread).cloned().unwrap_or_default();
+    if rows.is_empty() {
+        return rsx! {};
+    }
+    rsx! { HandoffRowsActive { thread, rows } }
+}
+
+/// Only mounted while at least one hand-off is running, so idle chats have no 1 Hz timer.
+#[component]
+fn HandoffRowsActive(thread: String, rows: Vec<Value>) -> Element {
+    let state = use_context::<Signal<State>>();
+    let ui = use_context::<crate::settings::Ui>();
     let mut tick = use_signal(|| 0u64);
     use_future(move || async move {
         loop {
@@ -2057,10 +2123,6 @@ fn HandoffRows(thread: String) -> Element {
         }
     });
     let _ = tick();
-    let rows = state.read().running_handoffs.get(&thread).cloned().unwrap_or_default();
-    if rows.is_empty() {
-        return rsx! {};
-    }
     rsx! {
         div { class: "mb-2 flex flex-col gap-1", "data-handoff-rows": true,
             for row in rows {
@@ -2070,7 +2132,7 @@ fn HandoffRows(thread: String) -> Element {
                     let stopped = row["stopped"] == true;
                     let since = elapsed_label((js_now() - row["startedAt"].as_f64().unwrap_or_else(js_now)).max(0.0));
                     let (room, chat_of) = (row["room"].as_str().unwrap_or_default().to_string(), row["chatOf"].as_str().unwrap_or_default().to_string());
-                    let can_open = !room.is_empty() && state.read().bots.iter().any(|b| b.id == chat_of);
+                    let can_open = !room.is_empty() && state.peek().bots.iter().any(|b| b.id == chat_of);
                     let stop_path = format!("/api/threads/{thread}/handoffs/{id}/stop");
                     rsx! {
                         div { key: "{id}", class: "flex min-w-0 items-center gap-2 rounded-full bg-composer px-3 py-1.5 text-[13px] ring-[0.5px] ring-ink/10", "data-handoff-row": "{id}",
@@ -2140,10 +2202,18 @@ fn QuestionRow(name: String, questions: Vec<Asked>, answers: Vec<(String, String
 #[component]
 fn QuestionPanel(bot: Bot, pending: Pending, count: usize) -> Element {
     let questions = pending.questions.clone();
+    let req_id = pending.request_id.clone();
+    let q_len = questions.len();
     // Each question's picks, in its choices' order.
-    let mut picked = use_signal(|| vec![Vec::<String>::new(); questions.len()]);
+    let mut picked = use_signal(|| vec![Vec::<String>::new(); q_len]);
     let mut answering = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
+    use_effect(use_reactive!(|(req_id, q_len)| {
+        let _ = req_id;
+        picked.set(vec![Vec::<String>::new(); q_len]);
+        answering.set(false);
+        problem.set(None);
+    }));
     let thread = bot.thread_id.clone();
     let request = pending.request_id.clone();
     let send = move |body: Value| {
@@ -2214,6 +2284,9 @@ fn QuestionPanel(bot: Bot, pending: Pending, count: usize) -> Element {
                                                     return;
                                                 }
                                                 let mut all = picked.write();
+                                                if all.len() <= at {
+                                                    all.resize_with(at + 1, Vec::new);
+                                                }
                                                 let mine = &mut all[at];
                                                 if mine.contains(&label_for) {
                                                     mine.retain(|l| l != &label_for);
@@ -2326,6 +2399,13 @@ fn ApprovalPanel(bot: Bot, pending: Pending, count: usize, on_cancel_turn: Event
     let mut open = use_signal(|| false);
     let mut answering = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
+    let req_id = pending.request_id.clone();
+    use_effect(use_reactive!(|req_id| {
+        let _ = req_id;
+        open.set(false);
+        answering.set(false);
+        problem.set(None);
+    }));
     let line = approval_line(&bot.name, pending.tool.as_deref());
     let detail = approval_detail(&pending.subtitle, pending.tool.as_deref());
     let thread = bot.thread_id.clone();

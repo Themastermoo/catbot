@@ -225,11 +225,24 @@ async fn open_file(file: &Attached) {
         let Ok(bytes) = crate::api::bytes(&file.url).await else { return };
         let dir = downloads();
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join(&file.name);
+        let path = dir.join(safe_download_name(&file.name));
         if std::fs::write(&path, bytes).is_ok() {
             open_path(&path);
         }
     }
+}
+
+/// Strips directory segments and control characters so a wire attachment name cannot escape
+/// Downloads or overwrite arbitrary paths.
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn safe_download_name(name: &str) -> String {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or("");
+    let cleaned: String = base
+        .chars()
+        .filter(|c| !c.is_control() && !matches!(c, '/' | '\\' | '\0'))
+        .collect();
+    let trimmed = cleaned.trim().trim_matches('.');
+    if trimmed.is_empty() { "attachment".to_string() } else { trimmed.to_string() }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -267,5 +280,9 @@ mod tests {
         assert!(list[0].is_picture());
         assert_eq!(size_words(2048), "2 KB");
         assert_eq!(size_words(3 * 1024 * 1024 / 2), "1.5 MB");
+        assert_eq!(safe_download_name("../../.bashrc"), "bashrc");
+        assert_eq!(safe_download_name("C:\\Windows\\evil.exe"), "evil.exe");
+        assert_eq!(safe_download_name(".."), "attachment");
+        assert_eq!(safe_download_name("report.pdf"), "report.pdf");
     }
 }

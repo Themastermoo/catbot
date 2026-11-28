@@ -7,10 +7,14 @@
 
 use std::collections::HashMap;
 
+use dioxus::prelude::*;
 use serde_json::Value;
 
 use crate::bots::Bot;
 use crate::chat::{Body, Held, Msg};
+
+/// Maximum idle threads kept in memory for long-lived sessions.
+const MAX_CACHED_THREADS: usize = 24;
 
 /// One conversation as the app holds it.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -27,6 +31,8 @@ pub struct Thread {
     pub since: Vec<Msg>,
     /// The turn running now, if one is.
     pub live: Option<Live>,
+    /// Monotonic touch stamp for LRU cache eviction.
+    pub last_used: u64,
 }
 
 /// A running turn: the steps so far and the reply as it streams in. When the turn ends, the
@@ -59,6 +65,8 @@ pub struct State {
     pub threads: HashMap<String, Thread>,
     /// The hand-offs running from each chat (stage 32.13), as the server lists them.
     pub running_handoffs: HashMap<String, Vec<Value>>,
+    /// Monotonic counter for thread LRU timestamps.
+    touch: u64,
     /// Goes up whenever the paired devices or the waiting pairing change (`devices` frames),
     /// so the devices dialog knows to look again.
     /// Counts `engines` frames: an AI's key was saved or forgotten (the bot settings fetch again).
@@ -93,6 +101,233 @@ pub struct State {
     pub archived_changed: u64,
 }
 
+/// Fine-grained invalidation signals so domain updates never wake unrelated components or
+/// trigger HTTP fetches during streaming tokens.
+#[derive(Clone, Copy)]
+pub struct Revisions {
+    pub engines: Signal<u64>,
+    pub limits: Signal<u64>,
+    pub local_ai: Signal<u64>,
+    pub handoffs: Signal<u64>,
+    pub chief: Signal<u64>,
+    pub skills: Signal<u64>,
+    pub email: Signal<u64>,
+    pub pages: Signal<u64>,
+    pub triggers: Signal<u64>,
+    pub board: Signal<u64>,
+    pub apps: Signal<u64>,
+    pub computers: Signal<u64>,
+    pub devices: Signal<u64>,
+    pub inbox: Signal<u64>,
+    pub departments: Signal<u64>,
+    pub map: Signal<u64>,
+    pub scheduled: Signal<u64>,
+    pub voice: Signal<u64>,
+    pub update: Signal<u64>,
+    pub archived: Signal<u64>,
+}
+
+impl Revisions {
+    pub fn new() -> Self {
+        Self {
+            engines: Signal::new(0),
+            limits: Signal::new(0),
+            local_ai: Signal::new(0),
+            handoffs: Signal::new(0),
+            chief: Signal::new(0),
+            skills: Signal::new(0),
+            email: Signal::new(0),
+            pages: Signal::new(0),
+            triggers: Signal::new(0),
+            board: Signal::new(0),
+            apps: Signal::new(0),
+            computers: Signal::new(0),
+            devices: Signal::new(0),
+            inbox: Signal::new(0),
+            departments: Signal::new(0),
+            map: Signal::new(0),
+            scheduled: Signal::new(0),
+            voice: Signal::new(0),
+            update: Signal::new(0),
+            archived: Signal::new(0),
+        }
+    }
+}
+
+/// Per-thread streaming turn signals, isolated from `Signal<State>` so token deltas only
+/// re-render the active thread's `LiveTurn` view.
+#[derive(Clone, Copy)]
+pub struct LiveTurns(pub Signal<HashMap<String, Signal<Option<Live>>>>);
+
+impl LiveTurns {
+    pub fn new() -> Self {
+        Self(Signal::new(HashMap::new()))
+    }
+
+    pub fn signal_for(&mut self, thread: &str) -> Signal<Option<Live>> {
+        if let Some(sig) = self.0.peek().get(thread).copied() {
+            return sig;
+        }
+        let sig = Signal::new(None);
+        self.0.write().insert(thread.to_string(), sig);
+        sig
+    }
+
+    pub fn clear_all(&mut self) {
+        let signals: Vec<Signal<Option<Live>>> = self.0.peek().values().copied().collect();
+        for mut sig in signals {
+            if sig.peek().is_some() {
+                sig.set(None);
+            }
+        }
+    }
+
+    pub fn remove(&mut self, thread: &str) {
+        if self.0.peek().contains_key(thread) {
+            self.0.write().remove(thread);
+        }
+    }
+
+    pub fn apply_runtime(&mut self, thread: &str, event: &Value) {
+        if !runtime_mutates(event) {
+            return;
+        }
+        let mut sig = self.signal_for(thread);
+        let mut slot = sig.write();
+        apply_runtime_event(&mut slot, event);
+    }
+}
+
+fn runtime_mutates(event: &Value) -> bool {
+    match event["type"].as_str() {
+        Some("turn.started" | "turn.completed" | "turn.steerable" | "item.completed" | "runtime.error") => true,
+        Some("content.delta") => event["streamKind"] == "assistant_text",
+        Some("item.started") => event["itemType"] == "tool",
+        _ => false,
+    }
+}
+
+fn apply_runtime_event(slot: &mut Option<Live>, event: &Value) {
+    match event["type"].as_str() {
+        Some("turn.started") => {
+            *slot = Some(Live {
+                bot_id: event["botId"].as_str().map(str::to_string),
+                started: crate::chat::js_now(),
+                ..Live::default()
+            });
+        }
+        Some("turn.completed") => *slot = None,
+        Some("turn.steerable") => {
+            let live = slot.get_or_insert_with(Live::default);
+            live.steerable = event["steerable"] == true;
+        }
+        Some("content.delta") if event["streamKind"] == "assistant_text" => {
+            let live = slot.get_or_insert_with(Live::default);
+            live.text.push_str(event["delta"].as_str().unwrap_or_default());
+        }
+        Some("item.started") if event["itemType"] == "tool" => {
+            let live = slot.get_or_insert_with(Live::default);
+            let title = event["title"].as_str().unwrap_or("Tool");
+            let summary = event["summary"].as_str().unwrap_or_default();
+            live.steps.push(LiveStep {
+                id: event["itemId"].as_str().unwrap_or_default().to_string(),
+                name: format!("{title} {summary}").trim().to_string(),
+                ok: None,
+            });
+        }
+        Some("item.completed") => {
+            if let Some(live) = slot.as_mut() {
+                let id = event["itemId"].as_str().unwrap_or_default();
+                if let Some(step) = live.steps.iter_mut().find(|s| s.id == id) {
+                    step.ok = Some(event["ok"] != false);
+                }
+            }
+        }
+        Some("runtime.error") => {
+            let live = slot.get_or_insert_with(Live::default);
+            live.steps.push(LiveStep {
+                id: format!("error-{}", live.steps.len()),
+                name: event["message"].as_str().unwrap_or("Something went wrong").to_string(),
+                ok: Some(false),
+            });
+        }
+        _ => {}
+    }
+}
+
+/// Applies one SSE frame with fine-grained signal routing: domain counters bump only their own
+/// `Revisions` signal, streaming `runtime` frames update only that thread's `LiveTurns` signal,
+/// and no-op frames avoid writing to `Signal<State>` altogether.
+pub fn apply_frame(mut state: Signal<State>, mut rev: Revisions, mut live_turns: LiveTurns, frame: &Value) -> After {
+    match frame["kind"].as_str() {
+        Some("hello") => After::Resync,
+        Some("devices") => { *rev.devices.write() += 1; After::Nothing }
+        Some("engines") => { *rev.engines.write() += 1; After::Nothing }
+        Some("limits") => { *rev.limits.write() += 1; After::Nothing }
+        Some("local-ai") => { *rev.local_ai.write() += 1; After::Nothing }
+        Some("handoffs") => { *rev.handoffs.write() += 1; After::Nothing }
+        Some("chief") => { *rev.chief.write() += 1; After::Nothing }
+        Some("skills") => { *rev.skills.write() += 1; After::Nothing }
+        Some("email") => { *rev.email.write() += 1; After::Nothing }
+        Some("pages") => { *rev.pages.write() += 1; After::Nothing }
+        Some("triggers") => { *rev.triggers.write() += 1; After::Nothing }
+        Some("board") => { *rev.board.write() += 1; After::Nothing }
+        Some("apps") => { *rev.apps.write() += 1; After::Nothing }
+        Some("computers") => { *rev.computers.write() += 1; After::Nothing }
+        Some("inbox") => { *rev.inbox.write() += 1; After::Nothing }
+        Some("departments") => { *rev.departments.write() += 1; After::Nothing }
+        Some("team-map") => { *rev.map.write() += 1; After::Nothing }
+        Some("scheduled") => { *rev.scheduled.write() += 1; After::Nothing }
+        Some("voice") => { *rev.voice.write() += 1; After::Nothing }
+        Some("update") => { *rev.update.write() += 1; After::Nothing }
+        Some("archived-bots") => { *rev.archived.write() += 1; After::Nothing }
+        Some("runtime") => {
+            let event = &frame["event"];
+            let thread = event["threadId"].as_str().unwrap_or_default();
+            if state.peek().owns_thread(thread) {
+                live_turns.apply_runtime(thread, event);
+            }
+            After::Nothing
+        }
+        Some("bot") => {
+            let wire = &frame["bot"];
+            if wire["catbot"] != true {
+                return After::Nothing;
+            }
+            let Some(newer) = Bot::from_wire(wire) else { return After::Nothing };
+            let mut s = state.write();
+            match s.bots.iter_mut().find(|b| b.id == newer.id) {
+                Some(bot) => bot.update_from(newer),
+                None => s.bots.push(newer),
+            }
+            After::Nothing
+        }
+        Some("bot.deleted") => {
+            let id = frame["botId"].as_str().unwrap_or_default();
+            let removed_threads: Vec<String> = state
+                .peek()
+                .bots
+                .iter()
+                .filter(|b| b.id == id)
+                .flat_map(|b| std::iter::once(b.thread_id.clone()).chain(b.chats.iter().map(|c| c.id.clone())))
+                .collect();
+            for t in &removed_threads {
+                live_turns.remove(t);
+            }
+            state.write().apply(frame)
+        }
+        Some("message" | "message.patch") => {
+            let thread = frame["threadId"].as_str().unwrap_or_default();
+            if !state.peek().owns_thread(thread) {
+                return After::Nothing;
+            }
+            state.write().apply(frame)
+        }
+        Some("message.removed" | "handoffs-running") => state.write().apply(frame),
+        _ => After::Nothing,
+    }
+}
+
 /// What a frame asks of the app beyond changing `State`.
 #[derive(Debug, PartialEq, Eq)]
 pub enum After {
@@ -109,7 +344,10 @@ impl State {
     /// Puts a fetched page of messages in place: the newest page replaces what was there,
     /// an earlier page goes in front.
     pub fn loaded(&mut self, thread: &str, page: Vec<Msg>, more: bool, earlier: bool) {
+        self.touch += 1;
+        let stamp = self.touch;
         let entry = self.threads.entry(thread.to_string()).or_default();
+        entry.last_used = stamp;
         let more = if earlier {
             let mut all = page;
             all.append(&mut entry.messages);
@@ -151,7 +389,31 @@ impl State {
             more
         };
         entry.more = more;
-        entry.loaded = true;
+        if !earlier {
+            entry.loaded = true;
+        }
+        self.evict_idle_threads(thread);
+    }
+
+    fn evict_idle_threads(&mut self, keep: &str) {
+        if self.threads.len() <= MAX_CACHED_THREADS {
+            return;
+        }
+        let mut victims: Vec<(u64, String)> = self
+            .threads
+            .iter()
+            .filter(|(id, t)| {
+                id.as_str() != keep
+                    && t.live.is_none()
+                    && !t.messages.iter().any(|m| m.id.starts_with("optimistic-"))
+            })
+            .map(|(id, t)| (t.last_used, id.clone()))
+            .collect();
+        victims.sort_by_key(|(used, _)| *used);
+        let to_drop = self.threads.len().saturating_sub(MAX_CACHED_THREADS);
+        for (_, id) in victims.into_iter().take(to_drop) {
+            self.threads.remove(&id);
+        }
     }
 
     /// The person's message, shown at once while it's on its way; the saved one replaces it.
@@ -187,7 +449,12 @@ impl State {
             Some("handoffs") => self.handoffs_changed += 1,
             Some("handoffs-running") => {
                 if let Some(thread) = frame["threadId"].as_str() {
-                    self.running_handoffs.insert(thread.to_string(), frame["running"].as_array().cloned().unwrap_or_default());
+                    let list = frame["running"].as_array().cloned().unwrap_or_default();
+                    if list.is_empty() {
+                        self.running_handoffs.remove(thread);
+                    } else {
+                        self.running_handoffs.insert(thread.to_string(), list);
+                    }
                 }
             }
             Some("chief") => self.chief_changed += 1,
@@ -207,7 +474,18 @@ impl State {
             Some("archived-bots") => self.archived_changed += 1,
             Some("bot.deleted") => {
                 let id = frame["botId"].as_str().unwrap_or_default();
+                let mut dead_threads = Vec::new();
+                for bot in self.bots.iter().filter(|b| b.id == id) {
+                    dead_threads.push(bot.thread_id.clone());
+                    for chat in &bot.chats {
+                        dead_threads.push(chat.id.clone());
+                    }
+                }
                 self.bots.retain(|b| b.id != id);
+                for thread in dead_threads {
+                    self.threads.remove(&thread);
+                    self.running_handoffs.remove(&thread);
+                }
             }
             Some(kind @ ("message" | "message.patch")) => {
                 let thread = frame["threadId"].as_str().unwrap_or_default();
@@ -243,45 +521,11 @@ impl State {
             Some("runtime") => {
                 let event = &frame["event"];
                 let thread = event["threadId"].as_str().unwrap_or_default();
-                if !self.owns_thread(thread) {
+                if !self.owns_thread(thread) || !runtime_mutates(event) {
                     return After::Nothing;
                 }
                 let entry = self.threads.entry(thread.to_string()).or_default();
-                match event["type"].as_str() {
-                    Some("turn.started") => entry.live = Some(Live { bot_id: event["botId"].as_str().map(str::to_string), started: crate::chat::js_now(), ..Live::default() }),
-                    Some("turn.completed") => entry.live = None,
-                    Some(kind) => {
-                        let live = entry.live.get_or_insert_with(Live::default);
-                        match kind {
-                            "turn.steerable" => live.steerable = event["steerable"] == true,
-                            "content.delta" if event["streamKind"] == "assistant_text" => {
-                                live.text.push_str(event["delta"].as_str().unwrap_or_default());
-                            }
-                            "item.started" if event["itemType"] == "tool" => {
-                                let title = event["title"].as_str().unwrap_or("Tool");
-                                let summary = event["summary"].as_str().unwrap_or_default();
-                                live.steps.push(LiveStep {
-                                    id: event["itemId"].as_str().unwrap_or_default().to_string(),
-                                    name: format!("{title} {summary}").trim().to_string(),
-                                    ok: None,
-                                });
-                            }
-                            "item.completed" => {
-                                let id = event["itemId"].as_str().unwrap_or_default();
-                                if let Some(step) = live.steps.iter_mut().find(|s| s.id == id) {
-                                    step.ok = Some(event["ok"] != false);
-                                }
-                            }
-                            "runtime.error" => live.steps.push(LiveStep {
-                                id: format!("error-{}", live.steps.len()),
-                                name: event["message"].as_str().unwrap_or("Something went wrong").to_string(),
-                                ok: Some(false),
-                            }),
-                            _ => {}
-                        }
-                    }
-                    None => {}
-                }
+                apply_runtime_event(&mut entry.live, event);
             }
             _ => {}
         }
@@ -497,8 +741,34 @@ mod tests {
         state.apply(&json!({ "kind": "handoffs-running", "threadId": "t1", "running": [{ "id": "h1", "from": "Scout", "to": "Kiwi" }] }));
         assert_eq!(state.running_handoffs["t1"][0]["to"], "Kiwi");
         state.apply(&json!({ "kind": "handoffs-running", "threadId": "t1", "running": [] }));
-        assert!(state.running_handoffs["t1"].is_empty(), "ended");
+        assert!(!state.running_handoffs.contains_key("t1"), "ended");
         assert_eq!(state.handoffs_changed, 0, "not the Hand-offs settings' frame");
+    }
+
+    #[test]
+    fn stray_runtime_events_do_not_stick_live_working() {
+        let mut s = state();
+        s.apply(&json!({ "kind": "runtime", "event": { "type": "request.opened", "threadId": "t1" } }));
+        s.apply(&json!({ "kind": "runtime", "event": { "type": "item.completed", "threadId": "t1", "itemId": "x", "ok": true } }));
+        assert!(s.threads["t1"].live.is_none());
+    }
+
+    #[test]
+    fn earlier_load_does_not_mark_unloaded_thread_loaded() {
+        let mut s = state();
+        let m = |id: &str| Msg { id: id.into(), at: 0.0, send_id: None, body: Body::Reply(id.into()), attachments: Vec::new(), reactions: Vec::new(), bot_id: None, scheduled: None, held: Held::No };
+        s.threads.get_mut("t1").unwrap().loaded = false;
+        s.loaded("t1", vec![m("cb-1")], false, true);
+        assert!(!s.threads["t1"].loaded, "reconnect reload must still fetch the newest page");
+    }
+
+    #[test]
+    fn deleting_a_bot_cleans_up_its_threads() {
+        let mut s = state();
+        s.apply(&json!({ "kind": "handoffs-running", "threadId": "t1", "running": [{ "id": "h1" }] }));
+        s.apply(&json!({ "kind": "bot.deleted", "botId": "b1" }));
+        assert!(!s.threads.contains_key("t1"));
+        assert!(!s.running_handoffs.contains_key("t1"));
     }
 
     #[test]

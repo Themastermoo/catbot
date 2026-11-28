@@ -34,12 +34,22 @@ pub fn MemoryDialog(on_close: EventHandler<()>, #[props(default)] start: String)
     // On a phone: whether the note (rather than the list) fills the screen.
     let mut reading = use_signal(|| false);
     let mut refreshed = use_signal(|| 0u32);
+    let open_gen = use_signal(|| 0u64);
 
     // `show`: on a phone, turn from the list to the note.
     let open = move |query: String, show: bool| {
+        let mut open_gen = open_gen;
+        let seq = {
+            let mut g = open_gen.write();
+            *g += 1;
+            *g
+        };
         spawn(async move {
             match api::get(&format!("/api/memory/note?{query}")).await {
                 Ok(found) => {
+                    if *open_gen.peek() != seq {
+                        return;
+                    }
                     note.set(Some(found));
                     problem.set(None);
                     if show {
@@ -47,7 +57,11 @@ pub fn MemoryDialog(on_close: EventHandler<()>, #[props(default)] start: String)
                     }
                     document::eval(r#"const el = document.querySelector("[data-memory-scroll]"); if (el) el.scrollTop = 0;"#);
                 }
-                Err(err) => problem.set(Some(format!("Couldn't open that note: {err}"))),
+                Err(err) => {
+                    if *open_gen.peek() == seq {
+                        problem.set(Some(format!("Couldn't open that note: {err}")));
+                    }
+                }
             }
         });
     };
@@ -79,6 +93,9 @@ pub fn MemoryDialog(on_close: EventHandler<()>, #[props(default)] start: String)
             let from = note.peek().as_ref().and_then(|n| n["path"].as_str().map(str::to_string)).unwrap_or_default();
             open(format!("link={}&from={}", markdown::encode(&markdown::decode(&target)), markdown::encode(&from)), true);
         }
+    });
+    use_drop(|| {
+        document::eval(r#"if (window.__catbotNoteClicks) { document.removeEventListener("click", window.__catbotNoteClicks); delete window.__catbotNoteClicks; }"#);
     });
 
     let data = overview();

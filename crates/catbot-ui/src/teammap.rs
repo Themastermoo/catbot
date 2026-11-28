@@ -212,6 +212,7 @@ enum Gesture {
 #[component]
 pub fn TeamMap() -> Element {
     let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let depts = use_context::<Signal<Depts>>();
     let ui = use_context::<Ui>();
     let mut view = use_signal(View::default);
@@ -234,7 +235,7 @@ pub fn TeamMap() -> Element {
 
     // The boxes' places and who handed work to whom: now, and again when a hand-off starts or ends.
     use_effect(move || {
-        let _ = state.read().map_changed;
+        let _ = (rev.map)();
         spawn(async move {
             if let Ok(answer) = api::get("/api/team-map").await {
                 if !*loaded.peek() {
@@ -248,7 +249,7 @@ pub fn TeamMap() -> Element {
     // Live screens: each bot whose computer is on shows it on its card.
     use_effect(move || {
         let on = show_screens();
-        let _ = state.read().computers_changed;
+        let _ = (rev.computers)();
         spawn(async move {
             if !on {
                 screens.set(HashMap::new());

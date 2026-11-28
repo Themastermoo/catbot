@@ -14,12 +14,12 @@ const PRIMARY: &str = "rounded-lg bg-accent px-3 py-1.5 text-[13px] font-semibol
 
 #[component]
 pub fn EmailSettings() -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut view = use_signal(|| None::<Value>);
     let mut editing = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
     use_effect(move || {
-        let _ = state.read().email_changed;
+        let _ = (rev.email)();
         spawn(async move {
             match api::get("/api/email").await {
                 Ok(found) => view.set(Some(found)),

@@ -21,11 +21,12 @@ pub fn use_local_ai() -> (Signal<Option<Result<Value, String>>>, Signal<u32>) {
     let mut seen = use_signal(|| None::<Result<Value, String>>);
     let checked = use_signal(|| 0u32);
     let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let discovery_changes = use_memo(move || {
         let state = state.read();
         // An existing bot also makes its local engine available without explicit opt-in.
         let uses = |id: &str| state.bots.iter().any(|bot| bot.engine == id);
-        (state.local_ai_changed, state.engines_changed, state.archived_changed, uses("ollama"), uses("lmstudio"))
+        ((rev.local_ai)(), (rev.engines)(), (rev.archived)(), uses("ollama"), uses("lmstudio"))
     });
     use_effect(move || {
         let _ = checked();
@@ -379,9 +380,9 @@ pub fn NewBotLocal(chosen: Signal<Option<(String, String)>>) -> Element {
     let Some(one) = running.first().cloned() else { return rsx! {} };
     let id = one["id"].as_str().unwrap_or_default().to_string();
     let models: Vec<String> = one["models"].as_array().into_iter().flatten().filter_map(|m| m["name"].as_str().map(str::to_string)).collect();
+    let Some(first) = models.first().cloned() else { return rsx! {} };
     let line = summary(&one);
     let picked = chosen().filter(|(e, _)| *e == id);
-    let first = models[0].clone();
     let use_id = id.clone();
     let model_id = id.clone();
     rsx! {

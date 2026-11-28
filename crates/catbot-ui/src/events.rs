@@ -39,26 +39,37 @@ pub async fn follow(mut on_frame: impl FnMut(Value)) {
     }
 }
 
-/// Server-sent events, as text arrives in pieces: a frame is the `data:` lines of one block,
-/// and a blank line ends a block. (The desktop app's; a browser reads the stream itself.)
+/// Server-sent events, as bytes arrive in pieces: a frame is the `data:` lines of one block,
+/// and a blank line ends a block. Buffering raw bytes preserves multi-byte UTF-8 split across
+/// TCP chunks. (The desktop app's; a browser reads the stream itself.)
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 #[derive(Default)]
 pub struct SseReader {
-    buffer: String,
+    buffer: Vec<u8>,
 }
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+const MAX_SSE_BUFFER: usize = 16 * 1024 * 1024;
 
 #[cfg_attr(target_arch = "wasm32", allow(dead_code))]
 impl SseReader {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<Value> {
-        self.buffer.push_str(&String::from_utf8_lossy(chunk));
-        // Line endings may be \r\n; frames end at a blank line.
-        if self.buffer.contains('\r') {
-            self.buffer = self.buffer.replace("\r\n", "\n");
+        self.buffer.extend_from_slice(chunk);
+        if self.buffer.len() > MAX_SSE_BUFFER {
+            self.buffer.clear();
+            return Vec::new();
         }
         let mut frames = Vec::new();
-        while let Some(end) = self.buffer.find("\n\n") {
-            let block: String = self.buffer.drain(..end + 2).collect();
-            let data: Vec<&str> = block.lines().filter_map(|l| l.strip_prefix("data:")).map(|l| l.strip_prefix(' ').unwrap_or(l)).collect();
+        let mut cursor = 0;
+        while let Some((end, sep_len)) = find_event_end(&self.buffer[cursor..]) {
+            let block = String::from_utf8_lossy(&self.buffer[cursor..cursor + end]);
+            cursor += end + sep_len;
+            let data: Vec<&str> = block
+                .split('\n')
+                .map(|l| l.strip_suffix('\r').unwrap_or(l))
+                .filter_map(|l| l.strip_prefix("data:"))
+                .map(|l| l.strip_prefix(' ').unwrap_or(l))
+                .collect();
             if data.is_empty() {
                 continue;
             }
@@ -66,8 +77,26 @@ impl SseReader {
                 frames.push(frame);
             }
         }
+        if cursor > 0 {
+            self.buffer.drain(..cursor);
+        }
         frames
     }
+}
+
+#[cfg_attr(target_arch = "wasm32", allow(dead_code))]
+fn find_event_end(bytes: &[u8]) -> Option<(usize, usize)> {
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        if bytes[i] == b'\n' && bytes[i + 1] == b'\n' {
+            return Some((i, 2));
+        }
+        if bytes[i] == b'\r' && i + 3 < bytes.len() && &bytes[i..i + 4] == b"\r\n\r\n" {
+            return Some((i, 4));
+        }
+        i += 1;
+    }
+    None
 }
 
 /// Waits before trying the stream again.
@@ -90,5 +119,16 @@ mod tests {
         let frames = reader.push(b"lo\"}\n\n: keepalive\ndata: {\"kind\":\"ping\"}\n\nid: cb1:2\r\ndata: {\"kind\":\"bot\"}\r\n\r\n");
         assert_eq!(frames, vec![json!({ "kind": "hello" }), json!({ "kind": "ping" }), json!({ "kind": "bot" })]);
         assert!(reader.push(b": only a comment\n\n").is_empty());
+    }
+
+    #[test]
+    fn utf8_split_across_chunks_is_preserved() {
+        let mut reader = SseReader::default();
+        let raw = "data: {\"delta\":\"🦀…你好\"}\n\n".as_bytes();
+        // Split right inside the 4-byte crab emoji.
+        let split = raw.iter().position(|&b| b == 0xF0).unwrap() + 2;
+        assert!(reader.push(&raw[..split]).is_empty());
+        let frames = reader.push(&raw[split..]);
+        assert_eq!(frames, vec![json!({ "delta": "🦀…你好" })]);
     }
 }

@@ -11,7 +11,6 @@ use serde_json::{Value, json};
 
 use crate::api;
 use crate::chat::{ahead_when, js_now};
-use crate::live::State;
 use crate::sidebar::Icon;
 
 /// A message set to go out later, as the list shows it.
@@ -96,7 +95,8 @@ pub fn from_input(value: &str) -> Option<f64> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         use chrono::{Local, TimeZone};
-        let naive = chrono::NaiveDateTime::parse_from_str(&value[..16], "%Y-%m-%dT%H:%M").ok()?;
+        let prefix = value.get(..16)?;
+        let naive = chrono::NaiveDateTime::parse_from_str(prefix, "%Y-%m-%dT%H:%M").ok()?;
         Local.from_local_datetime(&naive).earliest().map(|t| t.timestamp_millis() as f64)
     }
 }
@@ -176,13 +176,13 @@ pub fn Picker(on_pick: EventHandler<f64>, on_close: EventHandler<()>) -> Element
 /// cancel. Shows nothing while nothing waits.
 #[component]
 pub fn List(bot_id: String, thread_id: String) -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut open = use_signal(|| false);
     let mut problem = use_signal(|| None::<String>);
     let mut items = use_signal(Vec::<Item>::new);
     // Read again for another chat, and whenever the server says the list changed.
     use_effect(use_reactive!(|bot_id, thread_id| {
-        let _ = state.read().scheduled_changed;
+        let _ = (rev.scheduled)();
         let (bot, thread) = (bot_id.clone(), thread_id.clone());
         spawn(async move {
             if let Ok(found) = api::get(&format!("/api/scheduled?botId={bot}&threadId={thread}")).await {

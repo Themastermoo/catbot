@@ -197,6 +197,9 @@ fn Root() -> Element {
 #[component]
 fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let mut state = use_context_provider(|| Signal::new(live::State::default()));
+    let rev = use_context_provider(live::Revisions::new);
+    let mut live_turns = use_context_provider(live::LiveTurns::new);
+    use_context_provider(|| model_menu::provide_known(rev));
     use_context_provider(|| Signal::new(drafts::load()));
     let mut selected = use_signal(|| None::<String>);
     let settings_open = use_signal(|| false);
@@ -214,17 +217,17 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     // Voice settings and what's ready (stage 22), read at start and on each `voice` frame.
     let voice = use_context_provider(voice::VoiceInfo::new);
     use_effect(move || {
-        let _ = state.read().voice_changed;
+        let _ = (rev.voice)();
         voice.refresh();
     });
     // The departments, read at start and whenever they change.
     use_effect(move || {
-        let _ = state.read().departments_changed;
+        let _ = (rev.departments)();
         departments::refresh(depts);
     });
     // The Inbox's list, read at start and again whenever the server says it changed.
     use_effect(move || {
-        let _ = state.read().inbox_changed;
+        let _ = (rev.inbox)();
         inbox.refresh();
     });
     // The Inbox and a bot's panel share the right side: opening one closes the other.
@@ -273,31 +276,57 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     let mut problem = use_signal(|| None::<String>);
     // Whether the bot list has come at least once (so the welcome doesn't flash up first).
     let mut listed = use_signal(|| false);
+    let catch_gen = use_signal(|| 0u64);
 
     // Fetches the bot list, and has every open conversation fetched again: at start, and after
     // the event stream reconnects (anything could have happened in between).
     let catch_up = move || {
+        let mut catch_gen = catch_gen;
+        let seq = {
+            let mut g = catch_gen.write();
+            *g += 1;
+            *g
+        };
         spawn(async move {
             match api::get("/api/bots?messages=20").await {
                 Ok(answer) => {
-                    let list = Bot::list(&answer);
+                    if *catch_gen.peek() != seq {
+                        return;
+                    }
+                    let mut list = Bot::list(&answer);
                     let current = selected.peek().clone();
                     if current.as_ref().is_none_or(|id| !list.iter().any(|b| &b.id == id)) {
                         selected.set(list.first().map(|b| b.id.clone()));
                     }
-                    let mut state = state.write();
-                    state.bots = list;
-                    for thread in state.threads.values_mut() {
-                        thread.loaded = false;
-                        thread.live = None;
-                        // What was set aside may be missing what came while disconnected: the fetch brings it.
-                        thread.since.clear();
+                    {
+                        let mut state = state.write();
+                        let prev_threads: std::collections::HashMap<String, String> =
+                            state.bots.iter().map(|b| (b.id.clone(), b.thread_id.clone())).collect();
+                        for bot in &mut list {
+                            if let Some(old_thread) = prev_threads.get(&bot.id)
+                                && bot.has_chat(old_thread)
+                            {
+                                bot.thread_id = old_thread.clone();
+                            }
+                        }
+                        state.bots = list;
+                        for thread in state.threads.values_mut() {
+                            thread.loaded = false;
+                            thread.live = None;
+                            // What was set aside may be missing what came while disconnected: the fetch brings it.
+                            thread.since.clear();
+                        }
                     }
+                    live_turns.clear_all();
                     problem.set(None);
                     listed.set(true);
                 }
                 Err(_) if unpaired() => on_unpaired.call(()),
-                Err(err) => problem.set(Some(err)),
+                Err(err) => {
+                    if *catch_gen.peek() == seq {
+                        problem.set(Some(err));
+                    }
+                }
             }
         });
     };
@@ -305,13 +334,16 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
     // The event stream, for as long as the app is open.
     use_future(move || async move {
         let mut connected_before = false;
+        let mut backoff_ms = 1_000u32;
         loop {
+            let mut got_frame = false;
             events::follow(|frame| {
-                let after = state.write().apply(&frame);
+                got_frame = true;
+                let after = live::apply_frame(state, rev, live_turns, &frame);
                 notify::on_frame(&frame, *notify_prefs.peek(), state, ui);
                 update::on_frame(&frame, place == link::Place::ThisPc && crate::link::active().is_none());
                 if after == live::After::Resync {
-                    if connected_before {
+                    if connected_before || !*listed.peek() || problem.peek().is_some() {
                         catch_up();
                     }
                     connected_before = true;
@@ -322,14 +354,18 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
                 on_unpaired.call(());
                 return;
             }
-            // The stream ended (Catbot restarted, or the network dropped): try again shortly.
-            events::pause(2_000).await;
+            if got_frame {
+                backoff_ms = 1_000;
+            }
+            // The stream ended (Catbot restarted, or the network dropped): retry with capped backoff.
+            events::pause(backoff_ms).await;
+            backoff_ms = (backoff_ms * 2).min(16_000);
         }
     });
     use_hook(catch_up);
 
     let bots = use_memo(move || state.read().bots.clone());
-    let update_changed = use_memo(move || state.read().update_changed);
+    let update_changed = use_memo(move || (rev.update)());
     // The open bot is gone (deleted here or elsewhere): open the first one left. The settings
     // panel can't do this itself, as it closes with its bot.
     use_effect(move || {
@@ -369,7 +405,10 @@ fn App(place: link::Place, on_unpaired: EventHandler<()>) -> Element {
 #[component]
 fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, problem: ReadSignal<Option<String>>) -> Element {
     let ui = use_context::<settings::Ui>();
-    let open = selected.read().as_ref().and_then(|id| bots.read().iter().find(|b| &b.id == id).cloned());
+    let bots_ref = bots.read();
+    let no_bots = bots_ref.is_empty();
+    let open = selected.read().as_ref().and_then(|id| bots_ref.iter().find(|b| &b.id == id).cloned());
+    drop(bots_ref);
     // On a phone, the chat shows only once a bot has been opened from the list.
     let phone = if (ui.showing_chat)() { "" } else { "max-md:hidden" };
     rsx! {
@@ -379,35 +418,38 @@ fn Main(bots: ReadSignal<Vec<Bot>>, selected: ReadSignal<Option<String>>, proble
             } else if (ui.map)() {
                 teammap::TeamMap {}
             } else {
-                MainView { open, problem: problem() }
+                MainView { open, no_bots, problem: problem() }
             }
         }
     }
 }
 
 #[component]
-fn MainView(open: Option<Bot>, problem: Option<String>) -> Element {
+fn MainView(open: Option<Bot>, no_bots: bool, problem: Option<String>) -> Element {
     let ui = use_context::<settings::Ui>();
     let inbox = use_context::<inbox::Inbox>();
     let mut skipped = use_context::<welcome::Skipped>().0;
-    let no_bots = use_context::<Signal<live::State>>().read().bots.is_empty();
     match (problem, open) {
         (Some(err), _) => rsx! {
             main { class: "relative flex h-full min-w-0 flex-1 flex-col items-center justify-center bg-app",
                 p { role: "alert", class: "text-[13px] text-danger", "Can't reach Catbot: {err}" }
             }
         },
-        // A one-item keyed list, so switching bots starts the conversation view fresh:
-        // Dioxus only honours a key among siblings, and a reused view would keep the last bot's messages.
-        (None, Some(bot)) => rsx! {
-            for bot in std::iter::once(bot) {
-                // Keyed by bot and chat, so opening another chat starts the view fresh too.
-                chat::Chat { key: "{bot.id}-{bot.thread_id}", bot: bot.in_open_chat() }
+        // One-item keyed lists so switching chats starts Chat fresh while keeping BotPanel/SettingsPanel
+        // mounted across chats of the same bot.
+        (None, Some(bot)) => {
+            let panel_bot = bot.clone();
+            rsx! {
+                for chat_bot in std::iter::once(bot) {
+                    chat::Chat { key: "{chat_bot.id}-{chat_bot.thread_id}", bot: chat_bot.in_open_chat() }
+                }
                 if (ui.settings_open)() && !(inbox.open)() {
-                    if bot.channel.is_some() {
-                        settings::SettingsPanel { key: "settings-{bot.id}", bot }
-                    } else {
-                        panel::BotPanel { key: "panel-{bot.id}", bot }
+                    for bot in std::iter::once(panel_bot) {
+                        if bot.channel.is_some() {
+                            settings::SettingsPanel { key: "settings-{bot.id}", bot }
+                        } else {
+                            panel::BotPanel { key: "panel-{bot.id}", bot }
+                        }
                     }
                 }
             }

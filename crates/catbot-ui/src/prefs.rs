@@ -351,10 +351,10 @@ fn AiPage(apis: bool) -> Element {
     let mut checked = use_signal(|| 0u32);
     let mut open = use_signal(|| OPEN_PROVIDER.write().take());
     let mut more = use_signal(|| false);
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     use_effect(move || {
         let _ = checked();
-        let _ = state.read().engines_changed;
+        let _ = (rev.engines)();
         spawn(async move {
             engines.set(Some(api::get("/api/engines").await.map(|e| e["engines"].as_array().cloned().unwrap_or_default())));
         });

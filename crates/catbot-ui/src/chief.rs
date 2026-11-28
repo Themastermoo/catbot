@@ -13,11 +13,12 @@ const HEADING: &str = "text-[13px] font-semibold uppercase tracking-wide text-in
 #[component]
 pub fn ChiefOptions() -> Element {
     let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut found = use_signal(|| None::<Value>);
     let mut problem = use_signal(|| None::<String>);
     let mut busy = use_signal(|| false);
     use_effect(move || {
-        let _ = state.read().chief_changed;
+        let _ = (rev.chief)();
         spawn(async move {
             match api::get("/api/chief").await {
                 Ok(answer) => found.set(Some(answer)),

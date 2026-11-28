@@ -37,12 +37,12 @@ fn bots(state: &State) -> Vec<Bot> {
 
 #[component]
 pub fn Board() -> Element {
-    let state = use_context::<Signal<State>>();
+    let rev = use_context::<crate::live::Revisions>();
     let mut items = use_signal(Vec::<Value>::new);
     let mut problem = use_signal(|| None::<String>);
     let mut adding = use_signal(|| false);
     use_effect(move || {
-        let _ = state.read().board_changed;
+        let _ = (rev.board)();
         spawn(async move {
             match api::get("/api/board").await {
                 Ok(found) => {

@@ -17,7 +17,7 @@ pub fn UsageDialog(on_close: EventHandler<()>, #[props(default)] embedded: bool)
     let mut table = use_signal(|| None::<Result<Value, String>>);
     let mut refreshed = use_signal(|| 0u32);
     let mut limits = use_signal(|| None::<Result<Value, String>>);
-    let state = use_context::<Signal<crate::live::State>>();
+    let rev = use_context::<crate::live::Revisions>();
 
     use_effect(move || {
         let fresh = if refreshed() > 0 { "?fresh=1" } else { "" };
@@ -25,7 +25,7 @@ pub fn UsageDialog(on_close: EventHandler<()>, #[props(default)] embedded: bool)
     });
     use_effect(move || {
         let _ = refreshed();
-        let _ = state.read().limits_changed;
+        let _ = (rev.limits)();
         spawn(async move { limits.set(Some(api::get("/api/limits").await)) });
     });
     use_effect(move || {
