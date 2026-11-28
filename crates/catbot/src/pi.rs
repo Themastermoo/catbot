@@ -29,13 +29,13 @@ use std::{
 
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::mpsc,
 };
 
 use crate::approval::{Answerer, Decision};
-use crate::claude::{Event, Outcome, PermissionMode, Running, Tokens};
+use crate::claude::{AbortOnDrop, Event, Outcome, PermissionMode, Running, Tokens, read_stderr_tail, truncate_output};
 use crate::tools::Workspace;
 
 /// Catbot's extension for Pi: approvals, and Catbot's own tools.
@@ -140,24 +140,21 @@ struct Heard {
     stop: Option<String>,
 }
 
-async fn send(stdin: &tokio::sync::Mutex<ChildStdin>, record: Value) -> Result<(), String> {
+async fn send(stdin: &tokio::sync::Mutex<Option<ChildStdin>>, record: Value) -> Result<(), String> {
     let mut line = record.to_string();
     line.push('\n');
-    stdin.lock().await.write_all(line.as_bytes()).await.map_err(|e| format!("Pi stopped listening ({e})"))
+    let mut held = stdin.lock().await;
+    let pipe = held.as_mut().ok_or_else(|| "Pi stopped listening".to_string())?;
+    pipe.write_all(line.as_bytes()).await.map_err(|e| format!("Pi stopped listening ({e})"))
 }
 
 async fn run(turn: PiTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: Answerer) {
     use base64::Engine;
     let started = std::time::Instant::now();
-    let stdin = Arc::new(tokio::sync::Mutex::new(child.stdin.take().expect("stdin is piped")));
+    let stdin = Arc::new(tokio::sync::Mutex::new(Some(child.stdin.take().expect("stdin is piped"))));
     let stdout = child.stdout.take().expect("stdout is piped");
-    let mut stderr = child.stderr.take().expect("stderr is piped");
-    let stderr_tail = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
-        let text = String::from_utf8_lossy(&buf).trim().to_string();
-        text.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect::<String>()
-    });
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut stderr_tail = AbortOnDrop(tokio::spawn(read_stderr_tail(stderr, 1500)));
     let heard = Arc::new(Mutex::new(Heard::default()));
     let _ = tx.send(Event::Started { session_id: turn.session.clone(), model: (!turn.model.is_empty()).then(|| turn.model.clone()) }).await;
     let message = if turn.new { first_prompt(&turn) } else { turn.text.clone() };
@@ -169,8 +166,8 @@ async fn run(turn: PiTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: A
         Ok(()) => read(stdout, stdin.clone(), &tx, &answers, &heard).await,
         Err(problem) => Err(problem),
     };
-    // Done: closing its input asks Pi to stop in order.
-    drop(stdin);
+    // Done: explicitly close Pi's stdin even if a background `answer_ui` task still holds an Arc.
+    stdin.lock().await.take();
     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
     let _ = child.start_kill();
     let (said, tokens, errors, stop) = {
@@ -190,12 +187,13 @@ async fn run(turn: PiTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: A
             Outcome { ok: !failed, session_id: Some(turn.session.clone()), result: Some(said), stop_reason: stop, tokens, ..Outcome::default() }
         }
         Err(problem) => {
-            let tail = stderr_tail.await.unwrap_or_default();
+            let tail = tokio::time::timeout(Duration::from_secs(2), &mut stderr_tail.0).await.ok().and_then(|r| r.ok()).unwrap_or_default();
             let message = explain(&problem, &tail);
             let _ = tx.send(Event::Error { message: message.clone() }).await;
             Outcome { ok: false, result: Some(message), ..Outcome::default() }
         }
     };
+    drop(stderr_tail);
     let outcome = Outcome { duration_ms: Some(started.elapsed().as_millis() as u64), ..outcome };
     let _ = tx.send(Event::Finished(outcome)).await;
 }
@@ -219,7 +217,7 @@ fn first_prompt(turn: &PiTurn) -> String {
 }
 
 /// Reads Pi until it settles: Ok(aborted), or what went wrong.
-async fn read(stdout: tokio::process::ChildStdout, stdin: Arc<tokio::sync::Mutex<ChildStdin>>, tx: &mpsc::Sender<Event>, answers: &Answerer, heard: &Arc<Mutex<Heard>>) -> Result<bool, String> {
+async fn read(stdout: tokio::process::ChildStdout, stdin: Arc<tokio::sync::Mutex<Option<ChildStdin>>>, tx: &mpsc::Sender<Event>, answers: &Answerer, heard: &Arc<Mutex<Heard>>) -> Result<bool, String> {
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::new();
     loop {
@@ -291,7 +289,7 @@ async fn read(stdout: tokio::process::ChildStdout, stdin: Arc<tokio::sync::Mutex
             "tool_execution_end" => {
                 let id = record["toolCallId"].as_str().unwrap_or("tool").to_string();
                 let output: String = record["result"]["content"].as_array().into_iter().flatten().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n");
-                let _ = tx.send(Event::ToolFinished { id, ok: record["isError"] != true, output: output.trim().to_string() }).await;
+                let _ = tx.send(Event::ToolFinished { id, ok: record["isError"] != true, output: truncate_output(output.trim(), 4000) }).await;
             }
             "extension_ui_request" => {
                 let (stdin, tx, answers, record) = (stdin.clone(), tx.clone(), answers.clone(), record.clone());
@@ -305,7 +303,7 @@ async fn read(stdout: tokio::process::ChildStdout, stdin: Arc<tokio::sync::Mutex
 
 /// An extension's question: Catbot's own approvals become cards; anything else that wants an
 /// answer is let go (no one is at a terminal).
-async fn answer_ui(record: &Value, stdin: &tokio::sync::Mutex<ChildStdin>, tx: &mpsc::Sender<Event>, answers: &Answerer) {
+async fn answer_ui(record: &Value, stdin: &tokio::sync::Mutex<Option<ChildStdin>>, tx: &mpsc::Sender<Event>, answers: &Answerer) {
     let id = record["id"].clone();
     let reply = match record["method"].as_str() {
         Some("confirm") if record["title"] == ASKS => {
@@ -313,8 +311,12 @@ async fn answer_ui(record: &Value, stdin: &tokio::sync::Mutex<ChildStdin>, tx: &
             let (tool, input) = shown(asked["tool"].as_str().unwrap_or("tool"), &asked["input"]);
             let question = format!("ask-{}", uuid::Uuid::new_v4());
             let waiting = answers.expect(&question);
-            let _ = tx.send(Event::ApprovalRequested { id: question, tool, input }).await;
-            let yes = matches!(waiting.await, Decision::Allow);
+            let yes = if tx.send(Event::ApprovalRequested { id: question.clone(), tool, input }).await.is_err() {
+                answers.cancel(&question);
+                false
+            } else {
+                matches!(waiting.await, Decision::Allow)
+            };
             json!({ "type": "extension_ui_response", "id": id, "confirmed": yes })
         }
         Some("select" | "confirm" | "input" | "editor") => json!({ "type": "extension_ui_response", "id": id, "cancelled": true }),
@@ -365,6 +367,10 @@ pub async fn models(program: &Path) -> Result<Vec<(String, String, bool)>, Strin
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
     let output = tokio::time::timeout(Duration::from_secs(60), command.output()).await.map_err(|_| "Pi took too long to list its models".to_string())?.map_err(|e| format!("couldn't start Pi: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(if stderr.is_empty() { format!("Pi couldn't list its models ({}).", output.status) } else { format!("Pi couldn't list its models: {stderr}") });
+    }
     Ok(parse_models(&String::from_utf8_lossy(&output.stdout)))
 }
 

@@ -69,25 +69,31 @@ impl Broker {
     /// arguments) that runs `catbot`; questions arrive as events on `events`.
     pub fn start(helper: &[String], events: mpsc::WeakSender<Event>, tools: Option<&crate::catbot_tools::Access>) -> std::io::Result<Self> {
         let dir = private_dir()?;
-        let (socket, listener) = door::open(&dir)?;
+        let started = (|| -> std::io::Result<Self> {
+            let (socket, listener) = door::open(&dir)?;
 
-        let (program, leading) = helper
-            .split_first()
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no approval helper given"))?;
-        let mut helper_args: Vec<String> = leading.to_vec();
-        helper_args.extend(["approval-mcp".to_string(), socket.to_string_lossy().into_owned()]);
-        let mut server = json!({ "command": program, "args": helper_args });
-        // Catbot's own tools for the turn come through the same helper.
-        if let Some(tools) = tools {
-            server["env"] = json!(tools.env().into_iter().collect::<std::collections::HashMap<_, _>>());
+            let (program, leading) = helper
+                .split_first()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no approval helper given"))?;
+            let mut helper_args: Vec<String> = leading.to_vec();
+            helper_args.extend(["approval-mcp".to_string(), socket.to_string_lossy().into_owned()]);
+            let mut server = json!({ "command": program, "args": helper_args });
+            // Catbot's own tools for the turn come through the same helper.
+            if let Some(tools) = tools {
+                server["env"] = json!(tools.env().into_iter().collect::<std::collections::HashMap<_, _>>());
+            }
+            let config = json!({ "mcpServers": { SERVER_NAME: server } });
+            let config_path = dir.join("mcp.json");
+            write_private(&config_path, config.to_string().as_bytes())?;
+
+            let pending: Pending = Arc::default();
+            let task = tokio::spawn(door::accept(listener, pending.clone(), events));
+            Ok(Self { dir: dir.clone(), config_path, pending, task })
+        })();
+        if started.is_err() {
+            let _ = std::fs::remove_dir_all(&dir);
         }
-        let config = json!({ "mcpServers": { SERVER_NAME: server } });
-        let config_path = dir.join("mcp.json");
-        write_private(&config_path, config.to_string().as_bytes())?;
-
-        let pending: Pending = Arc::default();
-        let task = tokio::spawn(door::accept(listener, pending.clone(), events));
-        Ok(Self { dir, config_path, pending, task })
+        started
     }
 
     pub fn dir(&self) -> &Path {
@@ -147,6 +153,11 @@ impl Answerer {
     pub fn answer(&self, id: &str, decision: Decision) -> bool {
         let Some(reply) = self.pending.lock().expect("pending lock").remove(id) else { return false };
         reply.send(answer_line(id, &decision)).is_ok()
+    }
+
+    /// Cancels a pending question (e.g. when the event channel closed before the prompt arrived).
+    pub fn cancel(&self, id: &str) {
+        self.pending.lock().expect("pending lock").remove(id);
     }
 
     /// Whether this question is still waiting for an answer.
@@ -229,9 +240,19 @@ mod door {
     }
 
     /// Accepts the helper's connections (normally one per turn, again after a drop).
+    /// Connection tasks live in a `JoinSet` so aborting `accept` on `Broker::drop` aborts them too.
     pub async fn accept(listener: UnixListener, pending: Pending, events: mpsc::WeakSender<Event>) {
-        while let Ok((stream, _)) = listener.accept().await {
-            tokio::spawn(connection(stream, pending.clone(), events.clone()));
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = listener.accept() => match accepted {
+                    Ok((stream, _)) => {
+                        connections.spawn(connection(stream, pending.clone(), events.clone()));
+                    }
+                    Err(_) => break,
+                },
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            }
         }
     }
 
@@ -266,15 +287,24 @@ mod door {
     }
 
     pub async fn accept(door: Listener, pending: Pending, events: mpsc::WeakSender<Event>) {
-        while let Ok((mut stream, _)) = door.listener.accept().await {
-            let (token, pending, events) = (door.token.clone(), pending.clone(), events.clone());
-            tokio::spawn(async move {
-                let mut said = vec![0u8; token.len() + 1];
-                let knows = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_exact(&mut said)).await;
-                if matches!(knows, Ok(Ok(_))) && said[..token.len()] == *token.as_bytes() && said[token.len()] == b'\n' {
-                    connection(stream, pending, events).await;
-                }
-            });
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                accepted = door.listener.accept() => match accepted {
+                    Ok((mut stream, _)) => {
+                        let (token, pending, events) = (door.token.clone(), pending.clone(), events.clone());
+                        connections.spawn(async move {
+                            let mut said = vec![0u8; token.len() + 1];
+                            let knows = tokio::time::timeout(std::time::Duration::from_secs(5), stream.read_exact(&mut said)).await;
+                            if matches!(knows, Ok(Ok(_))) && said[..token.len()] == *token.as_bytes() && said[token.len()] == b'\n' {
+                                connection(stream, pending, events).await;
+                            }
+                        });
+                    }
+                    Err(_) => break,
+                },
+                Some(_) = connections.join_next(), if !connections.is_empty() => {}
+            }
         }
     }
 
@@ -298,6 +328,7 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, pendi
             }
         }
     });
+    let mut asked: Vec<String> = Vec::new();
     let mut lines = BufReader::new(read).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         let Ok(ask) = serde_json::from_str::<Value>(&line) else { continue };
@@ -307,6 +338,7 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, pendi
         let Some(id) = ask["id"].as_str().map(str::to_string) else { continue };
         let tool = ask["tool"].as_str().unwrap_or("tool").to_string();
         pending.lock().expect("pending lock").insert(id.clone(), out.clone());
+        asked.push(id.clone());
         let event = Event::ApprovalRequested { id: id.clone(), tool, input: ask["input"].clone() };
         // Weak, so a finished turn's channel closes even while the helper is still connected.
         let delivered = match events.upgrade() {
@@ -317,6 +349,12 @@ async fn connection<S: AsyncRead + AsyncWrite + Send + 'static>(stream: S, pendi
             // Nobody is watching this turn any more: refuse rather than hang.
             pending.lock().expect("pending lock").remove(&id);
             let _ = out.send(answer_line(&id, &Decision::Deny(UNREACHABLE.into())));
+        }
+    }
+    if !asked.is_empty() {
+        let mut map = pending.lock().expect("pending lock");
+        for id in asked {
+            map.remove(&id);
         }
     }
     drop(out);

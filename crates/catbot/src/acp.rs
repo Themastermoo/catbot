@@ -28,13 +28,13 @@ use std::{
 
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::{mpsc, oneshot},
 };
 
 use crate::approval::{Answerer, Decision};
-use crate::claude::{Event, Outcome, PermissionMode, Running};
+use crate::claude::{AbortOnDrop, Event, Outcome, PermissionMode, Running, read_stderr_tail, truncate_output};
 use crate::engines::Engine;
 use crate::tools::Workspace;
 
@@ -214,6 +214,17 @@ struct Link {
     next: Arc<Mutex<u64>>,
 }
 
+struct WaitGuard {
+    waiting: Waiting,
+    id: u64,
+}
+
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        self.waiting.lock().expect("waiting lock").remove(&self.id);
+    }
+}
+
 impl Link {
     async fn send(&self, message: Value) -> Result<(), String> {
         let mut line = message.to_string();
@@ -230,6 +241,7 @@ impl Link {
         };
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().expect("waiting lock").insert(id, tx);
+        let _guard = WaitGuard { waiting: self.waiting.clone(), id };
         self.send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })).await?;
         let answer = match within {
             Some(limit) => tokio::time::timeout(limit, rx).await.map_err(|_| format!("{method} got no answer in {} seconds", limit.as_secs()))?,
@@ -265,16 +277,11 @@ async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: 
     let started = std::time::Instant::now();
     let stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
-    let mut stderr = child.stderr.take().expect("stderr is piped");
-    let stderr_tail = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
-        let text = String::from_utf8_lossy(&buf).trim().to_string();
-        text.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect::<String>()
-    });
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut stderr_tail = AbortOnDrop(tokio::spawn(read_stderr_tail(stderr, 1500)));
     let link = Link { stdin: Arc::new(tokio::sync::Mutex::new(stdin)), waiting: Arc::default(), next: Arc::default() };
     let heard = Arc::new(Mutex::new(Heard::default()));
-    let reader = tokio::spawn(read(stdout, link.clone(), tx.clone(), answers, heard.clone(), turn.workspace.clone()));
+    let reader = AbortOnDrop(tokio::spawn(read(stdout, link.clone(), tx.clone(), answers, heard.clone(), turn.workspace.clone())));
 
     let result = converse(&turn, &link, &tx, &heard, &slot).await;
     *slot.lock().expect("slot lock") = None;
@@ -283,19 +290,18 @@ async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: 
         let _ = tx.send(Event::Text { text: text.clone() }).await;
     }
     let outcome = match result {
-        Ok((session, stop)) => {
+        Ok((session, stop, sent)) => {
             let ok = stop != "refusal";
             if !ok {
                 let _ = tx.send(Event::Error { message: format!("{} declined to answer.", turn.engine.name) }).await;
             }
             // Agent programs don't say what they used: a guess from what went in and came out.
-            let sent = first_prompt(&turn).len();
             let tokens = Some(crate::claude::Tokens::guess(sent, text.len()));
             Outcome { ok, session_id: Some(session), result: Some(text), stop_reason: Some(stop), tokens, ..Outcome::default() }
         }
         Err(problem) => {
             let _ = child.start_kill();
-            let tail = stderr_tail.await.unwrap_or_default();
+            let tail = tokio::time::timeout(Duration::from_secs(2), &mut stderr_tail.0).await.ok().and_then(|r| r.ok()).unwrap_or_default();
             let message = explain(turn.engine, &problem, &tail);
             let _ = tx.send(Event::Error { message: message.clone() }).await;
             Outcome { ok: false, result: Some(message), ..Outcome::default() }
@@ -303,12 +309,13 @@ async fn run(turn: AcpTurn, mut child: Child, tx: mpsc::Sender<Event>, answers: 
     };
     let outcome = Outcome { duration_ms: Some(started.elapsed().as_millis() as u64), ..outcome };
     let _ = child.start_kill();
-    reader.abort();
+    drop(reader);
+    drop(stderr_tail);
     let _ = tx.send(Event::Finished(outcome)).await;
 }
 
-/// The handshake, the session and the prompt. The session id and why the agent stopped.
-async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: &Mutex<Heard>, slot: &Slot) -> Result<(String, String), String> {
+/// The handshake, the session and the prompt. Returns `(session_id, stop_reason, prompt_bytes)`.
+async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: &Mutex<Heard>, slot: &Slot) -> Result<(String, String, usize), String> {
     let init = link
         .call(
             "initialize",
@@ -390,9 +397,10 @@ async fn converse(turn: &AcpTurn, link: &Link, tx: &mpsc::Sender<Event>, heard: 
     // The replay (if any) came before session/load's answer, which the reader handles in order.
     heard.lock().expect("heard lock").listening = true;
     *slot.lock().expect("slot lock") = Some((link.clone(), session.clone()));
+    let sent = prompt.len();
     let answer = link.call("session/prompt", json!({ "sessionId": session, "prompt": [{ "type": "text", "text": prompt }] }), None).await?;
     let stop = answer["stopReason"].as_str().unwrap_or("end_turn").to_string();
-    Ok((session, stop))
+    Ok((session, stop, sent))
 }
 
 /// An agent's thinking levels (ACP's config option of category `thought_level`): its id, and
@@ -685,7 +693,7 @@ fn output_of(update: &Value) -> String {
     {
         out = raw.as_str().map(str::to_string).unwrap_or_else(|| raw.to_string());
     }
-    out.trim().to_string()
+    truncate_output(out.trim(), 4000)
 }
 
 /// Answers one of the agent's requests.
@@ -713,8 +721,12 @@ async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc:
             } else {
                 let question = format!("ask-{}", uuid::Uuid::new_v4());
                 let waiting = answers.expect(&question);
-                let _ = tx.send(Event::ApprovalRequested { id: question, tool, input }).await;
-                waiting.await
+                if tx.send(Event::ApprovalRequested { id: question.clone(), tool, input }).await.is_err() {
+                    answers.cancel(&question);
+                    Decision::Deny("turn ended".into())
+                } else {
+                    waiting.await
+                }
             };
             let outcome = match (decision, allow, reject) {
                 (Decision::Allow, Some(option), _) => json!({ "outcome": "selected", "optionId": option }),
@@ -724,22 +736,33 @@ async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc:
             link.reply(id, json!({ "outcome": outcome })).await;
         }
         "fs/read_text_file" => match file_of(params, workspace) {
-            Ok(path) => match tokio::fs::read_to_string(&path).await {
-                Ok(content) => {
-                    let line = params["line"].as_u64().unwrap_or(1).max(1) as usize;
-                    let content = match params["limit"].as_u64() {
-                        None if line == 1 => content,
-                        limit => {
-                            let lines: Vec<&str> = content.split('\n').collect();
-                            let start = (line - 1).min(lines.len());
-                            let end = limit.map(|l| (start + l as usize).min(lines.len())).unwrap_or(lines.len());
-                            lines[start..end].join("\n")
+            Ok(path) => {
+                const MAX_ACP_READ_BYTES: u64 = 10 * 1024 * 1024;
+                match tokio::fs::metadata(&path).await {
+                    Ok(meta) if meta.len() > MAX_ACP_READ_BYTES => {
+                        link.refuse(id, -32602, &format!("{} is too large to read as text ({} bytes)", path.display(), meta.len())).await;
+                    }
+                    Err(err) => link.refuse(id, -32602, &format!("couldn't read {}: {err}", path.display())).await,
+                    Ok(_) => match tokio::fs::read_to_string(&path).await {
+                        Ok(content) => {
+                            let line = params["line"].as_u64().unwrap_or(1).max(1).min(usize::MAX as u64) as usize;
+                            let content = match params["limit"].as_u64() {
+                                None if line == 1 => content,
+                                limit => {
+                                    let lines: Vec<&str> = content.split('\n').collect();
+                                    let start = (line - 1).min(lines.len());
+                                    let end = limit
+                                        .map(|l| start.saturating_add(l.min(usize::MAX as u64) as usize).min(lines.len()))
+                                        .unwrap_or(lines.len());
+                                    lines[start..end].join("\n")
+                                }
+                            };
+                            link.reply(id, json!({ "content": content })).await;
                         }
-                    };
-                    link.reply(id, json!({ "content": content })).await;
+                        Err(err) => link.refuse(id, -32602, &format!("couldn't read {}: {err}", path.display())).await,
+                    },
                 }
-                Err(err) => link.refuse(id, -32602, &format!("couldn't read {}: {err}", path.display())).await,
-            },
+            }
             Err(problem) => link.refuse(id, -32602, &problem).await,
         },
         "fs/write_text_file" => match (file_of(params, workspace), params["content"].as_str()) {
@@ -805,7 +828,7 @@ pub async fn sign_in(
     let stdout = child.stdout.take().expect("stdout is piped");
     let reading = link.clone();
     let shown = link_tx.clone();
-    let reader = tokio::spawn(async move {
+    let reader = AbortOnDrop(tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let Ok(message) = serde_json::from_str::<Value>(line.trim()) else { continue };
@@ -837,10 +860,10 @@ pub async fn sign_in(
             }
         }
         reading.waiting.lock().expect("waiting lock").clear();
-    });
+    }));
     // The link, from its output. Never shown otherwise: the lines after can carry a code.
     let stderr = child.stderr.take().expect("stderr is piped");
-    let watcher = tokio::spawn(async move {
+    let watcher = AbortOnDrop(tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             // Antigravity's line; Gemini CLI prints Google's page among its own words (stage 29.7).
@@ -852,7 +875,7 @@ pub async fn sign_in(
                 let _ = tx.send((url.to_string(), None));
             }
         }
-    });
+    }));
     link.call(
         "initialize",
         json!({
@@ -863,19 +886,31 @@ pub async fn sign_in(
         Some(START_TIME),
     )
     .await?;
-    let (done_tx, done_rx) = oneshot::channel::<Result<(), String>>();
+    let (done_tx, mut done_rx) = oneshot::channel::<Result<(), String>>();
     let asking = link.clone();
     let task = tokio::spawn(async move {
+        let _reader = reader;
+        let _watcher = watcher;
         let answer = asking.call("authenticate", json!({ "methodId": method }), Some(Duration::from_secs(600))).await.map(|_| ());
         let _ = done_tx.send(answer.clone());
         finished(answer);
         let _ = child.start_kill();
-        reader.abort();
-        watcher.abort();
     });
     tokio::select! {
-        url = link_rx => Ok((url.ok(), task)),
-        done = done_rx => match done {
+        url = link_rx => match url {
+            Ok(link) => Ok((Some(link), task)),
+            // Both reader and watcher exited without sending a link: wait briefly for `authenticate`'s
+            // outcome rather than treating a subprocess crash as "already signed in".
+            Err(_) => match tokio::time::timeout(Duration::from_secs(5), &mut done_rx).await {
+                Ok(Ok(Ok(()))) => Ok((None, task)),
+                Ok(Ok(Err(problem))) => Err(problem),
+                _ => {
+                    task.abort();
+                    Err(format!("{} stopped before giving a sign-in link", engine.name))
+                }
+            },
+        },
+        done = &mut done_rx => match done {
             Ok(Ok(())) => Ok((None, task)),
             Ok(Err(problem)) => Err(problem),
             Err(_) => Err("it stopped".into()),
@@ -910,8 +945,15 @@ pub async fn deliver_callback(auth_url: &str, pasted: &str) -> Result<(), String
     if !local || !same {
         return Err("That isn't the address the sign-in came back to.".into());
     }
-    let client = reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
-    let answer = client.get(pasted).send().await.map_err(|_| "The sign-in had already finished or stopped. Start it again.".to_string())?;
+    static LOCAL_CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let client = LOCAL_CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    });
+    let answer = client.get(pasted).timeout(Duration::from_secs(30)).send().await.map_err(|_| "The sign-in had already finished or stopped. Start it again.".to_string())?;
     if answer.status().is_success() || answer.status().is_redirection() { Ok(()) } else { Err(format!("The sign-in didn't take it ({}).", answer.status())) }
 }
 

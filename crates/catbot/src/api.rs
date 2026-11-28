@@ -91,14 +91,31 @@ struct Used {
     no_usage_option: bool,
 }
 
+/// Counts serialized JSON bytes without allocating intermediate strings.
+#[derive(Default)]
+struct ByteCounter(usize);
+
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn json_byte_len(values: &[Value]) -> usize {
+    let mut counter = ByteCounter::default();
+    let _ = serde_json::to_writer(&mut counter, values);
+    counter.0
+}
+
 async fn converse(turn: &ApiTurn, tx: &mpsc::Sender<Event>, answers: &Answerer, used: &mut Used) -> Result<String, String> {
     if turn.model.trim().is_empty() {
         return Err(format!("Pick a model for this bot: {} has no default one.", turn.engine.name));
     }
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = crate::http::stream_client();
     let mut messages = vec![json!({ "role": "system", "content": turn.system })];
     for (person, text) in &turn.history {
         messages.push(json!({ "role": if *person { "user" } else { "assistant" }, "content": text }));
@@ -120,7 +137,7 @@ async fn converse(turn: &ApiTurn, tx: &mpsc::Sender<Event>, answers: &Answerer, 
         // Providers can reject either option first. Each rejection removes one
         // option for the remainder of the turn, so at most two retries are needed.
         let round = loop {
-            match ask(&client, turn, &messages, use_tools, used, tx).await {
+            match ask(client, turn, &messages, use_tools, used, tx).await {
                 Err(Failure::NoUsageOption) if !used.no_usage_option => used.no_usage_option = true,
                 Err(Failure::NoTools) if use_tools => use_tools = false,
                 result => break result.map_err(|failure| failure.to_string())?,
@@ -134,7 +151,7 @@ async fn converse(turn: &ApiTurn, tx: &mpsc::Sender<Event>, answers: &Answerer, 
                 }
             }
             None => {
-                let sent: usize = messages.iter().map(|m| m.to_string().len()).sum();
+                let sent = json_byte_len(&messages);
                 let written = round.text.len() + round.calls.iter().map(|c| c.arguments.len() + c.name.len()).sum::<usize>();
                 used.tokens.add(Tokens::guess(sent, written));
             }
@@ -164,7 +181,19 @@ async fn converse(turn: &ApiTurn, tx: &mpsc::Sender<Event>, answers: &Answerer, 
 
 /// Runs one tool call, with its step and any approval shown, and returns what the model reads.
 async fn use_tool(turn: &ApiTurn, call: &Call, tx: &mpsc::Sender<Event>, answers: &Answerer) -> String {
-    let args: Value = serde_json::from_str(if call.arguments.trim().is_empty() { "{}" } else { &call.arguments }).unwrap_or(Value::Null);
+    let args: Value = if call.arguments.trim().is_empty() {
+        json!({})
+    } else {
+        match serde_json::from_str(&call.arguments) {
+            Ok(v) => v,
+            Err(err) => {
+                let problem = format!("invalid JSON arguments for {}: {err}", call.name);
+                let _ = tx.send(Event::ToolStarted { id: call.id.clone(), name: call.name.clone(), input: json!({ "raw": call.arguments }) }).await;
+                let _ = tx.send(Event::ToolFinished { id: call.id.clone(), ok: false, output: problem.clone() }).await;
+                return format!("Error: {problem}");
+            }
+        }
+    };
     let planned = match tools::plan(&turn.workspace, &call.name, &args) {
         Ok(planned) => planned,
         Err(problem) => {
@@ -177,7 +206,10 @@ async fn use_tool(turn: &ApiTurn, call: &Call, tx: &mpsc::Sender<Event>, answers
     if planned.ask {
         let question = format!("ask-{}", uuid::Uuid::new_v4());
         let waiting = answers.expect(&question);
-        let _ = tx.send(Event::ApprovalRequested { id: question, tool: planned.shown.to_string(), input: planned.input.clone() }).await;
+        if tx.send(Event::ApprovalRequested { id: question.clone(), tool: planned.shown.to_string(), input: planned.input.clone() }).await.is_err() {
+            answers.cancel(&question);
+            return "Refused: turn ended before approval could be asked.".into();
+        }
         if let Decision::Deny(why) = waiting.await {
             let _ = tx.send(Event::ToolFinished { id: call.id.clone(), ok: false, output: "Refused".into() }).await;
             return format!("Refused: {why}");
@@ -280,23 +312,36 @@ async fn ask(client: &reqwest::Client, turn: &ApiTurn, messages: &[Value], with_
         let chunk = chunk.map_err(|e| Failure::Other(format!("{} stopped answering partway: {e}", turn.engine.name)))?;
         for line in lines.push(&chunk) {
             let line = String::from_utf8_lossy(&line);
-            if apply_line(line.trim(), &mut round, &mut calls, tx).await {
+            if apply_line(line.trim(), &mut round, &mut calls, tx).await.map_err(Failure::Other)? {
                 round.calls = calls.into_values().collect();
                 return Ok(round);
             }
         }
     }
+    if let Some(tail) = lines.finish() {
+        let line = String::from_utf8_lossy(&tail);
+        let _ = apply_line(line.trim(), &mut round, &mut calls, tx).await.map_err(Failure::Other)?;
+    }
     round.calls = calls.into_values().collect();
     Ok(round)
 }
 
-/// Takes one line of the event stream into the round. True at `[DONE]`.
-async fn apply_line(line: &str, round: &mut Round, calls: &mut BTreeMap<u64, Call>, tx: &mpsc::Sender<Event>) -> bool {
-    let Some(data) = line.strip_prefix("data:").map(str::trim) else { return false };
+/// Takes one line of the event stream into the round. `Ok(true)` at `[DONE]`, `Err` on an inline
+/// stream error payload (e.g. HTTP 200 SSE `data: {"error": ...}`).
+async fn apply_line(line: &str, round: &mut Round, calls: &mut BTreeMap<u64, Call>, tx: &mpsc::Sender<Event>) -> Result<bool, String> {
+    let Some(data) = line.strip_prefix("data:").map(str::trim) else { return Ok(false) };
     if data == "[DONE]" {
-        return true;
+        return Ok(true);
     }
-    let Ok(chunk) = serde_json::from_str::<Value>(data) else { return false };
+    let Ok(chunk) = serde_json::from_str::<Value>(data) else { return Ok(false) };
+    if chunk.get("error").is_some_and(|e| !e.is_null()) && chunk["choices"].as_array().is_none_or(Vec::is_empty) {
+        let msg = chunk["error"]["message"]
+            .as_str()
+            .or_else(|| chunk["error"].as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| chunk["error"].to_string());
+        return Err(msg);
+    }
     if let Some(usage) = chunk["usage"].as_object().filter(|u| u.contains_key("prompt_tokens") || u.contains_key("completion_tokens")) {
         let cached = usage.get("prompt_tokens_details").and_then(|d| d["cached_tokens"].as_u64()).unwrap_or(0);
         let prompt = usage.get("prompt_tokens").and_then(Value::as_u64).unwrap_or(0);
@@ -318,9 +363,25 @@ async fn apply_line(line: &str, round: &mut Round, calls: &mut BTreeMap<u64, Cal
     }
     if let Some(list) = delta["tool_calls"].as_array() {
         for (n, piece) in list.iter().enumerate() {
-            let index = piece["index"].as_u64().unwrap_or(n as u64);
+            let piece_id = piece["id"].as_str().filter(|id| !id.is_empty());
+            let index = match piece["index"].as_u64() {
+                Some(i) => i,
+                None => {
+                    if let Some(id) = piece_id {
+                        calls
+                            .iter()
+                            .find(|(_, c)| c.id == id)
+                            .map(|(&k, _)| k)
+                            .unwrap_or_else(|| calls.keys().next_back().map_or(0, |k| k + 1))
+                    } else if n == 0 && !calls.is_empty() {
+                        *calls.keys().next_back().unwrap()
+                    } else {
+                        n as u64
+                    }
+                }
+            };
             let call = calls.entry(index).or_default();
-            if let Some(id) = piece["id"].as_str().filter(|id| !id.is_empty()) {
+            if let Some(id) = piece_id {
                 call.id = id.to_string();
             }
             if let Some(name) = piece["function"]["name"].as_str() {
@@ -334,7 +395,7 @@ async fn apply_line(line: &str, round: &mut Round, calls: &mut BTreeMap<u64, Cal
             }
         }
     }
-    false
+    Ok(false)
 }
 
 fn reach_error(engine: &Engine, url: &str, err: &reqwest::Error) -> String {
@@ -347,8 +408,7 @@ fn reach_error(engine: &Engine, url: &str, err: &reqwest::Error) -> String {
 
 /// The models an API offers (`GET /models`), for the picker. Chat models only, as best it can tell.
 pub async fn models(access: &Access) -> Result<Vec<String>, String> {
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(15)).build().map_err(|e| e.to_string())?;
-    let mut request = client.get(format!("{}/models", access.url));
+    let mut request = crate::http::client().get(format!("{}/models", access.url)).timeout(std::time::Duration::from_secs(15));
     if let Some(key) = &access.key {
         request = request.bearer_auth(key);
     }
@@ -386,9 +446,9 @@ mod tests {
             "",
         ];
         for line in lines {
-            assert!(!apply_line(line, &mut round, &mut calls, &tx).await);
+            assert!(!apply_line(line, &mut round, &mut calls, &tx).await.unwrap());
         }
-        assert!(apply_line("data: [DONE]", &mut round, &mut calls, &tx).await);
+        assert!(apply_line("data: [DONE]", &mut round, &mut calls, &tx).await.unwrap());
         assert_eq!(round.text, "Let me look.");
         let call = calls.get(&0).unwrap();
         assert_eq!((call.id.as_str(), call.name.as_str(), call.arguments.as_str()), ("c1", "read_file", r#"{"path":"a.md"}"#));
@@ -400,5 +460,20 @@ mod tests {
             }
         }
         assert_eq!(deltas, "Let me look.");
+    }
+
+    #[tokio::test]
+    async fn stream_errors_and_unindexed_tool_calls_are_handled() {
+        let (tx, _rx) = mpsc::channel(16);
+        let mut round = Round::default();
+        let mut calls = BTreeMap::new();
+        let err = apply_line(r#"data: {"error":{"message":"overloaded"}}"#, &mut round, &mut calls, &tx).await.unwrap_err();
+        assert_eq!(err, "overloaded");
+
+        assert!(!apply_line(r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"c1","function":{"name":"read_file","arguments":"{\"path\":\"a\"}"}}]}}]}"#, &mut round, &mut calls, &tx).await.unwrap());
+        assert!(!apply_line(r#"data: {"choices":[{"delta":{"tool_calls":[{"id":"c2","function":{"name":"list_files","arguments":"{}"}}]}}]}"#, &mut round, &mut calls, &tx).await.unwrap());
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.get(&0).unwrap().id, "c1");
+        assert_eq!(calls.get(&1).unwrap().id, "c2");
     }
 }

@@ -86,6 +86,10 @@ pub struct Plan {
     issuer: String,
     resource: String,
     flow: Mutex<Option<Flow>>,
+    /// The active loopback callback listener task, aborted on cancel or restart.
+    callback_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// Cached OpenAI JWKS keys (TTL 1 hour, bypassed on key rotation).
+    jwks: tokio::sync::Mutex<Option<(Instant, jsonwebtoken::jwk::JwkSet)>>,
     /// A client OpenAI made for a sign-in that didn't finish: used again, not a new one each try.
     retry_client: Mutex<Option<String>>,
     /// One renewal at a time: a refresh token is used once.
@@ -139,7 +143,16 @@ impl Plan {
             Some(test) => (test.trim_end_matches('/').to_string(), format!("{}/v1", test.trim_end_matches('/'))),
             None => (ISSUER.to_string(), RESOURCE.to_string()),
         };
-        Plan { dir, issuer, resource, flow: Mutex::new(None), retry_client: Mutex::new(None), renewing: tokio::sync::Mutex::new(()) }
+        Plan {
+            dir,
+            issuer,
+            resource,
+            flow: Mutex::new(None),
+            callback_task: Mutex::new(None),
+            jwks: tokio::sync::Mutex::new(None),
+            retry_client: Mutex::new(None),
+            renewing: tokio::sync::Mutex::new(()),
+        }
     }
 
     /// The API address bots use with the token.
@@ -255,7 +268,7 @@ impl Plan {
         let flow_id = flow.id.clone();
         *self.flow.lock().expect("flow lock") = Some(flow);
         let plan = self.clone();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let answer = tokio::time::timeout(LIFETIME, plan.callback(listener, port)).await;
             match answer {
                 Ok(Some(params)) => plan.complete(&flow_id, params).await,
@@ -264,6 +277,9 @@ impl Plan {
             }
             done();
         });
+        if let Some(prev) = self.callback_task.lock().expect("callback task lock").replace(handle) {
+            prev.abort();
+        }
         Ok(url.to_string())
     }
 
@@ -271,7 +287,7 @@ impl Plan {
     async fn callback(&self, listener: TcpListener, port: u16) -> Option<HashMap<String, String>> {
         loop {
             let (mut socket, _) = listener.accept().await.ok()?;
-            let mut buf = vec![0u8; 8192];
+            let mut buf = vec![0u8; 32_768];
             let mut got = 0;
             while got < buf.len() {
                 let Ok(n) = tokio::time::timeout(Duration::from_secs(10), socket.read(&mut buf[got..])).await.unwrap_or(Ok(0)) else { break };
@@ -324,6 +340,9 @@ impl Plan {
     }
 
     pub fn cancel(&self) {
+        if let Some(handle) = self.callback_task.lock().expect("callback task lock").take() {
+            handle.abort();
+        }
         let id = self.flow.lock().expect("flow lock").as_ref().map(|f| f.id.clone());
         if let Some(id) = id {
             self.finish(&id, "cancelled", Some("The ChatGPT sign-in was cancelled."));
@@ -352,7 +371,6 @@ impl Plan {
         if flow.client_id.as_ref().is_some_and(|c| *c != client_id) {
             return Err("ChatGPT answered for another registration. Start again.".into());
         }
-        let keys = self.keys().await?;
         let (status, body) = self
             .post_form(&[
                 ("grant_type", "authorization_code"),
@@ -370,7 +388,7 @@ impl Plan {
             return Err("ChatGPT couldn't finish this sign-in. Start again.".into());
         }
         let tokens = token_set(&body, None)?;
-        let (subject, email) = self.identity(&tokens.id, &client_id, &keys, Some(&flow.nonce))?;
+        let (subject, email) = self.verify_identity(&tokens.id, &client_id, Some(&flow.nonce)).await?;
         if flow.previous.as_ref().is_some_and(|p| p.subject != subject) {
             return Err("ChatGPT signed in another account. The saved one was kept.".into());
         }
@@ -384,12 +402,18 @@ impl Plan {
     }
 
     async fn post_form(&self, form: &[(&str, &str)]) -> Result<(reqwest::StatusCode, Value), String> {
-        let answer = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(15))
-            .build()
-            .map_err(|e| e.to_string())?
+        static NO_REDIRECT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+        let client = NO_REDIRECT.get_or_init(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(10))
+                .pool_max_idle_per_host(4)
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        });
+        let answer = client
             .post(format!("{}/api/accounts/oauth/token", self.issuer))
+            .timeout(Duration::from_secs(15))
             .form(form)
             .send()
             .await
@@ -402,8 +426,15 @@ impl Plan {
         Ok((status, serde_json::from_slice(&bytes).unwrap_or(Value::Null)))
     }
 
-    async fn keys(&self) -> Result<jsonwebtoken::jwk::JwkSet, String> {
-        let answer = reqwest::Client::new()
+    async fn keys(&self, force_refresh: bool) -> Result<jsonwebtoken::jwk::JwkSet, String> {
+        const JWKS_TTL: Duration = Duration::from_secs(3600);
+        if !force_refresh
+            && let Some((at, set)) = self.jwks.lock().await.as_ref()
+            && at.elapsed() < JWKS_TTL
+        {
+            return Ok(set.clone());
+        }
+        let answer = crate::http::client()
             .get(format!("{}/.well-known/jwks.json", self.issuer))
             .timeout(Duration::from_secs(15))
             .send()
@@ -416,7 +447,21 @@ impl Plan {
         if set.keys.is_empty() {
             return Err("ChatGPT gave no identity keys.".into());
         }
+        *self.jwks.lock().await = Some((Instant::now(), set.clone()));
         Ok(set)
+    }
+
+    /// Checks the identity token against cached JWKS, retrying once with a fresh JWKS fetch if a
+    /// key rotation caused a lookup miss.
+    async fn verify_identity(&self, token: &str, client_id: &str, nonce: Option<&str>) -> Result<(String, Option<String>), String> {
+        let keys = self.keys(false).await?;
+        match self.identity(token, client_id, &keys, nonce) {
+            Ok(id) => Ok(id),
+            Err(_) => {
+                let fresh = self.keys(true).await?;
+                self.identity(token, client_id, &fresh, nonce)
+            }
+        }
     }
 
     /// Checks the identity token: signed by OpenAI, for this client, with the sign-in's nonce.
@@ -464,7 +509,6 @@ impl Plan {
         if tokens.earliest_refresh_at.is_some_and(|at| at > now_ms()) {
             return if tokens.expires_at > now_ms() { Ok(tokens.access) } else { Err("ChatGPT's sign-in can't renew yet. Try again shortly.".into()) };
         }
-        let keys = self.keys().await?;
         let (status, body) = self.post_form(&[("grant_type", "refresh_token"), ("client_id", &record.client_id), ("refresh_token", &tokens.refresh), ("resource", &self.resource)]).await?;
         if !status.is_success() {
             let code = body["error"].as_str().or(body["error"]["code"].as_str()).unwrap_or_default();
@@ -476,15 +520,20 @@ impl Plan {
             return Err("ChatGPT couldn't renew the sign-in right now. Try again later; it's still saved.".into());
         }
         // The old refresh token is spent: anything wrong with the new ones means signing in again.
-        let renewed = token_set(&body, Some(&tokens)).and_then(|t| {
-            if body["id_token"].is_string() {
-                let (subject, _) = self.identity(&t.id, &record.client_id, &keys, None)?;
-                if subject != record.subject {
-                    return Err("ChatGPT renewed another account.".to_string());
+        let renewed = match token_set(&body, Some(&tokens)) {
+            Ok(t) => {
+                if body["id_token"].is_string() {
+                    match self.verify_identity(&t.id, &record.client_id, None).await {
+                        Ok((subject, _)) if subject == record.subject => Ok(t),
+                        Ok(_) => Err("ChatGPT renewed another account.".to_string()),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    Ok(t)
                 }
             }
-            Ok(t)
-        });
+            Err(e) => Err(e),
+        };
         match renewed {
             Ok(t) => {
                 let access = t.access.clone();
@@ -504,7 +553,7 @@ impl Plan {
     /// The models the plan offers: `[{ id, label }]`.
     pub async fn models(&self) -> Result<Vec<Value>, String> {
         let token = self.access_token().await?;
-        let answer = reqwest::Client::new()
+        let answer = crate::http::client()
             .get(format!("{}/models", self.resource))
             .bearer_auth(token)
             .timeout(Duration::from_secs(15))
@@ -536,7 +585,7 @@ impl Plan {
         let Some(tokens) = record.tokens.take() else { return Ok(true) };
         let mut revoked = tokens.refresh.is_empty();
         if !revoked {
-            let client = reqwest::Client::new();
+            let client = crate::http::client();
             let discovery: Option<Value> = async { client.get(format!("{}/.well-known/openid-configuration", self.issuer)).timeout(Duration::from_secs(15)).send().await.ok()?.json().await.ok() }.await;
             let endpoint = discovery
                 .as_ref()

@@ -30,13 +30,13 @@ use std::{
 
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, Command},
     sync::{mpsc, oneshot},
 };
 
 use crate::approval::{Answerer, Decision};
-use crate::claude::{Event, Outcome, PermissionMode, Running, Tokens};
+use crate::claude::{AbortOnDrop, Event, Outcome, PermissionMode, Running, Tokens, read_stderr_tail, truncate_output};
 use crate::tools::Workspace;
 
 const START_TIME: Duration = Duration::from_secs(90);
@@ -104,6 +104,17 @@ struct Link {
     next: Arc<Mutex<u64>>,
 }
 
+struct WaitGuard {
+    waiting: Waiting,
+    id: u64,
+}
+
+impl Drop for WaitGuard {
+    fn drop(&mut self) {
+        self.waiting.lock().expect("waiting lock").remove(&self.id);
+    }
+}
+
 impl Link {
     fn new(stdin: ChildStdin) -> Self {
         Self { stdin: Arc::new(tokio::sync::Mutex::new(stdin)), waiting: Arc::default(), next: Arc::default() }
@@ -123,6 +134,7 @@ impl Link {
         };
         let (tx, rx) = oneshot::channel();
         self.waiting.lock().expect("waiting lock").insert(id, tx);
+        let _guard = WaitGuard { waiting: self.waiting.clone(), id };
         self.send(json!({ "id": id, "method": method, "params": params })).await?;
         let answer = match within {
             Some(limit) => tokio::time::timeout(limit, rx).await.map_err(|_| format!("{method} got no answer in {} seconds", limit.as_secs()))?,
@@ -161,11 +173,11 @@ impl Link {
 }
 
 fn spawn(program: &Path, home: &Path, cwd: &Path) -> std::io::Result<Child> {
-    spawn_with(program, home, cwd, &[], &[])
+    spawn_with(program, home, cwd, &[], &[], Stdio::piped())
 }
 
 /// Codex's app-server with settings (`-c …`) and environment of its own.
-fn spawn_with(program: &Path, home: &Path, cwd: &Path, settings: &[String], env: &[(&str, &str)]) -> std::io::Result<Child> {
+fn spawn_with(program: &Path, home: &Path, cwd: &Path, settings: &[String], env: &[(&str, &str)], stderr: Stdio) -> std::io::Result<Child> {
     let mut command = Command::new(program);
     command.args(settings).envs(env.iter().copied()).env_remove("OPENAI_API_KEY");
     command
@@ -174,7 +186,7 @@ fn spawn_with(program: &Path, home: &Path, cwd: &Path, settings: &[String], env:
         .current_dir(cwd)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(stderr)
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(0x0800_0000);
@@ -218,7 +230,7 @@ pub fn start(turn: CodexTurn) -> Result<Running, String> {
             std::fs::create_dir_all(&turn.home).map_err(|e| e.to_string())?;
             // Never Codex's own sign-in here: the plan's token is the only one.
             let _ = std::fs::remove_file(turn.home.join("auth.json"));
-            spawn_with(&turn.program, &turn.home, &turn.workspace.folder, &crate::chatgpt::codex_args(resource), &[("CATBOT_CHATGPT_TOKEN", token.as_str())])
+            spawn_with(&turn.program, &turn.home, &turn.workspace.folder, &crate::chatgpt::codex_args(resource), &[("CATBOT_CHATGPT_TOKEN", token.as_str())], Stdio::piped())
         }
         None => {
             if !link_sign_in(&turn.home).map_err(|e| format!("couldn't link Codex's sign-in: {e}"))? {
@@ -293,17 +305,12 @@ async fn run(turn: CodexTurn, mut child: Child, tx: mpsc::Sender<Event>, answers
     let started = std::time::Instant::now();
     let stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
-    let mut stderr = child.stderr.take().expect("stderr is piped");
-    let stderr_tail = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
-        let text = String::from_utf8_lossy(&buf).trim().to_string();
-        text.chars().rev().take(1500).collect::<Vec<_>>().into_iter().rev().collect::<String>()
-    });
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let mut stderr_tail = AbortOnDrop(tokio::spawn(read_stderr_tail(stderr, 1500)));
     let link = Link::new(stdin);
     let heard = Arc::new(Mutex::new(Heard::default()));
     let (done_tx, done_rx) = mpsc::channel(4);
-    let reader = tokio::spawn(read(stdout, link.clone(), tx.clone(), answers, heard.clone(), turn.workspace.mode, done_tx));
+    let reader = AbortOnDrop(tokio::spawn(read(stdout, link.clone(), tx.clone(), answers, heard.clone(), turn.workspace.mode, done_tx)));
 
     let result = converse(&turn, &link, &tx, done_rx, &live).await;
     live.lock().expect("codex live lock").take();
@@ -335,7 +342,7 @@ async fn run(turn: CodexTurn, mut child: Child, tx: mpsc::Sender<Event>, answers
         }
         Err(problem) => {
             let _ = child.start_kill();
-            let tail = stderr_tail.await.unwrap_or_default();
+            let tail = tokio::time::timeout(Duration::from_secs(2), &mut stderr_tail.0).await.ok().and_then(|r| r.ok()).unwrap_or_default();
             let message = explain(&problem, &tail);
             let _ = tx.send(Event::Error { message: message.clone() }).await;
             Outcome { ok: false, result: Some(message), ..Outcome::default() }
@@ -343,7 +350,8 @@ async fn run(turn: CodexTurn, mut child: Child, tx: mpsc::Sender<Event>, answers
     };
     let outcome = Outcome { duration_ms: Some(started.elapsed().as_millis() as u64), ..outcome };
     let _ = child.start_kill();
-    reader.abort();
+    drop(reader);
+    drop(stderr_tail);
     let _ = tx.send(Event::Finished(outcome)).await;
 }
 
@@ -558,7 +566,7 @@ fn output_of(item: &Value) -> String {
         },
         _ => String::new(),
     };
-    out.trim().to_string()
+    truncate_output(out.trim(), 4000)
 }
 
 /// Answers one of Codex's requests: approvals become cards, unless the bot's level allows.
@@ -624,7 +632,10 @@ async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc:
 async fn ask(tx: &mpsc::Sender<Event>, answers: &Answerer, tool: &str, input: Value) -> bool {
     let question = format!("ask-{}", uuid::Uuid::new_v4());
     let waiting = answers.expect(&question);
-    let _ = tx.send(Event::ApprovalRequested { id: question, tool: tool.to_string(), input }).await;
+    if tx.send(Event::ApprovalRequested { id: question.clone(), tool: tool.to_string(), input }).await.is_err() {
+        answers.cancel(&question);
+        return false;
+    }
     matches!(waiting.await, Decision::Allow)
 }
 
@@ -655,7 +666,8 @@ pub struct Talk {
 impl Talk {
     pub async fn open(program: &Path, home: &Path) -> Result<Talk, String> {
         std::fs::create_dir_all(home).map_err(|e| format!("couldn't make {}: {e}", home.display()))?;
-        let mut child = spawn(program, home, home).map_err(|e| e.to_string())?;
+        // Talk never reads stderr; use Stdio::null so verbose Codex logs cannot fill the 64 KB pipe and deadlock.
+        let mut child = spawn_with(program, home, home, &[], &[], Stdio::null()).map_err(|e| e.to_string())?;
         let link = Link::new(child.stdin.take().expect("stdin is piped"));
         let stdout = child.stdout.take().expect("stdout is piped");
         let (tx, notes) = mpsc::channel(64);

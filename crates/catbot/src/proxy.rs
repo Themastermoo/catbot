@@ -64,6 +64,7 @@ impl Proxy {
         };
         let mut connector = HttpConnector::new();
         connector.set_nodelay(true);
+        connector.set_connect_timeout(Some(std::time::Duration::from_secs(10)));
         let client = Client::builder(TokioExecutor::new()).build(connector);
         Ok(Arc::new(Self { client, upstream, recorder, cap, next_id: AtomicU64::new(1) }))
     }
@@ -153,16 +154,20 @@ fn content_type(headers: &HeaderMap) -> Option<String> {
     headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).map(str::to_string)
 }
 
+/// Cap on a proxied request body buffered into memory.
+const MAX_PROXY_BODY: usize = 64 * 1024 * 1024;
+
 /// An ordinary request: sent on as-is, its response streamed back through a [`Tee`].
 async fn forward(app: &Arc<App>, id: u64, req: Request) -> Result<Response, BoxError> {
     let started = Instant::now();
     let (parts, body) = req.into_parts();
-    let req_bytes = body.collect().await?.to_bytes();
+    let req_bytes = http_body_util::Limited::new(body, MAX_PROXY_BODY).collect().await?.to_bytes();
 
     let mut up = hyper::Request::builder().method(parts.method.clone()).uri(upstream_uri(app, &parts.uri)?);
     for (name, value) in &parts.headers {
         // No compression on the way back, so the recording can read what it copies.
-        if !is_hop_by_hop(name) && name != header::ACCEPT_ENCODING {
+        // Drop Host so hyper sets it from the upstream URI authority.
+        if !is_hop_by_hop(name) && name != header::ACCEPT_ENCODING && name != header::HOST {
             up = up.header(name, value);
         }
     }
@@ -208,7 +213,7 @@ async fn upgrade(app: &Arc<App>, id: u64, mut req: Request) -> Result<Response, 
     let client_side = hyper::upgrade::on(&mut req);
     let mut up = hyper::Request::builder().method(req.method().clone()).uri(upstream_uri(app, req.uri())?);
     for (name, value) in req.headers() {
-        if name != header::TRANSFER_ENCODING && name != header::CONTENT_LENGTH {
+        if name != header::TRANSFER_ENCODING && name != header::CONTENT_LENGTH && name != header::HOST {
             up = up.header(name, value);
         }
     }

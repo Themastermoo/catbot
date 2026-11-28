@@ -255,7 +255,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             .collect()
         }
         Some("assistant") => {
-            let content = o["message"]["content"].as_array().cloned().unwrap_or_default();
+            let content = o["message"]["content"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             let text: String = content.iter().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect();
             // Signed out, out of usage, or an API failure: the CLI says so as an assistant message.
             if o["is_api_error_message"] == true || o["error"].is_string() {
@@ -263,7 +263,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
                 return vec![Event::Error { message }];
             }
             let mut events = Vec::new();
-            for block in &content {
+            for block in content {
                 match block["type"].as_str() {
                     Some("text") => {
                         if let Some(text) = s(&block["text"]).filter(|t| !t.trim().is_empty()) {
@@ -285,7 +285,7 @@ pub fn parse_line(line: &str) -> Vec<Event> {
             if o["isReplay"] == true {
                 return Vec::new();
             }
-            let content = o["message"]["content"].as_array().cloned().unwrap_or_default();
+            let content = o["message"]["content"].as_array().map(Vec::as_slice).unwrap_or(&[]);
             content
                 .iter()
                 .filter(|b| b["type"] == "tool_result")
@@ -316,6 +316,54 @@ pub fn parse_line(line: &str) -> Vec<Event> {
     }
 }
 
+/// Truncates tool output safely at a UTF-8 character boundary for UI display.
+pub(crate) fn truncate_output(text: &str, max: usize) -> String {
+    if text.len() <= max {
+        return text.to_string();
+    }
+    let mut cut = max;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{} … [{} more bytes]", &text[..cut], text.len() - cut)
+}
+
+/// Aborts the wrapped task when dropped so background readers/watchers never leak on exit or abort.
+pub(crate) struct AbortOnDrop<T>(pub tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Reads a child process's stderr in fixed chunks, retaining only a rolling tail capped at
+/// `max_bytes` (so verbose subprocesses cannot OOM the server).
+pub(crate) async fn read_stderr_tail(mut stderr: tokio::process::ChildStderr, max_bytes: usize) -> String {
+    let cap = max_bytes.max(4096);
+    let mut tail: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 4096];
+    while let Ok(n) = stderr.read(&mut chunk).await {
+        if n == 0 {
+            break;
+        }
+        if n >= cap {
+            tail.clear();
+            tail.extend_from_slice(&chunk[n - cap..n]);
+        } else {
+            let overflow = (tail.len() + n).saturating_sub(cap);
+            if overflow > 0 {
+                tail.drain(..overflow);
+            }
+            tail.extend_from_slice(&chunk[..n]);
+        }
+    }
+    let text = String::from_utf8_lossy(&tail).trim().to_string();
+    let start = text.len().saturating_sub(max_bytes);
+    let start = (start..text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
+    text[start..].to_string()
+}
+
 /// A tool's result as plain text, cut short: it is for showing, not for keeping.
 fn flatten_tool_output(content: &Value) -> String {
     const MAX: usize = 2000;
@@ -333,14 +381,7 @@ fn flatten_tool_output(content: &Value) -> String {
         Value::Null => String::new(),
         other => other.to_string(),
     };
-    if text.len() <= MAX {
-        return text;
-    }
-    let mut cut = MAX;
-    while !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{} … [{} more bytes]", &text[..cut], text.len() - cut)
+    truncate_output(&text, MAX)
 }
 
 /// A turn in progress. Dropping it stops the CLI.
@@ -419,6 +460,14 @@ impl Running {
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill().await;
         }
+        if let Some(task) = self.task.take() {
+            task.abort();
+        }
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
         if let Some(task) = self.task.take() {
             task.abort();
         }
@@ -516,17 +565,9 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
     };
 
     let stdout = child.stdout.take().expect("stdout is piped");
-    let mut stderr = child.stderr.take().expect("stderr is piped");
-    let stderr_tail = tokio::spawn(async move {
-        let mut buf = Vec::new();
-        let _ = stderr.read_to_end(&mut buf).await;
-        let text = String::from_utf8_lossy(&buf).trim().to_string();
-        let start = text.len().saturating_sub(2000);
-        let start = (start..text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
-        text[start..].to_string()
-    });
-
-    tokio::spawn(async move {
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let task = tokio::spawn(async move {
+        let mut stderr_tail = AbortOnDrop(tokio::spawn(read_stderr_tail(stderr, 2000)));
         let mut lines = BufReader::new(stdout).lines();
         let mut finished = false;
         while let Ok(Some(line)) = lines.next_line().await {
@@ -544,14 +585,18 @@ pub async fn start(turn: &Turn) -> std::io::Result<Running> {
         input.lock().await.take();
         if !finished {
             // The CLI ended without a result line: crashed, killed, or refused its arguments.
-            let tail = stderr_tail.await.unwrap_or_default();
+            let tail = tokio::time::timeout(std::time::Duration::from_secs(2), &mut stderr_tail.0)
+                .await
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_default();
             let message = if tail.is_empty() { "Claude Code stopped without finishing the turn".to_string() } else { tail };
             let _ = tx.send(Event::Error { message }).await;
             let _ = tx.send(Event::Finished(Outcome { ok: false, ..Outcome::default() })).await;
         }
     });
 
-    Ok(Running { events, steer: Some(steer), child: Some(child), broker, task: None, answers: None })
+    Ok(Running { events, steer: Some(steer), child: Some(child), broker, task: Some(task), answers: None })
 }
 
 #[cfg(test)]

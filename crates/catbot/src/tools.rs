@@ -16,6 +16,8 @@ use crate::claude::PermissionMode;
 
 /// Most of a file shown at once, and of a command's output.
 const MOST_TEXT: usize = 100_000;
+/// Cap on reading a single file into memory for `read_file` or `edit_file`.
+const MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MOST_LINES: usize = 2_000;
 const MOST_ENTRIES: usize = 500;
 const MOST_MATCHES: usize = 200;
@@ -217,6 +219,10 @@ pub async fn run(planned: &Planned, ws: &Workspace) -> Result<String, String> {
             None => Err("Catbot's tools aren't open to this turn".into()),
         },
         Work::Read { file, offset, limit } => {
+            let meta = tokio::fs::metadata(file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
+            if meta.len() > MAX_FILE_BYTES {
+                return Err(format!("{} is too large to read as text ({} bytes)", file.display(), meta.len()));
+            }
             let bytes = tokio::fs::read(file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
             if bytes.contains(&0) {
                 return Err(format!("{} isn't a text file", file.display()));
@@ -224,7 +230,7 @@ pub async fn run(planned: &Planned, ws: &Workspace) -> Result<String, String> {
             let text = String::from_utf8_lossy(&bytes);
             let lines: Vec<&str> = text.lines().collect();
             let start = (offset - 1).min(lines.len());
-            let end = (start + limit).min(lines.len());
+            let end = start.saturating_add(*limit).min(lines.len());
             let mut out = String::new();
             for (i, line) in lines[start..end].iter().enumerate() {
                 out.push_str(&format!("{:>6}\t{line}\n", start + i + 1));
@@ -243,7 +249,11 @@ pub async fn run(planned: &Planned, ws: &Workspace) -> Result<String, String> {
             let mut names = Vec::new();
             while let Ok(Some(entry)) = read.next_entry().await {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                let folder = entry.file_type().await.is_ok_and(|t| t.is_dir()) || entry.path().is_dir();
+                let folder = match entry.file_type().await {
+                    Ok(t) if t.is_dir() => true,
+                    Ok(t) if t.is_symlink() => tokio::fs::metadata(entry.path()).await.is_ok_and(|m| m.is_dir()),
+                    _ => false,
+                };
                 names.push(if folder { format!("{name}/") } else { name });
             }
             names.sort();
@@ -267,6 +277,10 @@ pub async fn run(planned: &Planned, ws: &Workspace) -> Result<String, String> {
             Ok(format!("Wrote {} ({} bytes).", file.display(), content.len()))
         }
         Work::Edit { file, old, new } => {
+            let meta = tokio::fs::metadata(file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
+            if meta.len() > MAX_FILE_BYTES {
+                return Err(format!("{} is too large to edit as text ({} bytes)", file.display(), meta.len()));
+            }
             let text = tokio::fs::read_to_string(file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
             match text.matches(old.as_str()).count() {
                 0 => Err(format!("old_text isn't in {}; read the file and copy it exactly.", file.display())),
@@ -317,48 +331,143 @@ fn search(dir: &Path, text: &str) -> String {
     if found.is_empty() { "No matches.".into() } else { found.join("\n") }
 }
 
+/// Kills a child's entire process group on Unix so backgrounded/grandchild processes do not survive
+/// timeout or cancellation.
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    if pid > 1 && pid <= i32::MAX as u32 {
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        // SAFETY: `pid > 1`, so `-(pid as i32)` targets only the child's own process group (SIGKILL = 9).
+        unsafe {
+            kill(-(pid as i32), 9);
+        }
+    }
+}
+
+struct ChildGroupGuard {
+    child: tokio::process::Child,
+    #[cfg(unix)]
+    pgid: Option<u32>,
+}
+
+impl ChildGroupGuard {
+    fn kill_all(&mut self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.pgid.take() {
+            kill_process_group(pid);
+        }
+        let _ = self.child.start_kill();
+    }
+}
+
+impl Drop for ChildGroupGuard {
+    fn drop(&mut self) {
+        self.kill_all();
+    }
+}
+
+/// Reads an output pipe up to `cap` bytes, draining any remaining output so the child cannot block
+/// on a full pipe buffer while preventing unbounded memory growth.
+async fn read_bounded<R: tokio::io::AsyncRead + Unpin>(mut reader: R, cap: usize) -> (Vec<u8>, bool) {
+    use tokio::io::AsyncReadExt;
+    let mut out = Vec::new();
+    let mut truncated = false;
+    let mut chunk = [0u8; 8192];
+    while let Ok(n) = reader.read(&mut chunk).await {
+        if n == 0 {
+            break;
+        }
+        if out.len() < cap {
+            let take = (cap - out.len()).min(n);
+            out.extend_from_slice(&chunk[..take]);
+            if take < n {
+                truncated = true;
+            }
+        } else {
+            truncated = true;
+        }
+    }
+    (out, truncated)
+}
+
 async fn run_command(command: &str, folder: &Path) -> Result<String, String> {
     #[cfg(windows)]
-    let mut child = {
+    let mut cmd = {
         let mut c = tokio::process::Command::new("powershell");
         c.args(["-NoProfile", "-NonInteractive", "-Command", command]);
         c.creation_flags(0x0800_0000);
         c
     };
     #[cfg(not(windows))]
-    let mut child = {
+    let mut cmd = {
         let mut c = tokio::process::Command::new("sh");
         c.args(["-c", command]);
+        c.process_group(0);
         c
     };
-    let output = child
+    let mut child = cmd
         .current_dir(folder)
         .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
-        .output();
-    let output = match tokio::time::timeout(COMMAND_TIME, output).await {
-        Ok(Ok(output)) => output,
-        Ok(Err(err)) => return Err(format!("couldn't run it: {err}")),
-        Err(_) => return Err("It ran for two minutes without finishing, so it was stopped.".into()),
+        .spawn()
+        .map_err(|err| format!("couldn't run it: {err}"))?;
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    #[cfg(unix)]
+    let pgid = child.id();
+    let mut guard = ChildGroupGuard {
+        child,
+        #[cfg(unix)]
+        pgid,
     };
-    let mut text = String::from_utf8_lossy(&output.stdout).into_owned();
-    let errors = String::from_utf8_lossy(&output.stderr);
+
+    let cap = MOST_TEXT + 4096;
+    let run_fut = async {
+        let (out_res, err_res, status_res) = tokio::join!(read_bounded(stdout, cap), read_bounded(stderr, cap), guard.child.wait());
+        status_res.map(|status| (status, out_res, err_res))
+    };
+
+    let (status, (out_bytes, out_cut), (err_bytes, err_cut)) = match tokio::time::timeout(COMMAND_TIME, run_fut).await {
+        Ok(Ok(done)) => {
+            #[cfg(unix)]
+            {
+                guard.pgid = None;
+            }
+            done
+        }
+        Ok(Err(err)) => return Err(format!("couldn't run it: {err}")),
+        Err(_) => {
+            guard.kill_all();
+            return Err("It ran for two minutes without finishing, so it was stopped.".into());
+        }
+    };
+
+    let mut text = String::from_utf8_lossy(&out_bytes).into_owned();
+    let errors = String::from_utf8_lossy(&err_bytes);
     if !errors.trim().is_empty() {
         if !text.is_empty() {
             text.push('\n');
         }
         text.push_str(&errors);
     }
+    let mut truncated = out_cut || err_cut;
     if text.len() > MOST_TEXT {
         let mut cut = MOST_TEXT;
         while !text.is_char_boundary(cut) {
             cut -= 1;
         }
         text.truncate(cut);
+        truncated = true;
+    }
+    if truncated {
         text.push_str("\n… (output cut short)");
     }
-    let code = output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "a signal".into());
-    if output.status.success() {
+    let code = status.code().map(|c| c.to_string()).unwrap_or_else(|| "a signal".into());
+    if status.success() {
         Ok(if text.trim().is_empty() { "(done, nothing printed)".into() } else { text })
     } else {
         Err(format!("It stopped with {code}.\n{text}"))
