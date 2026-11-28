@@ -275,12 +275,10 @@ async fn ask(client: &reqwest::Client, turn: &ApiTurn, messages: &[Value], with_
     let mut round = Round::default();
     let mut calls: BTreeMap<u64, Call> = BTreeMap::new();
     let mut stream = response.bytes_stream();
-    let mut buffer = Vec::<u8>::new();
+    let mut lines = crate::stream_lines::StreamLines::default();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| Failure::Other(format!("{} stopped answering partway: {e}", turn.engine.name)))?;
-        buffer.extend_from_slice(&chunk);
-        while let Some(end) = buffer.iter().position(|&b| b == b'\n') {
-            let line: Vec<u8> = buffer.drain(..=end).collect();
+        for line in lines.push(&chunk) {
             let line = String::from_utf8_lossy(&line);
             if apply_line(line.trim(), &mut round, &mut calls, tx).await {
                 round.calls = calls.into_values().collect();

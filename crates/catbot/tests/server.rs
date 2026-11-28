@@ -2512,18 +2512,14 @@ async fn departments_group_bots_share_instructions_and_take_map_messages() {
     let (status, made) = s.call("POST", "/api/departments", Some(json!({ "name": " Garden ", "botIds": [scout, quill] }))).await;
     assert_eq!(status, 201, "{made}");
     assert_eq!(made["departments"][0]["name"], "Garden");
-    let mut members: Vec<&str> = made["departments"][0]["members"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
-    members.sort();
-    let mut both = [scout.as_str(), quill.as_str()];
-    both.sort();
-    assert_eq!(members, both);
+    assert_eq!(made["departments"][0]["members"], json!([quill, scout]), "unranked members follow name order");
     assert_eq!(made["general"], json!([kiwi]));
     assert_eq!(s.call("POST", "/api/departments", Some(json!({ "name": "garden" }))).await.0, 409);
     // Its bots go in the order they're put in (stage 32.3); only its own bots can be ordered.
     let (status, ordered) = s.call("PUT", "/api/departments/Garden/order", Some(json!({ "bots": [scout, quill] }))).await;
     assert_eq!(status, 200, "{ordered}");
     assert_eq!(ordered["departments"][0]["members"], json!([scout, quill]));
-    let (_, ordered) = s.call("PUT", "/api/departments/Garden/order", Some(json!({ "bots": [quill, scout] }))).await;
+    let (_, ordered) = s.call("PUT", "/api/departments/Garden/order", Some(json!({ "bots": [quill, scout, quill] }))).await;
     assert_eq!(ordered["departments"][0]["members"], json!([quill, scout]));
     assert_eq!(s.call("PUT", "/api/departments/Garden/order", Some(json!({ "bots": [kiwi] }))).await.0, 400, "Kiwi isn't in Garden");
     assert_eq!(s.call("PUT", "/api/departments/General/order", Some(json!({ "bots": [kiwi] }))).await.0, 200, "General has an order too");

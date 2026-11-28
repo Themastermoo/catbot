@@ -240,13 +240,12 @@ async fn pull_stream(app: &App, model: &str) -> Result<(), String> {
         return Err(said["error"].as_str().unwrap_or("Ollama said no").to_string());
     }
     let mut body = answer.bytes_stream();
-    let mut pending = Vec::new();
+    let mut lines = crate::stream_lines::StreamLines::default();
     let mut last_said = std::time::Instant::now();
     let mut finished = false;
     while let Some(chunk) = body.next().await {
-        pending.extend_from_slice(&chunk.map_err(|e| format!("the download broke off: {e}"))?);
-        while let Some(end) = pending.iter().position(|b| *b == b'\n') {
-            let line: Vec<u8> = pending.drain(..=end).collect();
+        let chunk = chunk.map_err(|e| format!("the download broke off: {e}"))?;
+        for line in lines.push(&chunk) {
             let Ok(event) = serde_json::from_slice::<Value>(&line) else { continue };
             if let Some(error) = event["error"].as_str() {
                 return Err(if error.contains("file does not exist") { format!("Ollama has no model called {model}") } else { error.to_string() });

@@ -22,5 +22,6 @@ pub mod record;
 pub mod routes;
 pub mod server;
 pub mod store;
+mod stream_lines;
 pub mod titles;
 pub mod tools;

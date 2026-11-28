@@ -969,6 +969,14 @@ impl Store {
         Ok(bots)
     }
 
+    /// Visible bot IDs in the same name order as the roster.
+    pub fn bot_ids(&self) -> Result<Vec<String>, BoxError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM bots WHERE id NOT IN (SELECT bot_id FROM bot_profiles WHERE archived_at IS NOT NULL) ORDER BY name",
+        )?;
+        Ok(stmt.query_map([], |row| row.get(0))?.collect::<Result<_, _>>()?)
+    }
+
     /// Every bot, those in the archive too.
     pub fn all_bots(&self) -> Result<Vec<Bot>, BoxError> {
         let mut stmt = self.conn.prepare("SELECT id, name, instructions, model, mode, codex, folder, created_at, mark, color, engine, effort FROM bots ORDER BY name")?;
@@ -1390,11 +1398,10 @@ impl Store {
 
     pub fn messages(&self, conversation_id: &str, limit: usize) -> Result<Vec<Message>, BoxError> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, role, body, detail, at FROM
-               (SELECT id, role, body, detail, at FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT ?2)
-             ORDER BY id",
+            "SELECT id, role, body, detail, at FROM messages WHERE conversation_id = ?1 ORDER BY id DESC LIMIT ?2",
         )?;
-        let messages = stmt.query_map(params![conversation_id, limit as i64], message_from_row)?.collect::<Result<_, _>>()?;
+        let mut messages: Vec<Message> = stmt.query_map(params![conversation_id, limit as i64], message_from_row)?.collect::<Result<_, _>>()?;
+        messages.reverse();
         Ok(messages)
     }
 
@@ -1668,6 +1675,7 @@ mod tests {
         assert!(store.uses_engine("ollama").unwrap());
         store.set_profile(&bot.id, &Profile { archived_at: Some(now()), ..Profile::default() }).unwrap();
         assert!(store.bots().unwrap().is_empty());
+        assert!(store.bot_ids().unwrap().is_empty());
         assert!(store.uses_engine("ollama").unwrap());
         assert!(!store.uses_engine("lmstudio").unwrap());
     }

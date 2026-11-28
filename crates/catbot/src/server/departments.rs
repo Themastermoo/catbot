@@ -20,7 +20,7 @@
 //! * `PUT    /api/team-map/layout`              the boxes' places
 //! * `POST   /api/team-map/message`             `{ text }`: sent to whoever it @tags
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use hyper::{Method, StatusCode};
@@ -219,25 +219,33 @@ pub fn set_instructions(app: &App, name: &str, text: &str) -> Result<(), (Status
     .map(|_| ())
 }
 
-/// Bots in the order chosen for them, the rest after by name (as the store gives them).
-fn in_order(mut bots: Vec<crate::store::Bot>, order: &[String]) -> Vec<crate::store::Bot> {
-    bots.sort_by_key(|b| order.iter().position(|id| *id == b.id).unwrap_or(usize::MAX));
-    bots
-}
-
 /// Puts `group`'s bots in the order given, keeping where the others stand.
 fn set_order(kept: &mut Departments, group: &[String]) {
-    kept.order.retain(|id| !group.contains(id));
+    let moved: HashSet<_> = group.iter().collect();
+    kept.order.retain(|id| !moved.contains(id));
     kept.order.extend(group.iter().cloned());
 }
 
 fn wire(app: &App, kept: &Departments) -> Value {
-    let bots = in_order(app.with_store(|store| store.bots()).unwrap_or_default(), &kept.order);
+    let bots = app.with_store(|store| store.bot_ids()).unwrap_or_default();
+    let mut remaining: HashSet<&str> = bots.iter().map(String::as_str).collect();
+    let mut members: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut general = Vec::new();
+    // Saved order first, then unranked bots in name order. Removing from remaining
+    // skips stale IDs and honors the first occurrence of a repeated ID.
+    for id in kept.order.iter().chain(&bots) {
+        if remaining.remove(id.as_str()) {
+            match kept.members.get(id) {
+                Some(name) => members.entry(name).or_default().push(id),
+                None => general.push(id),
+            }
+        }
+    }
     let list: Vec<Value> = kept
         .list
         .iter()
         .map(|d| {
-            let members: Vec<&str> = bots.iter().filter(|b| kept.members.get(&b.id) == Some(&d.name)).map(|b| b.id.as_str()).collect();
+            let members = members.get(d.name.as_str()).map(Vec::as_slice).unwrap_or_default();
             json!({
                 "name": d.name,
                 "instructions": d.instructions,
@@ -248,7 +256,6 @@ fn wire(app: &App, kept: &Departments) -> Value {
             })
         })
         .collect();
-    let general: Vec<&str> = bots.iter().filter(|b| !kept.members.contains_key(&b.id)).map(|b| b.id.as_str()).collect();
     json!({ "departments": list, "general": general, "instructionsMax": INSTRUCTIONS_MAX })
 }
 
@@ -257,8 +264,8 @@ fn ids(value: &Value) -> Vec<String> {
 }
 
 fn known_bots(store: &Store, wanted: &[String]) -> Result<(), (StatusCode, String)> {
-    let bots = store.bots().map_err(fail)?;
-    match wanted.iter().find(|id| !bots.iter().any(|b| &b.id == *id)) {
+    let bots: HashSet<String> = store.bot_ids().map_err(fail)?.into_iter().collect();
+    match wanted.iter().find(|id| !bots.contains(*id)) {
         Some(id) => Err((StatusCode::NOT_FOUND, format!("no bot {id}"))),
         None => Ok(()),
     }
