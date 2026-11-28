@@ -90,9 +90,29 @@ fn normalize(code: &str) -> String {
     code.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_uppercase()).collect()
 }
 
+/// Per-server sliding-window rate limiter for `/api/pair` attempts so bursts cannot exhaust the
+/// 5-try pairing code instantaneously (at most 10 attempts per 10 seconds per server instance).
+fn allow_pair_attempt(app: &App) -> bool {
+    const WINDOW: Duration = Duration::from_secs(10);
+    const MAX_IN_WINDOW: usize = 10;
+    let now = Instant::now();
+    let mut ring = app.pair_attempts.lock().unwrap_or_else(|e| e.into_inner());
+    while ring.front().is_some_and(|at| now.duration_since(*at) > WINDOW) {
+        ring.pop_front();
+    }
+    if ring.len() >= MAX_IN_WINDOW {
+        return false;
+    }
+    ring.push_back(now);
+    true
+}
+
 /// Trades a pairing code for a new device's key, at the remote door. Wrong codes count against
 /// the waiting code; the right one is used up.
 pub fn redeem(app: &App, code: &str, name: &str) -> Result<(Device, String), (StatusCode, String)> {
+    if !allow_pair_attempt(app) {
+        return Err((StatusCode::TOO_MANY_REQUESTS, "too many pairing attempts; wait a few seconds and try again".into()));
+    }
     let mut pairing = app.pairing.lock().unwrap_or_else(|e| e.into_inner());
     let Some(waiting) = pairing.as_mut().filter(|p| p.live()) else {
         *pairing = None;
@@ -124,21 +144,32 @@ pub fn redeem(app: &App, code: &str, name: &str) -> Result<(Device, String), (St
 }
 
 /// Catbot's public address, for the QR code: `CATBOT_PUBLIC_URL`, else this machine's
-/// Tailscale name (`tailscale status --json`, Self.DNSName), as `https://…`.
+/// Tailscale name (`tailscale status --json`, Self.DNSName), as `https://…`. Cached for 60s.
 pub async fn public_url() -> Option<String> {
     if let Ok(url) = std::env::var("CATBOT_PUBLIC_URL")
         && !url.trim().is_empty()
     {
         return Some(url.trim().trim_end_matches('/').to_string());
     }
-    let run = tokio::process::Command::new("tailscale").args(["status", "--json"]).kill_on_drop(true).output();
-    let output = tokio::time::timeout(Duration::from_secs(3), run).await.ok()?.ok()?;
-    if !output.status.success() {
-        return None;
+    static CACHE: std::sync::Mutex<Option<(Instant, Option<String>)>> = std::sync::Mutex::new(None);
+    if let Some((at, cached)) = CACHE.lock().unwrap_or_else(|e| e.into_inner()).as_ref()
+        && at.elapsed() < Duration::from_secs(60)
+    {
+        return cached.clone();
     }
-    let status: Value = serde_json::from_slice(&output.stdout).ok()?;
-    let name = status["Self"]["DNSName"].as_str()?.trim_end_matches('.');
-    (!name.is_empty()).then(|| format!("https://{name}"))
+    let found = async {
+        let run = tokio::process::Command::new("tailscale").args(["status", "--json"]).kill_on_drop(true).output();
+        let output = tokio::time::timeout(Duration::from_secs(3), run).await.ok()?.ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let status: Value = serde_json::from_slice(&output.stdout).ok()?;
+        let name = status["Self"]["DNSName"].as_str()?.trim_end_matches('.');
+        (!name.is_empty()).then(|| format!("https://{name}"))
+    }
+    .await;
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), found.clone()));
+    found
 }
 
 fn device_wire(device: &Device) -> Value {

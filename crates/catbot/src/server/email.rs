@@ -26,6 +26,7 @@ use super::{Answer, App, bad, fail};
 
 const SETTING: &str = "email";
 const CONNECT_TIME: std::time::Duration = std::time::Duration::from_secs(20);
+const OP_TIME: std::time::Duration = std::time::Duration::from_secs(45);
 /// The most of a message's text a bot gets at once.
 const MOST_TEXT: usize = 20_000;
 
@@ -127,15 +128,19 @@ impl AsyncWrite for Wire {
 
 /// Wraps a connection in TLS for `host`, checked against the usual certificate authorities.
 pub async fn tls(stream: TcpStream, host: &str) -> Result<Wire, String> {
-    let mut roots = tokio_rustls::rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-    let config = tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(tokio_rustls::rustls::crypto::ring::default_provider()))
-        .with_safe_default_protocol_versions()
-        .map_err(|e| e.to_string())?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
+    static TLS_CONFIG: std::sync::OnceLock<Result<Arc<tokio_rustls::rustls::ClientConfig>, String>> = std::sync::OnceLock::new();
+    let config = TLS_CONFIG
+        .get_or_init(|| {
+            let mut roots = tokio_rustls::rustls::RootCertStore::empty();
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+            tokio_rustls::rustls::ClientConfig::builder_with_provider(Arc::new(tokio_rustls::rustls::crypto::ring::default_provider()))
+                .with_safe_default_protocol_versions()
+                .map_err(|e| e.to_string())
+                .map(|b| Arc::new(b.with_root_certificates(roots).with_no_client_auth()))
+        })
+        .clone()?;
     let name = tokio_rustls::rustls::pki_types::ServerName::try_from(host.to_string()).map_err(|_| format!("{host} isn't a server name"))?;
-    let tls = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, stream).await.map_err(|e| format!("a secure connection to {host} failed: {e}"))?;
+    let tls = tokio_rustls::TlsConnector::from(config).connect(name, stream).await.map_err(|e| format!("a secure connection to {host} failed: {e}"))?;
     Ok(Wire::Tls(Box::new(tls)))
 }
 
@@ -179,10 +184,16 @@ async fn open(m: &Mailbox) -> Result<Session, String> {
 }
 
 /// Turns the bot's search words into an IMAP search: words, and `from:`, `to:`, `subject:`,
-/// `since:`/`before:` (YYYY-MM-DD) and `unread`.
+/// `since:`/`before:` (YYYY-MM-DD) and `unread`. Rejects CR/LF/NUL to prevent IMAP injection.
 pub fn criteria(query: &str) -> Result<String, String> {
+    if query.chars().any(|c| matches!(c, '\r' | '\n' | '\0')) {
+        return Err("the search query cannot contain newlines or control characters".into());
+    }
     let mut parts: Vec<String> = Vec::new();
-    let quote = |s: &str| format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""));
+    let quote = |s: &str| {
+        let safe: String = s.chars().filter(|c| !c.is_control()).collect();
+        format!("\"{}\"", safe.replace('\\', "\\\\").replace('"', "\\\""))
+    };
     let date = |s: &str| {
         chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").map(|d| d.format("%-d-%b-%Y").to_string()).map_err(|_| format!("{s} isn't a date like 2026-11-16"))
     };
@@ -219,8 +230,12 @@ pub fn criteria(query: &str) -> Result<String, String> {
     Ok(if parts.is_empty() { "ALL".into() } else { parts.join(" ") })
 }
 
-fn folder_of(args: &Value) -> String {
-    args["folder"].as_str().map(str::trim).filter(|f| !f.is_empty()).unwrap_or("INBOX").to_string()
+fn folder_of(args: &Value) -> Result<String, String> {
+    let folder = args["folder"].as_str().map(str::trim).filter(|f| !f.is_empty()).unwrap_or("INBOX");
+    if folder.chars().any(|c| c.is_control()) {
+        return Err("folder name cannot contain control characters".into());
+    }
+    Ok(folder.to_string())
 }
 
 /// A message's headers in one line for a list.
@@ -249,31 +264,35 @@ fn line(uid: u32, header: &[u8], unread: bool) -> String {
 }
 
 async fn search(m: &Mailbox, args: &Value) -> Result<String, String> {
-    let folder = folder_of(args);
+    let folder = folder_of(args)?;
     let query = criteria(args["query"].as_str().unwrap_or_default())?;
     let limit = args["limit"].as_u64().unwrap_or(20).clamp(1, 50) as usize;
     let mut session = open(m).await?;
-    session.examine(&folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
-    let mut uids: Vec<u32> = session.uid_search(&query).await.map_err(imap_error)?.into_iter().collect();
-    uids.sort_unstable_by_key(|uid| std::cmp::Reverse(*uid));
-    let total = uids.len();
-    uids.truncate(limit);
-    let mut lines = Vec::new();
-    if !uids.is_empty() {
-        let set = uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-        let fetched: Vec<_> = session.uid_fetch(&set, "(UID FLAGS BODY.PEEK[HEADER])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
-        let mut rows: Vec<(u32, String)> = fetched
-            .iter()
-            .filter_map(|f| {
-                let uid = f.uid?;
-                let unread = !f.flags().any(|flag| matches!(flag, async_imap::types::Flag::Seen));
-                Some((uid, line(uid, f.header().unwrap_or_default(), unread)))
-            })
-            .collect();
-        rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.0));
-        lines = rows.into_iter().map(|(_, l)| l).collect();
-    }
-    let _ = session.logout().await;
+    let work = async {
+        session.examine(&folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
+        let mut uids: Vec<u32> = session.uid_search(&query).await.map_err(imap_error)?.into_iter().collect();
+        uids.sort_unstable_by_key(|uid| std::cmp::Reverse(*uid));
+        let total = uids.len();
+        uids.truncate(limit);
+        let mut lines = Vec::new();
+        if !uids.is_empty() {
+            let set = uids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+            let fetched: Vec<_> = session.uid_fetch(&set, "(UID FLAGS BODY.PEEK[HEADER])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
+            let mut rows: Vec<(u32, String)> = fetched
+                .iter()
+                .filter_map(|f| {
+                    let uid = f.uid?;
+                    let unread = !f.flags().any(|flag| matches!(flag, async_imap::types::Flag::Seen));
+                    Some((uid, line(uid, f.header().unwrap_or_default(), unread)))
+                })
+                .collect();
+            rows.sort_unstable_by_key(|row| std::cmp::Reverse(row.0));
+            lines = rows.into_iter().map(|(_, l)| l).collect();
+        }
+        let _ = session.logout().await;
+        Ok::<_, String>((lines, total))
+    };
+    let (lines, total) = tokio::time::timeout(OP_TIME, work).await.map_err(|_| "the mail server took too long to answer".to_string())??;
     if lines.is_empty() {
         return Ok(format!("Nothing in {folder} matches."));
     }
@@ -282,14 +301,17 @@ async fn search(m: &Mailbox, args: &Value) -> Result<String, String> {
 }
 
 async fn read(m: &Mailbox, args: &Value) -> Result<String, String> {
-    let folder = folder_of(args);
+    let folder = folder_of(args)?;
     let uid = args["id"].as_u64().or_else(|| args["id"].as_str().and_then(|s| s.trim().parse().ok())).ok_or("which message? give its id from mail_search")?;
     let mut session = open(m).await?;
-    session.examine(&folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
-    let fetched: Vec<_> = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
-    let _ = session.logout().await;
-    let raw = fetched.iter().find_map(|f| f.body()).ok_or_else(|| format!("there's no message {uid} in {folder}"))?;
-    Ok(render(uid as u32, raw))
+    let work = async {
+        session.examine(&folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
+        let fetched: Vec<_> = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
+        let _ = session.logout().await;
+        let raw = fetched.iter().find_map(|f| f.body()).ok_or_else(|| format!("there's no message {uid} in {folder}"))?;
+        Ok::<_, String>(render(uid as u32, raw))
+    };
+    tokio::time::timeout(OP_TIME, work).await.map_err(|_| "the mail server took too long to answer".to_string())?
 }
 
 /// What came into a folder since the last look (stage 14.4, "when an email arrives"): the
@@ -298,47 +320,53 @@ async fn read(m: &Mailbox, args: &Value) -> Result<String, String> {
 /// notes where things stand: mail already there doesn't count as arriving. Nothing is marked
 /// read.
 pub async fn arrived(m: &Mailbox, folder: &str, last: Option<(u32, u32)>, query: &str, most: usize) -> Result<(u32, u32, Vec<String>, usize), String> {
+    if folder.chars().any(|c| c.is_control()) {
+        return Err("folder name cannot contain control characters".into());
+    }
     let wanted = criteria(query)?;
     let mut session = open(m).await?;
-    let opened = session.examine(folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
-    let validity = opened.uid_validity.unwrap_or(0);
-    let newest = opened.uid_next.unwrap_or(1).saturating_sub(1);
-    // First look, or the folder was rebuilt: start from here.
-    let Some((was_validity, last_uid)) = last.filter(|(v, _)| *v == validity) else {
+    let work = async {
+        let opened = session.examine(folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
+        let validity = opened.uid_validity.unwrap_or(0);
+        let newest = opened.uid_next.unwrap_or(1).saturating_sub(1);
+        // First look, or the folder was rebuilt: start from here.
+        let Some((was_validity, last_uid)) = last.filter(|(v, _)| *v == validity) else {
+            let _ = session.logout().await;
+            return Ok((validity, newest, Vec::new(), 0));
+        };
+        let _ = was_validity;
+        if newest <= last_uid {
+            let _ = session.logout().await;
+            return Ok((validity, last_uid, Vec::new(), 0));
+        }
+        let search = format!("UID {}:* {wanted}", last_uid + 1);
+        // "n:*" can include the newest message even when it's older than n: only newer ones count.
+        let mut uids: Vec<u32> = session.uid_search(&search).await.map_err(imap_error)?.into_iter().filter(|u| *u > last_uid).collect();
+        uids.sort_unstable();
+        let total = uids.len();
+        let shown: Vec<u32> = uids.iter().rev().take(most).rev().copied().collect();
+        let mut out = Vec::new();
+        if !shown.is_empty() {
+            let set = shown.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+            let fetched: Vec<_> = session.uid_fetch(&set, "(UID BODY.PEEK[])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
+            let mut rows: Vec<(u32, String)> = fetched
+                .iter()
+                .filter_map(|f| {
+                    let uid = f.uid?;
+                    let mut text = render(uid, f.body()?);
+                    if text.chars().count() > 3000 {
+                        text = text.chars().take(3000).collect::<String>() + "\n(…cut short; mail_read has it all)";
+                    }
+                    Some((uid, text))
+                })
+                .collect();
+            rows.sort_unstable_by_key(|r| r.0);
+            out = rows.into_iter().map(|r| r.1).collect();
+        }
         let _ = session.logout().await;
-        return Ok((validity, newest, Vec::new(), 0));
+        Ok::<_, String>((validity, newest.max(uids.last().copied().unwrap_or(0)), out, total))
     };
-    let _ = was_validity;
-    if newest <= last_uid {
-        let _ = session.logout().await;
-        return Ok((validity, last_uid, Vec::new(), 0));
-    }
-    let search = format!("UID {}:* {wanted}", last_uid + 1);
-    // "n:*" can include the newest message even when it's older than n: only newer ones count.
-    let mut uids: Vec<u32> = session.uid_search(&search).await.map_err(imap_error)?.into_iter().filter(|u| *u > last_uid).collect();
-    uids.sort_unstable();
-    let total = uids.len();
-    let shown: Vec<u32> = uids.iter().rev().take(most).rev().copied().collect();
-    let mut out = Vec::new();
-    if !shown.is_empty() {
-        let set = shown.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
-        let fetched: Vec<_> = session.uid_fetch(&set, "(UID BODY.PEEK[])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
-        let mut rows: Vec<(u32, String)> = fetched
-            .iter()
-            .filter_map(|f| {
-                let uid = f.uid?;
-                let mut text = render(uid, f.body()?);
-                if text.chars().count() > 3000 {
-                    text = text.chars().take(3000).collect::<String>() + "\n(…cut short; mail_read has it all)";
-                }
-                Some((uid, text))
-            })
-            .collect();
-        rows.sort_unstable_by_key(|r| r.0);
-        out = rows.into_iter().map(|r| r.1).collect();
-    }
-    let _ = session.logout().await;
-    Ok((validity, newest.max(uids.last().copied().unwrap_or(0)), out, total))
+    tokio::time::timeout(OP_TIME, work).await.map_err(|_| "the mail server took too long to answer".to_string())?
 }
 
 /// A whole message, as a bot reads it.
@@ -384,9 +412,12 @@ pub fn render(uid: u32, raw: &[u8]) -> String {
 
 async fn folders(m: &Mailbox) -> Result<String, String> {
     let mut session = open(m).await?;
-    let names: Vec<String> = session.list(Some(""), Some("*")).await.map_err(imap_error)?.map_ok(|n| n.name().to_string()).try_collect().await.map_err(imap_error)?;
-    let _ = session.logout().await;
-    Ok(format!("Folders: {}", names.join(", ")))
+    let work = async {
+        let names: Vec<String> = session.list(Some(""), Some("*")).await.map_err(imap_error)?.map_ok(|n| n.name().to_string()).try_collect().await.map_err(imap_error)?;
+        let _ = session.logout().await;
+        Ok::<_, String>(format!("Folders: {}", names.join(", ")))
+    };
+    tokio::time::timeout(OP_TIME, work).await.map_err(|_| "the mail server took too long to answer".to_string())?
 }
 
 /// The mail tools a bot has: none unless a mailbox is connected and it's one of the chosen bots.
@@ -447,9 +478,13 @@ fn check(list: &[String]) -> Result<(), String> {
 /// What a reply needs from the message it answers: its sender, subject and ids.
 async fn original(m: &Mailbox, folder: &str, uid: u64) -> Result<(String, String, String, String), String> {
     let mut session = open(m).await?;
-    session.examine(folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
-    let fetched: Vec<_> = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[HEADER])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
-    let _ = session.logout().await;
+    let work = async {
+        session.examine(folder).await.map_err(|e| format!("couldn't open the folder {folder}: {}", imap_error(e)))?;
+        let fetched: Vec<_> = session.uid_fetch(uid.to_string(), "(UID BODY.PEEK[HEADER])").await.map_err(imap_error)?.try_collect().await.map_err(imap_error)?;
+        let _ = session.logout().await;
+        Ok::<_, String>(fetched)
+    };
+    let fetched = tokio::time::timeout(OP_TIME, work).await.map_err(|_| "the mail server took too long to answer".to_string())??;
     let header = fetched.iter().find_map(|f| f.header()).ok_or_else(|| format!("there's no message {uid} in {folder}"))?;
     let parsed = mail_parser::MessageParser::default().parse(header).ok_or("the message to reply to couldn't be read")?;
     let sender = parsed
@@ -477,7 +512,8 @@ async fn propose(app: &Arc<App>, m: &Mailbox, grant: &Grant, args: &Value) -> Re
     let mut subject = args["subject"].as_str().map(str::trim).unwrap_or_default().to_string();
     let (mut in_reply_to, mut references) = (String::new(), String::new());
     if let Some(uid) = args["reply_to"].as_u64().or_else(|| args["reply_to"].as_str().and_then(|s| s.trim().parse().ok())) {
-        let (sender, their_subject, id, refs) = original(m, &folder_of(args), uid).await?;
+        let folder = folder_of(args)?;
+        let (sender, their_subject, id, refs) = original(m, &folder, uid).await?;
         if to.is_empty() && !sender.is_empty() {
             to.push(sender);
         }
@@ -597,12 +633,6 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<
             if !m.address.contains('@') {
                 return Err(bad("an email address, please"));
             }
-            if m.password.is_empty() && before.address == m.address {
-                m.password = before.password.clone();
-            }
-            if m.password.is_empty() {
-                return Err(bad("the mailbox's password (or app password)"));
-            }
             if let Some((ih, ip, is, sh, sp, ss)) = guess(&m.address) {
                 if m.imap_host.trim().is_empty() {
                     (m.imap_host, m.imap_port, m.imap_security) = (ih.into(), ip, is);
@@ -619,6 +649,20 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<
             }
             if m.smtp_port == 0 {
                 m.smtp_port = if m.smtp_security == Security::Tls { 465 } else { 587 };
+            }
+            // Only reuse the stored password when the account and servers are unchanged, so
+            // redirecting IMAP/SMTP to another host can never exfiltrate the saved password.
+            let same_endpoints = before.address == m.address
+                && before.login() == m.login()
+                && before.imap_host.trim().eq_ignore_ascii_case(m.imap_host.trim())
+                && before.imap_port == m.imap_port
+                && before.smtp_host.trim().eq_ignore_ascii_case(m.smtp_host.trim())
+                && before.smtp_port == m.smtp_port;
+            if m.password.is_empty() && same_endpoints {
+                m.password = before.password.clone();
+            }
+            if m.password.is_empty() {
+                return Err(bad("the mailbox's password (or app password)"));
             }
             if body.get("bots").is_none() {
                 m.bots = before.bots.clone();
@@ -665,6 +709,8 @@ mod tests {
         assert_eq!(criteria("from:bob@x.com unread invoice").unwrap(), "FROM \"bob@x.com\" UNSEEN TEXT \"invoice\"");
         assert_eq!(criteria("subject:\"garden plan\" since:2026-11-02").unwrap(), "SUBJECT \"garden plan\" SINCE 2-Nov-2026");
         assert!(criteria("before:yesterday").is_err());
+        assert!(criteria("from:a@b.com\r\nLOGOUT").is_err(), "CRLF injection must be rejected");
+        assert!(folder_of(&json!({ "folder": "INBOX\r\nLOGOUT" })).is_err());
     }
 
     #[test]

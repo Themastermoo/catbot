@@ -157,7 +157,8 @@ fn show(path: &Path) -> String {
 }
 
 impl Workspace {
-    /// A path the bot gave, made absolute and checked to be inside its folders (links followed).
+    /// A path the bot gave, made absolute and checked to be inside its folders (links followed,
+    /// including dangling symlinks whose target does not exist yet).
     pub fn resolve(&self, given: &str) -> Result<PathBuf, String> {
         let given = given.trim();
         if given.is_empty() {
@@ -166,7 +167,7 @@ impl Workspace {
         let raw = Path::new(given);
         let joined = if raw.is_absolute() { raw.to_path_buf() } else { self.folder.join(raw) };
         let path = tidy(&joined);
-        let real = real_path(&path);
+        let real = real_path(&path)?;
         let inside = self.roots.iter().filter_map(|root| root.canonicalize().ok()).any(|root| real.starts_with(&root));
         if inside {
             Ok(path)
@@ -191,24 +192,53 @@ fn tidy(path: &Path) -> PathBuf {
     out
 }
 
-/// Where a path really leads: its nearest existing folder with links followed, then the rest.
-fn real_path(path: &Path) -> PathBuf {
-    let mut existing = path.to_path_buf();
-    let mut rest = Vec::new();
-    while !existing.exists() {
-        match (existing.file_name().map(|n| n.to_os_string()), existing.parent()) {
-            (Some(name), Some(parent)) => {
-                rest.push(name);
-                existing = parent.to_path_buf();
+/// Resolves every symlink component along `path`, including dangling symlinks whose target does
+/// not exist yet, with a hop cap to prevent symlink loops.
+fn real_path(path: &Path) -> Result<PathBuf, String> {
+    const MAX_SYMLINKS: usize = 40;
+    let mut current = path.to_path_buf();
+    let mut hops = 0usize;
+    loop {
+        let mut resolved = PathBuf::new();
+        let parts: Vec<_> = current.components().collect();
+        let mut expanded = None;
+        for (idx, part) in parts.iter().enumerate() {
+            match part {
+                Component::Prefix(p) => resolved.push(p.as_os_str()),
+                Component::RootDir => resolved.push(part.as_os_str()),
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    resolved.pop();
+                }
+                Component::Normal(seg) => {
+                    resolved.push(seg);
+                    if let Ok(meta) = std::fs::symlink_metadata(&resolved)
+                        && meta.file_type().is_symlink()
+                    {
+                        hops += 1;
+                        if hops > MAX_SYMLINKS {
+                            return Err("path has too many symbolic links".into());
+                        }
+                        let target = std::fs::read_link(&resolved).map_err(|e| format!("couldn't follow link: {e}"))?;
+                        let mut next = if target.is_absolute() {
+                            target
+                        } else {
+                            resolved.parent().unwrap_or_else(|| Path::new("")).join(target)
+                        };
+                        for rest in &parts[idx + 1..] {
+                            next.push(rest.as_os_str());
+                        }
+                        expanded = Some(next);
+                        break;
+                    }
+                }
             }
-            _ => break,
+        }
+        match expanded {
+            Some(next) => current = next,
+            None => return Ok(resolved),
         }
     }
-    let mut real = existing.canonicalize().unwrap_or(existing);
-    for name in rest.into_iter().rev() {
-        real.push(name);
-    }
-    real
 }
 
 /// Does the work. `Ok` is what the bot reads back; `Err` is a failure it's told about.
@@ -219,11 +249,12 @@ pub async fn run(planned: &Planned, ws: &Workspace) -> Result<String, String> {
             None => Err("Catbot's tools aren't open to this turn".into()),
         },
         Work::Read { file, offset, limit } => {
-            let meta = tokio::fs::metadata(file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
+            let file = ws.resolve(&file.to_string_lossy())?;
+            let meta = tokio::fs::metadata(&file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
             if meta.len() > MAX_FILE_BYTES {
                 return Err(format!("{} is too large to read as text ({} bytes)", file.display(), meta.len()));
             }
-            let bytes = tokio::fs::read(file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
+            let bytes = tokio::fs::read(&file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
             if bytes.contains(&0) {
                 return Err(format!("{} isn't a text file", file.display()));
             }
@@ -245,7 +276,8 @@ pub async fn run(planned: &Planned, ws: &Workspace) -> Result<String, String> {
             Ok(if out.is_empty() { "(empty file)".into() } else { out })
         }
         Work::List { dir } => {
-            let mut read = tokio::fs::read_dir(dir).await.map_err(|e| format!("couldn't list {}: {e}", dir.display()))?;
+            let dir = ws.resolve(&dir.to_string_lossy())?;
+            let mut read = tokio::fs::read_dir(&dir).await.map_err(|e| format!("couldn't list {}: {e}", dir.display()))?;
             let mut names = Vec::new();
             while let Ok(Some(entry)) = read.next_entry().await {
                 let name = entry.file_name().to_string_lossy().into_owned();
@@ -266,26 +298,30 @@ pub async fn run(planned: &Planned, ws: &Workspace) -> Result<String, String> {
             Ok(if out.is_empty() { "(empty folder)".into() } else { out })
         }
         Work::Search { dir, text } => {
-            let (dir, text) = (dir.clone(), text.to_lowercase());
+            let dir = ws.resolve(&dir.to_string_lossy())?;
+            let text = text.to_lowercase();
             tokio::task::spawn_blocking(move || search(&dir, &text)).await.map_err(|e| e.to_string())
         }
         Work::Write { file, content } => {
+            let file = ws.resolve(&file.to_string_lossy())?;
             if let Some(parent) = file.parent() {
                 tokio::fs::create_dir_all(parent).await.map_err(|e| format!("couldn't make {}: {e}", parent.display()))?;
             }
-            tokio::fs::write(file, content).await.map_err(|e| format!("couldn't write {}: {e}", file.display()))?;
+            let file = ws.resolve(&file.to_string_lossy())?;
+            tokio::fs::write(&file, content).await.map_err(|e| format!("couldn't write {}: {e}", file.display()))?;
             Ok(format!("Wrote {} ({} bytes).", file.display(), content.len()))
         }
         Work::Edit { file, old, new } => {
-            let meta = tokio::fs::metadata(file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
+            let file = ws.resolve(&file.to_string_lossy())?;
+            let meta = tokio::fs::metadata(&file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
             if meta.len() > MAX_FILE_BYTES {
                 return Err(format!("{} is too large to edit as text ({} bytes)", file.display(), meta.len()));
             }
-            let text = tokio::fs::read_to_string(file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
+            let text = tokio::fs::read_to_string(&file).await.map_err(|e| format!("couldn't read {}: {e}", file.display()))?;
             match text.matches(old.as_str()).count() {
                 0 => Err(format!("old_text isn't in {}; read the file and copy it exactly.", file.display())),
                 1 => {
-                    tokio::fs::write(file, text.replacen(old.as_str(), new, 1)).await.map_err(|e| format!("couldn't write {}: {e}", file.display()))?;
+                    tokio::fs::write(&file, text.replacen(old.as_str(), new, 1)).await.map_err(|e| format!("couldn't write {}: {e}", file.display()))?;
                     Ok(format!("Edited {}.", file.display()))
                 }
                 n => Err(format!("old_text is in {} {n} times; include more around it so it's there once.", file.display())),
@@ -298,21 +334,32 @@ pub async fn run(planned: &Planned, ws: &Workspace) -> Result<String, String> {
 fn search(dir: &Path, text: &str) -> String {
     let mut found = Vec::new();
     let mut stack = vec![dir.to_path_buf()];
-    let mut files = 0;
-    while let Some(here) = stack.pop() {
+    let mut files = 0usize;
+    'walk: while let Some(here) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&here) else { continue };
         for entry in entries.flatten() {
-            let path = entry.path();
             let name = entry.file_name();
             if name.to_string_lossy().starts_with('.') || name == "node_modules" || name == "target" {
                 continue;
             }
-            if path.is_dir() {
+            let Ok(ft) = entry.file_type() else { continue };
+            // Never traverse symlinks: prevents escaping workspace roots and symlink cycles.
+            if ft.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if ft.is_dir() {
                 stack.push(path);
                 continue;
             }
+            if !ft.is_file() {
+                continue;
+            }
             files += 1;
-            if files > 20_000 || entry.metadata().is_ok_and(|m| m.len() > 2_000_000) {
+            if files > 20_000 {
+                break 'walk;
+            }
+            if entry.metadata().is_ok_and(|m| m.len() > 2_000_000) {
                 continue;
             }
             let Ok(content) = std::fs::read_to_string(&path) else { continue };
@@ -511,9 +558,15 @@ mod tests {
         }
         #[cfg(unix)]
         {
-            // A link inside that leads outside is outside.
+            // A link inside that leads outside is outside — including dangling links whose target
+            // doesn't exist yet.
             std::os::unix::fs::symlink(dir.path(), dir.path().join("bot/way-out")).unwrap();
             assert!(ws.resolve("way-out/secret.txt").is_err());
+            std::os::unix::fs::symlink(dir.path().join("outside-new.txt"), dir.path().join("bot/dangling")).unwrap();
+            assert!(ws.resolve("dangling").is_err(), "dangling symlink outside workspace must be rejected");
+            // Symlink cycles and links pointing outside are skipped during search.
+            std::os::unix::fs::symlink(dir.path().join("bot"), dir.path().join("bot/loop")).unwrap();
+            assert_eq!(search(&dir.path().join("bot"), "no"), "No matches.");
         }
     }
 

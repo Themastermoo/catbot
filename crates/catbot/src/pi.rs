@@ -112,9 +112,16 @@ pub fn start(turn: PiTurn) -> Result<Running, String> {
         let env: serde_json::Map<String, Value> = s["env"].as_array().into_iter().flatten().filter_map(|e| Some((e["name"].as_str()?.to_string(), e["value"].clone()))).collect();
         json!({ "command": s["command"], "args": s["args"], "env": env }).to_string()
     });
+    let roots: Vec<String> = turn
+        .workspace
+        .roots
+        .iter()
+        .map(|r| r.canonicalize().unwrap_or_else(|_| r.clone()).display().to_string())
+        .collect();
     command
         .args(args(&turn))
         .env("CATBOT_PI_MODE", mode_word(turn.workspace.mode))
+        .env("CATBOT_PI_ROOTS", json!(roots).to_string())
         .env("CATBOT_PI_MCP", server.unwrap_or_default())
         .env("PI_SKIP_VERSION_CHECK", "1")
         .current_dir(&turn.workspace.folder)

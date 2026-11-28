@@ -30,11 +30,16 @@ static RECENT: Mutex<Option<HashMap<String, VecDeque<Instant>>>> = Mutex::new(No
 /// Whether one more call to this trigger fits in the last minute.
 fn room_for(id: &str) -> bool {
     let mut guard = RECENT.lock().unwrap_or_else(|p| p.into_inner());
-    let calls = guard.get_or_insert_with(HashMap::new).entry(id.to_string()).or_default();
+    let map = guard.get_or_insert_with(HashMap::new);
     let now = Instant::now();
-    while calls.front().is_some_and(|at| now.duration_since(*at) > Duration::from_secs(60)) {
-        calls.pop_front();
-    }
+    // Prune stale trigger buckets so deleted triggers never leak entries indefinitely.
+    map.retain(|k, q| {
+        while q.front().is_some_and(|at| now.duration_since(*at) > Duration::from_secs(60)) {
+            q.pop_front();
+        }
+        k == id || !q.is_empty()
+    });
+    let calls = map.entry(id.to_string()).or_default();
     if calls.len() >= PER_MINUTE {
         return false;
     }
@@ -121,7 +126,7 @@ pub async fn receive(app: &Arc<App>, id: &str, rest: &[&str], req: Request) -> R
 fn app_event(watch: &super::triggers::AppEvent, body: &[u8]) -> Option<String> {
     let event: Value = serde_json::from_slice(body).ok()?;
     let meta = &event["metadata"];
-    if !watch.instance.is_empty() && meta["trigger_id"].as_str().is_some_and(|id| id != watch.instance) {
+    if !watch.instance.is_empty() && meta["trigger_id"].as_str() != Some(watch.instance.as_str()) {
         return None;
     }
     let data = if event.get("data").is_some() { &event["data"] } else { &event["payload"] };

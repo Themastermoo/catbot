@@ -829,11 +829,20 @@ pub fn check_key(key: &str) -> Result<String, String> {
     Ok(key.to_string())
 }
 
-/// An address someone typed for an engine: http(s), no name, password or query in it.
+/// An address someone typed for an engine: http(s), valid host, no name, password, query or fragment.
 pub fn check_url(url: &str) -> Result<String, String> {
     let url = url.trim().trim_end_matches('/');
-    let rest = url.strip_prefix("https://").or_else(|| url.strip_prefix("http://")).ok_or("Use an http or https address.")?;
-    if rest.is_empty() || rest.contains(['@', '?', '#', ' ']) {
+    if url.chars().any(char::is_control) {
+        return Err("Use a plain address, without control characters.".into());
+    }
+    let parsed = reqwest::Url::parse(url).map_err(|_| "Use a valid http or https address.".to_string())?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("Use an http or https address.".into());
+    }
+    if parsed.host_str().is_none_or(str::is_empty) {
+        return Err("Use a valid http or https address.".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() || parsed.query().is_some() || parsed.fragment().is_some() || url.contains('@') {
         return Err("Use a plain address, without a name, password or query in it.".into());
     }
     Ok(url.to_string())

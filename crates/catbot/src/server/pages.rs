@@ -90,16 +90,21 @@ fn pages_dir(app: &App) -> Option<PathBuf> {
 }
 
 /// The files of a page to publish: a folder (with an index.html) or one HTML file, each with
-/// where it goes on the page. Checked against the limits.
+/// where it goes on the page. Checked against the limits, refusing symlinks.
 pub fn gather(source: &Path) -> Result<Vec<(PathBuf, String)>, String> {
+    let meta = std::fs::symlink_metadata(source).map_err(|_| format!("there's nothing at {}", source.display()))?;
+    if meta.file_type().is_symlink() {
+        return Err("symlinks can't be published as pages".into());
+    }
     let mut files = Vec::new();
-    if source.is_file() {
+    if meta.is_file() {
         if !matches!(content_type(source), Some(t) if t.starts_with("text/html")) {
             return Err("a single file to publish must be an .html page".into());
         }
         files.push((source.to_path_buf(), "index.html".to_string()));
-    } else if source.is_dir() {
-        if !source.join("index.html").is_file() {
+    } else if meta.is_dir() {
+        let index = source.join("index.html");
+        if !std::fs::symlink_metadata(&index).is_ok_and(|m| m.is_file()) {
             return Err("the folder needs an index.html, the page people open first".into());
         }
         fn walk(dir: &Path, base: &Path, files: &mut Vec<(PathBuf, String)>) -> Result<(), String> {
@@ -110,6 +115,9 @@ pub fn gather(source: &Path) -> Result<Vec<(PathBuf, String)>, String> {
                     continue; // .claude, .git and the like stay home.
                 }
                 let kind = entry.file_type().map_err(|e| e.to_string())?;
+                if kind.is_symlink() {
+                    return Err(format!("{} is a symlink, which a published page can't include", path.strip_prefix(base).unwrap_or(&path).display()));
+                }
                 if kind.is_dir() {
                     walk(&path, base, files)?;
                 } else if kind.is_file() {
@@ -129,7 +137,7 @@ pub fn gather(source: &Path) -> Result<Vec<(PathBuf, String)>, String> {
     } else {
         return Err(format!("there's nothing at {}", source.display()));
     }
-    let bytes: u64 = files.iter().filter_map(|(p, _)| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+    let bytes: u64 = files.iter().filter_map(|(p, _)| std::fs::symlink_metadata(p).ok()).map(|m| m.len()).sum();
     if bytes > MOST_BYTES {
         return Err(format!("a page can be at most {} MB", MOST_BYTES / 1024 / 1024));
     }
@@ -251,7 +259,23 @@ fn new_id() -> String {
 /// An approved page: copied out of the bot's folder (later changes there don't show until it's
 /// published again) and listed. The link, in words.
 pub async fn publish(app: &Arc<App>, body: &Value) -> Result<String, String> {
-    let source = PathBuf::from(body["source"].as_str().unwrap_or_default());
+    let raw_source = PathBuf::from(body["source"].as_str().unwrap_or_default());
+    let bot_id = body["botId"].as_str().unwrap_or_default();
+    let thread_id = body["thread"].as_str().unwrap_or_default();
+    // Re-verify at publish time that `source` still lives inside the bot's (or channel's) working folder.
+    let bot = app.with_store(|store| store.bot_by_id(bot_id)).flatten().ok_or("the bot is gone")?;
+    let folder = app
+        .with_store(|store| store.conversation(thread_id))
+        .flatten()
+        .and_then(|c| c.channel_id)
+        .and_then(|id| app.with_store(|store| store.channel(&id)).flatten())
+        .map(|c| c.folder)
+        .unwrap_or_else(|| bot.folder.clone());
+    let home = folder.canonicalize().map_err(|_| "the bot's folder isn't readable".to_string())?;
+    let source = raw_source.canonicalize().map_err(|_| format!("there's nothing at {}", raw_source.display()))?;
+    if !source.starts_with(&home) {
+        return Err("only files in the bot's own working folder can be published".into());
+    }
     let files = gather(&source)?;
     let dir = pages_dir(app).ok_or("no pages folder")?;
     let mut list = pages(app);
@@ -315,6 +339,10 @@ pub async fn publish(app: &Arc<App>, body: &Value) -> Result<String, String> {
 fn copy_files(files: &[(PathBuf, String)], into: &Path) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(into);
     for (from, relative) in files {
+        let meta = std::fs::symlink_metadata(from).map_err(|e| format!("couldn't read {relative}: {e}"))?;
+        if !meta.is_file() {
+            return Err(format!("{relative} is not a regular file"));
+        }
         let to = into.join(relative);
         if let Some(parent) = to.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
@@ -374,7 +402,7 @@ pub async fn route(app: &Arc<App>, method: &Method, rest: &[&str], body: Option<
             Ok((StatusCode::OK, json!({ "hosts": shown })))
         }
         (&Method::GET, []) => {
-            let names: std::collections::HashMap<String, String> = app.with_store(|store| store.bots()).unwrap_or_default().into_iter().map(|b| (b.id, b.name)).collect();
+            let names: std::collections::HashMap<String, String> = app.with_store(|store| store.bot_names()).unwrap_or_default().into_iter().collect();
             let list: Vec<Value> = pages(app)
                 .into_iter()
                 .rev()

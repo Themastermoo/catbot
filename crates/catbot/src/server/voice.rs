@@ -393,11 +393,7 @@ fn start_getting(app: &Arc<App>, part: &str) -> Answer {
 }
 
 async fn fetch_all(app: &Arc<App>, part: &str, files: &[&Remote], into: &Path) -> Result<(), String> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(30))
-        .user_agent(concat!("Catbot/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| e.to_string())?;
+    let client = crate::http::stream_client();
     let work = into.with_extension("part");
     let _ = tokio::fs::remove_dir_all(&work).await;
     tokio::fs::create_dir_all(&work).await.map_err(|e| format!("couldn't make {}: {e}", work.display()))?;
@@ -405,7 +401,7 @@ async fn fetch_all(app: &Arc<App>, part: &str, files: &[&Remote], into: &Path) -
     let mut total = 0u64;
     for file in files {
         // The header itself: a HEAD answer's body is always empty.
-        if let Ok(head) = client.head(source(file.url)).send().await
+        if let Ok(head) = crate::http::client().head(source(file.url)).timeout(Duration::from_secs(30)).send().await
             && let Some(len) = head.headers().get(header::CONTENT_LENGTH).and_then(|v| v.to_str().ok()).and_then(|v| v.parse::<u64>().ok())
         {
             total += len;
@@ -444,7 +440,10 @@ async fn fetch_all(app: &Arc<App>, part: &str, files: &[&Remote], into: &Path) -
         }
     }
     if part == "program" {
-        unpack(&work)?;
+        let unpack_dir = work.clone();
+        tokio::task::spawn_blocking(move || unpack(&unpack_dir))
+            .await
+            .map_err(|e| e.to_string())??;
     }
     let _ = tokio::fs::remove_dir_all(into).await;
     tokio::fs::rename(&work, into).await.map_err(|e| format!("couldn't put the files in place: {e}"))?;
@@ -538,6 +537,7 @@ async fn listen_here(app: &Arc<App>, settings: &Settings, audio: Bytes) -> Resul
     }
     let models = part_dir(app, &format!("whisper-{model}"));
     let wav = scratch(app, "wav");
+    let _cleanup = TempFileGuard(wav.clone());
     tokio::fs::write(&wav, &audio).await.map_err(fail)?;
     let threads = std::thread::available_parallelism().map(|n| (n.get() / 2).clamp(1, 8)).unwrap_or(2);
     let args = vec![
@@ -548,7 +548,6 @@ async fn listen_here(app: &Arc<App>, settings: &Settings, audio: Bytes) -> Resul
         wav.display().to_string(),
     ];
     let ran = run(&program(app, "sherpa-onnx-offline"), &args, Duration::from_secs(180)).await;
-    let _ = tokio::fs::remove_file(&wav).await;
     let (stdout, stderr) = ran.map_err(|why| (StatusCode::BAD_GATEWAY, why))?;
     // sherpa-onnx prints each recording's result as one line of JSON on stdout.
     stdout
@@ -569,6 +568,7 @@ async fn listen_online(app: &Arc<App>, settings: &Settings, audio: Bytes) -> Res
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     let answer = client()
         .post(format!("{url}/audio/transcriptions"))
+        .timeout(Duration::from_secs(180))
         .bearer_auth(key)
         .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
         .body(body)
@@ -628,6 +628,7 @@ async fn speak_here(app: &Arc<App>, engine: &str, words: &str, voice: &str) -> R
     }
     let models = part_dir(app, engine);
     let out = scratch(app, "wav");
+    let _cleanup = TempFileGuard(out.clone());
     let threads = std::thread::available_parallelism().map(|n| (n.get() / 2).clamp(1, 4)).unwrap_or(2);
     let mut args = match engine {
         "piper" => vec![
@@ -649,10 +650,10 @@ async fn speak_here(app: &Arc<App>, engine: &str, words: &str, voice: &str) -> R
     };
     args.push(format!("--num-threads={threads}"));
     args.push(format!("--output-filename={}", out.display()));
-    args.push(words.to_string());
+    // Prevent sherpa-onnx from parsing leading `-` in spoken text as CLI options.
+    args.push(if words.starts_with('-') { format!(" {words}") } else { words.to_string() });
     let ran = run(&program(app, "sherpa-onnx-offline-tts"), &args, Duration::from_secs(300)).await;
     let audio = tokio::fs::read(&out).await;
-    let _ = tokio::fs::remove_file(&out).await;
     let (_, stderr) = ran.map_err(|why| (StatusCode::BAD_GATEWAY, why))?;
     match audio {
         Ok(bytes) if bytes.starts_with(b"RIFF") => Ok((bytes, "audio/wav")),
@@ -666,6 +667,7 @@ async fn speak_openai(app: &Arc<App>, settings: &Settings, words: &str, voice: &
     let body = json!({ "model": settings.reply.openai_model, "voice": voice, "input": words, "response_format": "mp3" });
     let answer = client()
         .post(format!("{url}/audio/speech"))
+        .timeout(Duration::from_secs(180))
         .bearer_auth(key)
         .json(&body)
         .send()
@@ -684,12 +686,13 @@ async fn speak_elevenlabs(app: &Arc<App>, settings: &Settings, words: &str, voic
     } else {
         voice.to_string()
     };
-    if voice.contains(['/', '?', '#', '.']) {
+    if voice.is_empty() || voice.len() > 128 || !voice.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
         return Err(bad("that isn't an ElevenLabs voice"));
     }
     let body = json!({ "text": words, "model_id": settings.reply.elevenlabs_model });
     let answer = client()
         .post(format!("{url}/text-to-speech/{voice}?output_format=mp3_44100_128"))
+        .timeout(Duration::from_secs(180))
         .header("xi-api-key", key)
         .json(&body)
         .send()
@@ -717,6 +720,7 @@ async fn elevenlabs_voices(app: &Arc<App>) -> Result<Vec<Value>, (StatusCode, St
     let (url, key) = elevenlabs(app).ok_or((StatusCode::CONFLICT, "no ElevenLabs key yet".to_string()))?;
     let answer = client()
         .get(format!("{url}/voices"))
+        .timeout(Duration::from_secs(30))
         .header("xi-api-key", key)
         .send()
         .await
@@ -842,8 +846,19 @@ fn seconds_of(audio: &[u8]) -> f64 {
 
 // ---- Running the programs ----------------------------------------------------------------------
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder().timeout(Duration::from_secs(180)).build().unwrap_or_default()
+fn client() -> &'static reqwest::Client {
+    crate::http::client()
+}
+
+/// Limits concurrent local sherpa-onnx subprocesses so simultaneous voice requests cannot OOM the host.
+static LOCAL_SLOTS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+
+struct TempFileGuard(PathBuf);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 fn scratch(app: &App, ext: &str) -> PathBuf {
@@ -858,6 +873,7 @@ fn last_line(text: &str) -> String {
 
 /// Runs a program with no shell between (the words are one argument), and waits for it.
 async fn run(program: &Path, args: &[String], limit: Duration) -> Result<(String, String), String> {
+    let _slot = LOCAL_SLOTS.acquire().await.map_err(|_| "voice runner closed".to_string())?;
     let mut command = tokio::process::Command::new(program);
     command.args(args).stdin(std::process::Stdio::null()).kill_on_drop(true);
     if let Some(folder) = program.parent() {

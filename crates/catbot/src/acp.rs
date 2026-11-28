@@ -265,6 +265,10 @@ struct Heard {
     text: String,
     /// Tool calls started and not yet finished.
     open_tools: Vec<String>,
+    /// File paths explicitly approved via `session/request_permission` during this turn, so a
+    /// subsequent `fs/write_text_file` for the same path does not prompt a second time while
+    /// unapproved direct `fs/write_text_file` calls in Default mode still ask.
+    approved_writes: std::collections::HashSet<PathBuf>,
     /// Whether the prompt has gone. Before then, updates are the agent replaying the session as
     /// it loads (ACP's session/load does, and Grok CLI did), not this turn: they're left out.
     listening: bool,
@@ -575,9 +579,9 @@ async fn read(
             }
             // The agent asks something of Catbot: in its own task, so updates keep flowing.
             (Some(method), Some(id)) => {
-                let (link, tx, answers, workspace) = (link.clone(), tx.clone(), answers.clone(), workspace.clone());
+                let (link, tx, answers, heard, workspace) = (link.clone(), tx.clone(), answers.clone(), heard.clone(), workspace.clone());
                 let params = message["params"].clone();
-                tokio::spawn(async move { serve(&method, &id, &params, &link, &tx, &answers, &workspace).await });
+                tokio::spawn(async move { serve(&method, &id, &params, &link, &tx, &answers, &heard, &workspace).await });
             }
             (Some(method), None) if method == "session/update" => update(&message["params"]["update"], &tx, &heard).await,
             _ => {}
@@ -697,7 +701,8 @@ fn output_of(update: &Value) -> String {
 }
 
 /// Answers one of the agent's requests.
-async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc::Sender<Event>, answers: &Answerer, workspace: &Workspace) {
+#[allow(clippy::too_many_arguments)]
+async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc::Sender<Event>, answers: &Answerer, heard: &Mutex<Heard>, workspace: &Workspace) {
     match method {
         "session/request_permission" => {
             let options = params["options"].as_array().cloned().unwrap_or_default();
@@ -711,23 +716,45 @@ async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc:
             };
             let (allow, reject) = (pick("allow"), pick("reject"));
             let (tool, input) = shown(&params["toolCall"]);
-            let free = match workspace.mode {
-                PermissionMode::BypassPermissions => true,
-                PermissionMode::AcceptEdits | PermissionMode::Auto => matches!(params["toolCall"]["kind"].as_str(), Some("edit") | Some("delete") | Some("move")),
-                _ => false,
-            };
-            let decision = if free {
-                Decision::Allow
-            } else {
-                let question = format!("ask-{}", uuid::Uuid::new_v4());
-                let waiting = answers.expect(&question);
-                if tx.send(Event::ApprovalRequested { id: question.clone(), tool, input }).await.is_err() {
-                    answers.cancel(&question);
-                    Decision::Deny("turn ended".into())
-                } else {
-                    waiting.await
+            let kind = params["toolCall"]["kind"].as_str();
+            let mutating = matches!(kind, Some("edit" | "delete" | "move" | "execute"));
+            let mut target_paths: Vec<String> = params["toolCall"]["locations"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|l| l["path"].as_str().map(str::to_string))
+                .collect();
+            for k in ["file_path", "path"] {
+                if let Some(p) = input[k].as_str() {
+                    target_paths.push(p.to_string());
+                }
+            }
+            // In AcceptEdits/Auto, only auto-allow file edits/deletes/moves when every referenced
+            // target path resolves inside the bot's workspace roots.
+            let edit_inside = !target_paths.is_empty() && target_paths.iter().all(|p| workspace.resolve(p).is_ok());
+            let decision = match workspace.mode {
+                PermissionMode::BypassPermissions => Decision::Allow,
+                PermissionMode::Plan if mutating => Decision::Deny("Plan mode refuses changes.".into()),
+                PermissionMode::AcceptEdits | PermissionMode::Auto if matches!(kind, Some("edit" | "delete" | "move")) && edit_inside => Decision::Allow,
+                _ => {
+                    let question = format!("ask-{}", uuid::Uuid::new_v4());
+                    let waiting = answers.expect(&question);
+                    if tx.send(Event::ApprovalRequested { id: question.clone(), tool, input }).await.is_err() {
+                        answers.cancel(&question);
+                        Decision::Deny("turn ended".into())
+                    } else {
+                        waiting.await
+                    }
                 }
             };
+            if matches!(decision, Decision::Allow) {
+                let mut h = heard.lock().expect("heard lock");
+                for p in &target_paths {
+                    if let Ok(resolved) = workspace.resolve(p) {
+                        h.approved_writes.insert(resolved);
+                    }
+                }
+            }
             let outcome = match (decision, allow, reject) {
                 (Decision::Allow, Some(option), _) => json!({ "outcome": "selected", "optionId": option }),
                 (Decision::Deny(_), _, Some(option)) => json!({ "outcome": "selected", "optionId": option }),
@@ -767,6 +794,33 @@ async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc:
         },
         "fs/write_text_file" => match (file_of(params, workspace), params["content"].as_str()) {
             (Ok(path), Some(content)) => {
+                if workspace.mode == PermissionMode::Plan {
+                    link.refuse(id, -32602, "Plan mode: writing files is not allowed.").await;
+                    return;
+                }
+                if workspace.mode == PermissionMode::Default {
+                    let preapproved = heard.lock().expect("heard lock").approved_writes.remove(&path);
+                    if !preapproved {
+                        let question = format!("ask-{}", uuid::Uuid::new_v4());
+                        let waiting = answers.expect(&question);
+                        let input = json!({ "file_path": path.display().to_string() });
+                        let allowed = if tx.send(Event::ApprovalRequested { id: question.clone(), tool: "Write".into(), input }).await.is_err() {
+                            answers.cancel(&question);
+                            false
+                        } else {
+                            matches!(waiting.await, Decision::Allow)
+                        };
+                        if !allowed {
+                            link.refuse(id, -32602, "The person refused this file write.").await;
+                            return;
+                        }
+                    }
+                }
+                // Re-verify confinement right before writing (guards against symlink swaps during approval).
+                let Ok(path) = file_of(params, workspace) else {
+                    link.refuse(id, -32602, "path is outside the bot's folders").await;
+                    return;
+                };
                 if let Some(parent) = path.parent() {
                     let _ = tokio::fs::create_dir_all(parent).await;
                 }

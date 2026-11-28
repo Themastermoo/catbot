@@ -68,16 +68,15 @@ fn keep(app: &App, c: &ComfyUi) {
 
 // ---- Talking to ComfyUI ----------------------------------------------------------------------
 
-fn client(wait: Duration) -> reqwest::Client {
-    reqwest::Client::builder().timeout(wait).user_agent(concat!("Catbot/", env!("CARGO_PKG_VERSION"))).build().unwrap_or_default()
-}
+const MAX_UPLOAD_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_DOWNLOAD_BYTES: usize = 100 * 1024 * 1024;
 
 fn not_open(url: &str) -> String {
     format!("ComfyUI isn't answering at {url}: is it running?")
 }
 
 async fn get(c: &ComfyUi, path: &str) -> Result<Value, String> {
-    let resp = client(Duration::from_secs(60)).get(format!("{}{path}", c.url)).send().await.map_err(|_| not_open(&c.url))?;
+    let resp = crate::http::client().get(format!("{}{path}", c.url)).timeout(Duration::from_secs(60)).send().await.map_err(|_| not_open(&c.url))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if status == reqwest::StatusCode::NOT_FOUND {
@@ -90,7 +89,7 @@ async fn get(c: &ComfyUi, path: &str) -> Result<Value, String> {
 }
 
 async fn post(c: &ComfyUi, path: &str, body: &Value) -> Result<Value, String> {
-    let resp = client(Duration::from_secs(60)).post(format!("{}{path}", c.url)).json(body).send().await.map_err(|_| not_open(&c.url))?;
+    let resp = crate::http::client().post(format!("{}{path}", c.url)).timeout(Duration::from_secs(60)).json(body).send().await.map_err(|_| not_open(&c.url))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     let found: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
@@ -172,17 +171,42 @@ async fn runnable(c: &ComfyUi, name: &str) -> Result<Value, String> {
     comfy_graph::to_run_form(&saved, &info).map_err(|e| format!("{name} can't be run as it's saved: {e}"))
 }
 
+/// Verifies that `path` is a regular image file inside `bot_folder` and within size limits.
+fn check_picture_path(path: &Path, bot_folder: &Path) -> Result<PathBuf, String> {
+    if !path.is_absolute() {
+        return Err("give the full path of a picture in your folder".into());
+    }
+    let home = bot_folder.canonicalize().map_err(|_| "the bot's folder isn't readable".to_string())?;
+    let real = path.canonicalize().map_err(|_| format!("there's no picture at {}", path.display()))?;
+    if !real.starts_with(&home) {
+        return Err("only pictures inside your own folder can be uploaded to ComfyUI".into());
+    }
+    let meta = std::fs::metadata(&real).map_err(|e| format!("couldn't read {}: {e}", real.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} isn't a file", real.display()));
+    }
+    if !mime_of(&real.to_string_lossy()).starts_with("image/") {
+        return Err(format!("{} isn't a supported picture file", real.display()));
+    }
+    if meta.len() > MAX_UPLOAD_BYTES {
+        return Err(format!("{} is too large to upload to ComfyUI", real.display()));
+    }
+    Ok(real)
+}
+
 /// Puts a picture into ComfyUI's input folder; the name to give LoadImage.
-async fn upload(c: &ComfyUi, path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("couldn't read {}: {e}", path.display()))?;
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("picture.png").replace(['"', '\r', '\n'], "_");
+async fn upload(c: &ComfyUi, path: &Path, bot_folder: &Path) -> Result<String, String> {
+    let real = check_picture_path(path, bot_folder)?;
+    let bytes = tokio::fs::read(&real).await.map_err(|e| format!("couldn't read {}: {e}", real.display()))?;
+    let name = real.file_name().and_then(|n| n.to_str()).unwrap_or("picture.png").replace(['"', '\r', '\n'], "_");
     let boundary = format!("catbot{}", uuid::Uuid::new_v4().simple());
     let mut body = Vec::new();
     body.extend(format!("--{boundary}\r\nContent-Disposition: form-data; name=\"image\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n").as_bytes());
     body.extend(&bytes);
     body.extend(format!("\r\n--{boundary}\r\nContent-Disposition: form-data; name=\"overwrite\"\r\n\r\ntrue\r\n--{boundary}--\r\n").as_bytes());
-    let resp = client(Duration::from_secs(120))
+    let resp = crate::http::client()
         .post(format!("{}/upload/image", c.url))
+        .timeout(Duration::from_secs(120))
         .header("content-type", format!("multipart/form-data; boundary={boundary}"))
         .body(body)
         .send()
@@ -216,8 +240,23 @@ struct Made {
 /// Waits for a job: the files it made, or why it failed.
 async fn finished(c: &ComfyUi, job: &str, longest: Duration) -> Result<Vec<Made>, String> {
     let started = Instant::now();
+    let mut transient_errors = 0u32;
+    let mut last_queue_check = Instant::now();
     loop {
-        let history = get(c, &format!("/history/{job}")).await?;
+        let history = match get(c, &format!("/history/{job}")).await {
+            Ok(h) => {
+                transient_errors = 0;
+                h
+            }
+            Err(why) => {
+                transient_errors += 1;
+                if transient_errors >= 3 || started.elapsed() > longest {
+                    return Err(why);
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
+        };
         let entry = &history[job];
         let status = &entry["status"];
         if status["status_str"] == "error" {
@@ -248,6 +287,22 @@ async fn finished(c: &ComfyUi, job: &str, longest: Duration) -> Result<Vec<Made>
             made.truncate(MOST_FILES);
             return Ok(made);
         }
+        // If the job disappeared from ComfyUI (e.g. cancelled externally or crashed without history),
+        // notice instead of polling for the full hour.
+        if entry.is_null() && started.elapsed() > Duration::from_secs(60) && last_queue_check.elapsed() > Duration::from_secs(30) {
+            last_queue_check = Instant::now();
+            if let Ok(q) = get(c, "/queue").await {
+                let in_queue = q["queue_running"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .chain(q["queue_pending"].as_array().into_iter().flatten())
+                    .any(|item| item[1].as_str() == Some(job));
+                if !in_queue {
+                    return Err("the job is no longer in ComfyUI's queue or history (it may have been cancelled)".into());
+                }
+            }
+        }
         if started.elapsed() > longest {
             return Err(format!("it's still going after {} minutes; Catbot stopped waiting (it may still finish in ComfyUI)", longest.as_secs() / 60));
         }
@@ -256,12 +311,22 @@ async fn finished(c: &ComfyUi, job: &str, longest: Duration) -> Result<Vec<Made>
 }
 
 async fn fetch(c: &ComfyUi, m: &Made) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
     let url = format!("{}/view?filename={}&subfolder={}&type={}", c.url, encode(&m.filename), encode(&m.subfolder), encode(&m.kind));
-    let resp = client(Duration::from_secs(300)).get(url).send().await.map_err(|_| not_open(&c.url))?;
+    let resp = crate::http::stream_client().get(url).timeout(Duration::from_secs(300)).send().await.map_err(|_| not_open(&c.url))?;
     if !resp.status().is_success() {
         return Err(format!("ComfyUI didn't give back {}", m.filename));
     }
-    resp.bytes().await.map(|b| b.to_vec()).map_err(|e| e.to_string())
+    let mut out = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        if out.len().saturating_add(chunk.len()) > MAX_DOWNLOAD_BYTES {
+            return Err(format!("{} is too big to save (> {} MB)", m.filename, MAX_DOWNLOAD_BYTES / 1024 / 1024));
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 fn mime_of(name: &str) -> &'static str {
@@ -298,9 +363,10 @@ async fn bring_home(app: &App, c: &ComfyUi, bot: &Bot, thread: &str, title: &str
     let mut paths = Vec::new();
     for m in made {
         let bytes = fetch(c, m).await?;
-        let path = free_path(&dir, &format!("{}-comfyui-{}", chrono::Local::now().format("%Y-%m-%d"), m.filename.replace(['/', '\\'], "_")));
+        let safe_name = super::attachments::clean(&m.filename);
+        let path = free_path(&dir, &format!("{}-comfyui-{safe_name}", chrono::Local::now().format("%Y-%m-%d")));
         std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-        let attachment = app.try_store(|store| store.add_attachment(&bot.id, &m.filename, &path, mime_of(&m.filename), bytes.len() as u64)).map_err(|e| e.to_string())?;
+        let attachment = app.try_store(|store| store.add_attachment(&bot.id, &safe_name, &path, mime_of(&safe_name), bytes.len() as u64)).map_err(|e| e.to_string())?;
         shown.push(super::attachments::describe(&attachment));
         paths.push(path);
     }
@@ -550,18 +616,17 @@ async fn propose_run(app: &Arc<App>, grant: &Grant, c: &ComfyUi, args: &Value) -
             lines.push(format!("Set {line}"));
         }
     }
+    let bot = app.with_store(|store| store.bot_by_id(&grant.bot_id)).flatten().ok_or("the bot is gone")?;
     let mut uploads = Vec::new();
     for (at, path) in args["pictures"].as_object().into_iter().flatten() {
         let path = PathBuf::from(path.as_str().unwrap_or_default());
-        if !path.is_absolute() || !path.is_file() {
-            return Err(format!("{at}: give the full path of a picture on this computer"));
-        }
+        let real = check_picture_path(&path, &bot.folder).map_err(|why| format!("{at}: {why}"))?;
         let (id, input) = at.split_once('.').ok_or_else(|| format!("{at:?} isn't \"node id.input\""))?;
         if graph.get(id).is_none() {
             return Err(format!("the workflow has no node {id}"));
         }
-        lines.push(format!("Picture {} into {at}", path.display()));
-        uploads.push(json!({ "node": id, "input": input, "path": path.display().to_string() }));
+        lines.push(format!("Picture {} into {at}", real.display()));
+        uploads.push(json!({ "node": id, "input": input, "path": real.display().to_string() }));
     }
     if args.get("graph").is_some() {
         lines.extend(outline(&graph));
@@ -594,10 +659,10 @@ fn propose(app: &Arc<App>, grant: &Grant, wants: &str, title: &str, why: Option<
 }
 
 /// Puts the pictures in and queues the job.
-async fn start(c: &ComfyUi, body: &Value) -> Result<String, String> {
+async fn start(c: &ComfyUi, body: &Value, bot_folder: &Path) -> Result<String, String> {
     let mut graph = body["graph"].clone();
     for u in body["uploads"].as_array().into_iter().flatten() {
-        let name = upload(c, Path::new(u["path"].as_str().unwrap_or_default())).await?;
+        let name = upload(c, Path::new(u["path"].as_str().unwrap_or_default()), bot_folder).await?;
         let (id, input) = (u["node"].as_str().unwrap_or_default(), u["input"].as_str().unwrap_or("image"));
         graph[id]["inputs"][input] = json!(name);
     }
@@ -624,8 +689,8 @@ pub async fn run_approved(app: &Arc<App>, body: &Value, bot_id: &str) -> Result<
             Ok(format!("Stopped job {job}."))
         }
         "run" => {
-            let job = start(&c, body).await?;
             let bot = app.with_store(|store| store.bot_by_id(bot_id)).flatten().ok_or("the bot is gone")?;
+            let job = start(&c, body, &bot.folder).await?;
             let thread = body["thread"].as_str().unwrap_or_default().to_string();
             let title = body["title"].as_str().unwrap_or("the workflow").to_string();
             let app = app.clone();

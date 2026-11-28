@@ -574,6 +574,7 @@ fn output_of(item: &Value) -> String {
 async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc::Sender<Event>, answers: &Answerer, heard: &Mutex<Heard>, mode: PermissionMode) {
     let edits_free = matches!(mode, PermissionMode::AcceptEdits | PermissionMode::Auto | PermissionMode::BypassPermissions);
     let all_free = mode == PermissionMode::BypassPermissions;
+    let plan_only = mode == PermissionMode::Plan;
     let reason = params["reason"].as_str().map(str::to_string);
     match method {
         "item/commandExecution/requestApproval" | "execCommandApproval" => {
@@ -585,7 +586,7 @@ async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc:
             if let Some(reason) = reason {
                 input["description"] = json!(reason);
             }
-            let yes = all_free || ask(tx, answers, "Bash", input).await;
+            let yes = !plan_only && (all_free || ask(tx, answers, "Bash", input).await);
             let decision = match (method, yes) {
                 ("execCommandApproval", true) => "approved",
                 ("execCommandApproval", false) => "denied",
@@ -607,7 +608,7 @@ async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc:
             if let Some(reason) = reason {
                 input["reason"] = json!(reason);
             }
-            let yes = edits_free || ask(tx, answers, "Edit", input).await;
+            let yes = !plan_only && (edits_free || ask(tx, answers, "Edit", input).await);
             let decision = match (method, yes) {
                 ("applyPatchApproval", true) => "approved",
                 ("applyPatchApproval", false) => "denied",
@@ -618,7 +619,7 @@ async fn serve(method: &str, id: &Value, params: &Value, link: &Link, tx: &mpsc:
         }
         "item/permissions/requestApproval" => {
             let input = json!({ "description": reason.unwrap_or_else(|| "Codex asks for more access".into()) });
-            let yes = all_free || ask(tx, answers, "Permissions", input).await;
+            let yes = !plan_only && (all_free || ask(tx, answers, "Permissions", input).await);
             let granted = if yes { params["permissions"].clone() } else { json!({}) };
             link.reply(id, json!({ "permissions": granted, "scope": "turn" })).await;
         }

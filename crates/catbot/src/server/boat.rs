@@ -58,8 +58,8 @@ pub async fn connect(app: &App, key: Option<&str>) -> Result<(), String> {
     }
 }
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder().connect_timeout(Duration::from_secs(20)).build().unwrap_or_default()
+fn client() -> &'static reqwest::Client {
+    crate::http::client()
 }
 
 async fn call_with(key: &str, method: reqwest::Method, path: &str, body: Option<Value>, wait: Duration) -> Result<(u16, Value), String> {

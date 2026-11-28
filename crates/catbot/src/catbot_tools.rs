@@ -29,13 +29,21 @@ impl Access {
     }
 }
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder().timeout(std::time::Duration::from_secs(180)).build().unwrap_or_default()
+fn client() -> &'static reqwest::Client {
+    crate::http::client()
 }
 
 /// The tools, as MCP lists them: `{ name, description, inputSchema }`.
 pub async fn list(access: &Access) -> Vec<Value> {
-    let Ok(answer) = client().get(format!("{}/api/bot-tools", access.url)).header(KEY_HEADER, &access.key).send().await else { return Vec::new() };
+    let Ok(answer) = client()
+        .get(format!("{}/api/bot-tools", access.url))
+        .timeout(std::time::Duration::from_secs(30))
+        .header(KEY_HEADER, &access.key)
+        .send()
+        .await
+    else {
+        return Vec::new();
+    };
     let Ok(body) = answer.json::<Value>().await else { return Vec::new() };
     body["tools"].as_array().cloned().unwrap_or_default()
 }
@@ -53,6 +61,7 @@ pub struct Reply {
 pub async fn reply(access: &Access, name: &str, arguments: &Value) -> Reply {
     let sent = client()
         .post(format!("{}/api/bot-tools/call", access.url))
+        .timeout(std::time::Duration::from_secs(180))
         .header(KEY_HEADER, &access.key)
         .json(&json!({ "name": name, "arguments": arguments }))
         .send()

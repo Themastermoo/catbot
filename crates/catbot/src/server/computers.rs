@@ -198,10 +198,36 @@ async fn run(args: &[&str], wait: Duration) -> Result<Ran, String> {
     run_with(args, wait, &[], None).await
 }
 
+/// Reads a child pipe in chunks, keeping at most the last `cap` bytes so runaway container output
+/// cannot exhaust host memory while still preserving tail output and full screenshots.
+async fn read_tail<R: tokio::io::AsyncRead + Unpin>(mut reader: R, cap: usize) -> Vec<u8> {
+    use tokio::io::AsyncReadExt;
+    let mut tail = Vec::new();
+    let mut chunk = [0u8; 8192];
+    while let Ok(n) = reader.read(&mut chunk).await {
+        if n == 0 {
+            break;
+        }
+        if n >= cap {
+            tail.clear();
+            tail.extend_from_slice(&chunk[n - cap..n]);
+        } else {
+            let overflow = (tail.len() + n).saturating_sub(cap);
+            if overflow > 0 {
+                tail.drain(..overflow);
+            }
+            tail.extend_from_slice(&chunk[..n]);
+        }
+    }
+    tail
+}
+
 /// Runs the container program with extra environment (for `exec -e NAME`, so a secret's value
 /// never shows in a command line) and, if given, something to write to its input.
 async fn run_with(args: &[&str], wait: Duration, env: &[(String, String)], input: Option<&[u8]>) -> Result<Ran, String> {
     use tokio::io::AsyncWriteExt;
+    const MAX_STDOUT: usize = 8 * 1024 * 1024;
+    const MAX_STDERR: usize = 256 * 1024;
     let words = engine().ok_or("there's no Podman or Docker on this computer")?;
     let (program, leading) = words.split_first().ok_or("no container program")?;
     let mut command = tokio::process::Command::new(program);
@@ -209,14 +235,21 @@ async fn run_with(args: &[&str], wait: Duration, env: &[(String, String)], input
     command.stdin(if input.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() });
     command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
     let mut child = command.spawn().map_err(|e| format!("couldn't run {program}: {e}"))?;
-    if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
-        stdin.write_all(bytes).await.map_err(|e| e.to_string())?;
-    }
-    let output = tokio::time::timeout(wait, child.wait_with_output())
-        .await
-        .map_err(|_| format!("{} took too long", engine_name(&words)))?
-        .map_err(|e| format!("couldn't run {program}: {e}"))?;
-    Ok(Ran { code: output.status.code(), out: output.stdout, err: String::from_utf8_lossy(&output.stderr).into_owned() })
+    let stdin = child.stdin.take();
+    let stdout = child.stdout.take().expect("stdout is piped");
+    let stderr = child.stderr.take().expect("stderr is piped");
+    let work = async {
+        let write_in = async move {
+            if let (Some(bytes), Some(mut pipe)) = (input, stdin) {
+                let _ = pipe.write_all(bytes).await;
+                let _ = pipe.shutdown().await;
+            }
+        };
+        let ((), out, err, status) = tokio::join!(write_in, read_tail(stdout, MAX_STDOUT), read_tail(stderr, MAX_STDERR), child.wait());
+        let status = status.map_err(|e| format!("couldn't run {program}: {e}"))?;
+        Ok::<_, String>(Ran { code: status.code(), out, err: String::from_utf8_lossy(&err).into_owned() })
+    };
+    tokio::time::timeout(wait, work).await.map_err(|_| format!("{} took too long", engine_name(&words)))?
 }
 
 /// Runs it, and says what went wrong when it didn't work.
@@ -321,13 +354,22 @@ async fn build(app: &App) -> Result<(), String> {
 
 /// Starts a bot's computer, making it first if need be; waits until its screen answers.
 pub async fn start(app: &Arc<App>, bot_id: &str) -> Result<(), String> {
-    // One start at a time per bot: a second waits for the first.
+    // One start at a time per bot: claim the busy slot atomically under the lock so concurrent
+    // callers never race into duplicate `bring_up` calls.
     loop {
-        let busy = app.computers.with_box(bot_id, |live| live.busy);
-        match busy {
-            None => break,
-            Some("stopping") => tokio::time::sleep(Duration::from_millis(300)).await,
-            Some(_) => {
+        let claimed = app.computers.with_box(bot_id, |live| {
+            if live.busy.is_none() {
+                live.busy = Some("starting");
+                live.problem = None;
+                Ok(())
+            } else {
+                Err(live.busy)
+            }
+        });
+        match claimed {
+            Ok(()) => break,
+            Err(Some("stopping")) => tokio::time::sleep(Duration::from_millis(300)).await,
+            Err(_) => {
                 while app.computers.with_box(bot_id, |live| live.busy.is_some()) {
                     tokio::time::sleep(Duration::from_millis(300)).await;
                 }
@@ -339,11 +381,9 @@ pub async fn start(app: &Arc<App>, bot_id: &str) -> Result<(), String> {
         }
     }
     let boat = entry(app, bot_id).is_some_and(|e| e.boat());
-    let setting_up = !boat && !image_ready(app).await;
-    app.computers.with_box(bot_id, |live| {
-        live.busy = Some(if setting_up { "setting up" } else { "starting" });
-        live.problem = None;
-    });
+    if !boat && !image_ready(app).await {
+        app.computers.with_box(bot_id, |live| live.busy = Some("setting up"));
+    }
     changed(app);
     let started = bring_up(app, bot_id).await;
     app.computers.with_box(bot_id, |live| {
@@ -385,7 +425,12 @@ async fn bring_up_container(app: &Arc<App>, bot_id: &str) -> Result<u16, String>
         }
         None => {
             let label = format!("catbot.bot={bot_id}");
-            let args = ["run", "-d", "--name", &name, "--hostname", "computer", "--label", &label, "-p", "127.0.0.1::6080", "--shm-size", "512m", IMAGE];
+            let args = [
+                "run", "-d", "--name", &name, "--hostname", "computer", "--label", &label,
+                "-p", "127.0.0.1::6080", "--shm-size", "512m",
+                "--memory", "4g", "--cpus", "2", "--pids-limit", "512",
+                IMAGE,
+            ];
             must(&args, Duration::from_secs(120)).await.map_err(|e| format!("it didn't start: {e}"))?;
         }
     }
@@ -678,15 +723,25 @@ async fn on_boat(app: &App, id: &str, work: Work, secrets: &[(String, String)]) 
         Work::Shell { command, seconds, .. } => {
             // Boat keeps commands in its history, so the values go in a file the command reads
             // and deletes, and only the file's name is in the command.
-            let command = if secrets.is_empty() {
-                command
+            let secret_file = if secrets.is_empty() {
+                None
             } else {
                 let file = format!("/tmp/.catbot-{}", uuid::Uuid::new_v4().simple());
                 let lines: Vec<String> = secrets.iter().map(|(k, v)| format!("export {k}={}", quote(v))).collect();
                 boat::write_file(app, id, &file, &(lines.join("\n") + "\n")).await?;
-                format!(". {file}; rm -f {file}; {command}")
+                Some(file)
             };
-            let done = boat::run(app, id, &command, seconds).await?;
+            let command = match &secret_file {
+                Some(file) => format!(". {file}; rm -f {file}; {command}"),
+                None => command,
+            };
+            let ran_res = boat::run(app, id, &command, seconds).await;
+            if let Some(file) = secret_file
+                && (ran_res.is_err() || ran_res.as_ref().is_ok_and(|d| d.timed_out))
+            {
+                let _ = boat::run(app, id, &format!("rm -f {file}"), 15).await;
+            }
+            let done = ran_res?;
             let code = if done.timed_out { Some(124) } else { done.code };
             let ran = Ran { code, out: done.out.into_bytes(), err: done.err };
             Ok((shell_report(&ran, seconds), None))

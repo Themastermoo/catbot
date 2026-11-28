@@ -206,8 +206,12 @@ async fn fetch(url: &str) -> Result<String, String> {
     if !url.trim().starts_with("https://") {
         return Err("skill links start with https://".into());
     }
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
-    let answer = client.get(raw_url(url)).send().await.map_err(|e| format!("couldn't fetch it: {e}"))?;
+    let answer = crate::http::client()
+        .get(raw_url(url))
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("couldn't fetch it: {e}"))?;
     if !answer.status().is_success() {
         return Err(format!("couldn't fetch it: {}", answer.status()));
     }

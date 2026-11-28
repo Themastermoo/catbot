@@ -234,7 +234,7 @@ async fn draw(app: &App, bot: &Bot, choice: &str, prompt: &str, detail: &mut Val
             .await?;
             let svg = svg_in(&reply).ok_or("Claude's answer had no SVG in it")?;
             detail["source"] = json!(svg);
-            render_svg(&svg).map(Some)
+            tokio::task::spawn_blocking(move || render_svg(&svg)).await.map_err(|e| e.to_string())?.map(Some)
         }
         "claude-blender" => {
             if let Some(script) = detail["script"].as_str().filter(|_| detail["state"] == "drawing") {
@@ -259,8 +259,28 @@ async fn draw(app: &App, bot: &Bot, choice: &str, prompt: &str, detail: &mut Val
     }
 }
 
+/// Whether a URL host is a private/loopback/link-local address that should not be fetched via a
+/// third-party image API's redirect or returned URL.
+fn is_private_host(host: &str) -> bool {
+    let lower = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if lower == "localhost" || lower.ends_with(".localhost") || lower.ends_with(".local") {
+        return true;
+    }
+    if let Ok(ip) = lower.parse::<std::net::IpAddr>() {
+        return match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast() || v4.is_multicast()
+            }
+            std::net::IpAddr::V6(v6) => v6.is_loopback() || v6.is_unspecified() || v6.is_multicast() || ((v6.segments()[0] & 0xfe00) == 0xfc00) || ((v6.segments()[0] & 0xffc0) == 0xfe80),
+        };
+    }
+    false
+}
+
 /// OpenAI's or xAI's image API.
 async fn from_api(app: &App, engine_id: &str, prompt: &str) -> Result<Vec<u8>, String> {
+    use futures_util::StreamExt;
+    const MOST_IMAGE_BYTES: usize = 25 * 1024 * 1024;
     let engine = engines::find(engine_id).ok_or("no such AI")?;
     let saved = app.with_store(|store| store.engine_key(engine.id)).flatten();
     let access = engines::access(engine, saved.as_ref()).ok_or_else(|| format!("{} has no key saved", engine.name))?;
@@ -272,8 +292,8 @@ async fn from_api(app: &App, engine_id: &str, prompt: &str) -> Result<Vec<u8>, S
     } else {
         body["size"] = json!("1024x1024");
     }
-    let client = reqwest::Client::builder().timeout(PATIENCE).build().map_err(|e| e.to_string())?;
-    let mut request = client.post(format!("{}/images/generations", access.url)).json(&body);
+    let client = crate::http::client();
+    let mut request = client.post(format!("{}/images/generations", access.url)).timeout(PATIENCE).json(&body);
     if let Some(key) = &access.key {
         request = request.bearer_auth(key);
     }
@@ -289,8 +309,26 @@ async fn from_api(app: &App, engine_id: &str, prompt: &str) -> Result<Vec<u8>, S
         return base64::engine::general_purpose::STANDARD.decode(b64).map_err(|e| e.to_string());
     }
     let url = picture["url"].as_str().ok_or_else(|| format!("{} sent no picture", engine.name))?;
-    let bytes = client.get(url).send().await.map_err(|e| e.to_string())?.bytes().await.map_err(|e| e.to_string())?;
-    Ok(bytes.to_vec())
+    let parsed = reqwest::Url::parse(url).map_err(|_| format!("{} returned an invalid image address", engine.name))?;
+    let api_origin = reqwest::Url::parse(&access.url).ok();
+    let same_configured_host = api_origin.as_ref().is_some_and(|a| a.host_str() == parsed.host_str() && a.port_or_known_default() == parsed.port_or_known_default());
+    if !same_configured_host && (parsed.scheme() != "https" || parsed.host_str().is_none_or(is_private_host)) {
+        return Err(format!("{} returned an image address Catbot refused to fetch", engine.name));
+    }
+    let resp = client.get(parsed).timeout(PATIENCE).send().await.map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("couldn't download the picture ({})", resp.status()));
+    }
+    let mut out = Vec::new();
+    let mut stream = resp.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|e| e.to_string())?;
+        if out.len().saturating_add(chunk.len()) > MOST_IMAGE_BYTES {
+            return Err("the picture is too big to save".into());
+        }
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
 }
 
 /// Asks Claude once, with no tools, in a scratch folder of Catbot's own.
@@ -350,10 +388,22 @@ pub fn code_in(reply: &str) -> Option<String> {
     (!code.is_empty()).then(|| code.to_string())
 }
 
+/// Shared system font database loaded once per process instead of scanning font directories on
+/// every SVG render.
+fn system_fonts() -> Arc<resvg::usvg::fontdb::Database> {
+    static FONTS: std::sync::OnceLock<Arc<resvg::usvg::fontdb::Database>> = std::sync::OnceLock::new();
+    FONTS
+        .get_or_init(|| {
+            let mut db = resvg::usvg::fontdb::Database::new();
+            db.load_system_fonts();
+            Arc::new(db)
+        })
+        .clone()
+}
+
 /// An SVG as a PNG, 1024 pixels on its longer side.
 pub fn render_svg(svg: &str) -> Result<Vec<u8>, String> {
-    let mut options = resvg::usvg::Options::default();
-    options.fontdb_mut().load_system_fonts();
+    let options = resvg::usvg::Options { fontdb: system_fonts(), ..resvg::usvg::Options::default() };
     let tree = resvg::usvg::Tree::from_str(svg, &options).map_err(|e| format!("the SVG didn't read ({e})"))?;
     let size = tree.size();
     let scale = 1024.0 / size.width().max(size.height()).max(1.0);
@@ -364,11 +414,20 @@ pub fn render_svg(svg: &str) -> Result<Vec<u8>, String> {
     pixmap.encode_png().map_err(|e| e.to_string())
 }
 
+struct TempDirGuard(PathBuf);
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
 /// Runs a Blender script without a window, in a scratch folder; the PNG it renders.
 async fn run_blender(script: &str) -> Result<Vec<u8>, String> {
     let blender = blender().ok_or("Blender isn't installed")?;
     let dir = std::env::temp_dir().join(format!("catbot-blender-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    let _cleanup = TempDirGuard(dir.clone());
     let (script_path, out) = (dir.join("scene.py"), dir.join("picture.png"));
     std::fs::write(&script_path, script).map_err(|e| e.to_string())?;
     let mut command = tokio::process::Command::new(&blender);
@@ -381,7 +440,6 @@ async fn run_blender(script: &str) -> Result<Vec<u8>, String> {
         .kill_on_drop(true);
     let run = command.output().await.map_err(|e| format!("couldn't start Blender ({e})"))?;
     let png = std::fs::read(&out);
-    let _ = std::fs::remove_dir_all(&dir);
     match png {
         Ok(png) if !png.is_empty() => Ok(png),
         _ => {

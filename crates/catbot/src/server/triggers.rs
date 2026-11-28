@@ -63,15 +63,22 @@ pub struct EmailWatch {
 }
 
 impl EmailWatch {
-    /// As mail_search reads it.
+    /// As mail_search reads it. Control characters and quotes are stripped so user input cannot
+    /// inject IMAP clauses or break out of quoted phrases.
     fn query(&self) -> String {
-        let quoted = |s: &str| if s.contains(char::is_whitespace) { format!("\"{s}\"") } else { s.to_string() };
+        let quoted = |s: &str| {
+            let clean: String = s.chars().filter(|c| !c.is_control() && *c != '"').collect();
+            let clean = clean.trim();
+            if clean.contains(char::is_whitespace) { format!("\"{clean}\"") } else { clean.to_string() }
+        };
         let mut q = Vec::new();
-        if !self.from.trim().is_empty() {
-            q.push(format!("from:{}", quoted(self.from.trim())));
+        let from = quoted(&self.from);
+        if !from.is_empty() {
+            q.push(format!("from:{from}"));
         }
-        if !self.subject.trim().is_empty() {
-            q.push(format!("subject:{}", quoted(self.subject.trim())));
+        let subject = quoted(&self.subject);
+        if !subject.is_empty() {
+            q.push(format!("subject:{subject}"));
         }
         q.join(" ")
     }
@@ -471,9 +478,15 @@ fn fill(trigger: &mut Trigger, body: &Value) -> Result<(), String> {
         if trigger.kind != "email" {
             return Err("only an email trigger watches the mailbox".into());
         }
-        let field = |k: &str| body["email"][k].as_str().map(|s| s.trim().chars().take(200).collect::<String>()).unwrap_or_default();
-        let folder = field("folder");
-        trigger.email = Some(EmailWatch { folder: if folder.is_empty() { "INBOX".into() } else { folder }, from: field("from"), subject: field("subject") });
+        let field = |k: &str| -> Result<String, String> {
+            let val = body["email"][k].as_str().map(|s| s.trim().chars().take(200).collect::<String>()).unwrap_or_default();
+            if val.chars().any(char::is_control) {
+                return Err(format!("email {k} cannot contain newlines or control characters"));
+            }
+            Ok(val)
+        };
+        let folder = field("folder")?;
+        trigger.email = Some(EmailWatch { folder: if folder.is_empty() { "INBOX".into() } else { folder }, from: field("from")?, subject: field("subject")? });
         // Where it looks has changed: start again from what's there now.
         trigger.mail_seen = None;
         trigger.last_checked = None;

@@ -52,8 +52,7 @@ pub async fn install(engine: &Engine, progress: impl Fn(u64, Option<u64>)) -> Re
 }
 
 async fn fetch(url: &str, into: &Path, sha: &str, progress: &impl Fn(u64, Option<u64>)) -> Result<(), String> {
-    let client = reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(30)).build().map_err(|e| e.to_string())?;
-    let answer = client.get(url).send().await.map_err(|e| format!("couldn't download it: {e}"))?;
+    let answer = crate::http::stream_client().get(url).send().await.map_err(|e| format!("couldn't download it: {e}"))?;
     if !answer.status().is_success() {
         return Err(format!("the download answered {}", answer.status()));
     }

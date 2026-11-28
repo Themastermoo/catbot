@@ -51,7 +51,13 @@ pub async fn upload(app: &Arc<App>, bot: &Bot, req: Request) -> Answer {
     tokio::fs::create_dir_all(&dir).await.map_err(fail)?;
     let path = free_path(&dir, &format!("{}-{name}", chrono::Local::now().format("%Y-%m-%d")));
     tokio::fs::write(&path, &bytes).await.map_err(fail)?;
-    let attachment = app.try_store(|store| store.add_attachment(&bot.id, &name, &path, &mime, bytes.len() as u64)).map_err(fail)?;
+    let attachment = match app.try_store(|store| store.add_attachment(&bot.id, &name, &path, &mime, bytes.len() as u64)) {
+        Ok(attachment) => attachment,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&path).await;
+            return Err(fail(err));
+        }
+    };
     Ok((StatusCode::CREATED, json!({ "attachment": describe(&attachment) })))
 }
 
@@ -60,12 +66,31 @@ pub async fn serve(app: &Arc<App>, id: &str) -> Response {
     let Some(attachment) = app.with_store(|store| store.attachment(id)).flatten() else {
         return (StatusCode::NOT_FOUND, "no such file").into_response();
     };
+    let Some(bot) = app.with_store(|store| store.bot_by_id(&attachment.bot_id)).flatten() else {
+        return (StatusCode::NOT_FOUND, "no such file").into_response();
+    };
+    let Ok(meta) = tokio::fs::symlink_metadata(&attachment.path).await else {
+        return (StatusCode::NOT_FOUND, "the file is gone from the bot's folder").into_response();
+    };
+    if !meta.is_file() {
+        return (StatusCode::NOT_FOUND, "the file is gone from the bot's folder").into_response();
+    }
+    let inside = attachment
+        .path
+        .canonicalize()
+        .ok()
+        .zip(bot.folder.canonicalize().ok())
+        .is_some_and(|(p, f)| p.starts_with(&f));
+    if !inside {
+        return (StatusCode::NOT_FOUND, "no such file").into_response();
+    }
     let Ok(bytes) = tokio::fs::read(&attachment.path).await else {
         return (StatusCode::NOT_FOUND, "the file is gone from the bot's folder").into_response();
     };
     let shown = SHOWN.contains(&attachment.mime.as_str());
     let kind = if shown { attachment.mime.clone() } else { "application/octet-stream".into() };
-    let disposition = format!("{}; filename=\"{}\"", if shown { "inline" } else { "attachment" }, attachment.name.replace('"', "'"));
+    let safe_name: String = attachment.name.chars().filter(|c| !c.is_control()).map(|c| if c == '"' { '\'' } else { c }).collect();
+    let disposition = format!("{}; filename=\"{safe_name}\"", if shown { "inline" } else { "attachment" });
     (
         StatusCode::OK,
         [
@@ -153,7 +178,7 @@ pub fn pictures(m: &Message, folder: &Path) -> Vec<(String, Vec<u8>)> {
 }
 
 /// A name safe to save: no folders, no characters file systems or links trip on.
-fn clean(name: &str) -> String {
+pub(super) fn clean(name: &str) -> String {
     let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
     let cleaned: String = base.chars().map(|c| if "<>:\"|?*".contains(c) || c.is_control() { '-' } else { c }).collect();
     let cleaned = cleaned.trim().trim_start_matches('.').trim().to_string();

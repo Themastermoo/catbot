@@ -119,8 +119,8 @@ enum Link {
 /// Open links, by server id: a command keeps running between calls.
 static LINKS: LazyLock<std::sync::Mutex<HashMap<String, Arc<Mutex<Link>>>>> = LazyLock::new(Default::default);
 
-fn http() -> reqwest::Client {
-    reqwest::Client::builder().timeout(Duration::from_secs(120)).user_agent(concat!("Catbot/", env!("CARGO_PKG_VERSION"))).build().unwrap_or_default()
+fn http() -> &'static reqwest::Client {
+    crate::http::client()
 }
 
 /// Forgets a server's link (it changed, or was turned off or removed): a command stops.
@@ -195,7 +195,7 @@ impl Link {
                 let id = *next;
                 *next += 1;
                 let msg = if notify { json!({ "jsonrpc": "2.0", "method": method, "params": params }) } else { json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }) };
-                let mut req = http().post(url.as_str()).header("accept", "application/json, text/event-stream").header("content-type", "application/json").header("mcp-protocol-version", PROTOCOL);
+                let mut req = http().post(url.as_str()).timeout(Duration::from_secs(120)).header("accept", "application/json, text/event-stream").header("content-type", "application/json").header("mcp-protocol-version", PROTOCOL);
                 if let Some(s) = session.as_deref() {
                     req = req.header("mcp-session-id", s);
                 }

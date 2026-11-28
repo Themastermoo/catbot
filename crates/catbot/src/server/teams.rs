@@ -233,8 +233,12 @@ async fn source(body: &Value) -> Result<String, String> {
         Some((repo, path)) => format!("https://raw.githubusercontent.com/{repo}/{path}"),
         None => url.to_string(),
     };
-    let client = reqwest::Client::builder().timeout(std::time::Duration::from_secs(20)).build().map_err(|e| e.to_string())?;
-    let answer = client.get(&url).send().await.map_err(|e| format!("couldn't fetch it: {e}"))?;
+    let answer = crate::http::client()
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(20))
+        .send()
+        .await
+        .map_err(|e| format!("couldn't fetch it: {e}"))?;
     if !answer.status().is_success() {
         return Err(format!("couldn't fetch it: {}", answer.status()));
     }

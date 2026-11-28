@@ -57,13 +57,13 @@ fn keep(app: &App, c: &Composio) {
     app.hub.send(json!({ "kind": "apps" }));
 }
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder().timeout(Duration::from_secs(120)).user_agent(concat!("Catbot/", env!("CARGO_PKG_VERSION"))).build().unwrap_or_default()
+fn client() -> &'static reqwest::Client {
+    crate::http::client()
 }
 
 /// Composio's answer, or what went wrong in words.
 async fn call(key: &str, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value, String> {
-    let mut req = client().request(method, format!("{}{path}", api())).header("x-api-key", key);
+    let mut req = client().request(method, format!("{}{path}", api())).timeout(Duration::from_secs(120)).header("x-api-key", key);
     if let Some(body) = body {
         req = req.json(&body);
     }

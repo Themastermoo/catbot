@@ -88,7 +88,8 @@ pub async fn set_wifi(app: &Arc<App>, on: bool) {
     let problem = match (app.remote.get(), lan_port(app)) {
         (None, _) | (_, None) => Some("the remote door is off (catbot serve --remote off)".to_string()),
         (Some(_), Some(port)) => {
-            let addr = SocketAddr::from(([0, 0, 0, 0], port));
+            let bind_ip = lan_ip().unwrap_or(IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED));
+            let addr = SocketAddr::new(bind_ip, port);
             match tokio::net::TcpListener::bind(addr).await {
                 Ok(listener) => {
                     let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
@@ -101,7 +102,7 @@ pub async fn set_wifi(app: &Arc<App>, on: bool) {
                             eprintln!("catbot: the same-Wi-Fi door stopped: {err}");
                         }
                     });
-                    eprintln!("catbot: same-Wi-Fi door for paired devices: http://{}:{port}", lan_ip().map(|ip| ip.to_string()).unwrap_or_else(|| "0.0.0.0".into()));
+                    eprintln!("catbot: same-Wi-Fi door for paired devices: http://{bind_ip}:{port}");
                     *WIFI.lock().unwrap_or_else(|e| e.into_inner()) = Some((addr, stop));
                     None
                 }
@@ -213,8 +214,7 @@ pub async fn put(app: &Arc<App>, body: &Value) -> Answer {
 /// Whether an address answers like Catbot's remote door: an unpaired request is refused with
 /// 401 (anything else means something else is there).
 async fn answers(url: &str) -> Result<(), String> {
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(8)).build().map_err(|e| e.to_string())?;
-    match client.get(format!("{}/api/device", url.trim_end_matches('/'))).send().await {
+    match crate::http::client().get(format!("{}/api/device", url.trim_end_matches('/'))).timeout(Duration::from_secs(8)).send().await {
         Ok(reply) if reply.status() == reqwest::StatusCode::UNAUTHORIZED => Ok(()),
         Ok(reply) => Err(format!("something else answered there ({})", reply.status())),
         Err(err) if err.is_timeout() => Err("no answer in 8 seconds".into()),

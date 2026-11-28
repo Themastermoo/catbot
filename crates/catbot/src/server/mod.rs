@@ -125,6 +125,8 @@ pub struct App {
     pub remote: std::sync::OnceLock<SocketAddr>,
     /// The pairing code waiting for a device, if any (`devices.rs`).
     pub pairing: std::sync::Mutex<Option<devices::Pairing>>,
+    /// Sliding-window timestamps of `/api/pair` attempts for this server instance (`devices.rs`).
+    pub pair_attempts: std::sync::Mutex<std::collections::VecDeque<std::time::Instant>>,
     /// When this Catbot started, ms: a scheduled message due before then went out late.
     pub started_ms: i64,
     /// The plans' usage windows as last fetched (`usage.rs`), and when.
@@ -188,6 +190,7 @@ impl App {
             title_model: titles::model_from_env(),
             remote: std::sync::OnceLock::new(),
             pairing: std::sync::Mutex::new(None),
+            pair_attempts: std::sync::Mutex::new(std::collections::VecDeque::new()),
             plan_usage: std::sync::Mutex::new(None),
             limited_until: std::sync::Mutex::new(std::collections::HashMap::new()),
             channels_busy: std::sync::Mutex::new(std::collections::HashSet::new()),

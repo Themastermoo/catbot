@@ -63,8 +63,13 @@ pub fn newer(theirs: &str, ours: &str) -> bool {
 
 async fn github(app: &App, path: &str) -> Result<(u16, Value), String> {
     let api = app.updates.place().api.clone();
-    let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).user_agent(format!("Catbot/{VERSION}")).build().map_err(|e| e.to_string())?;
-    let reply = client.get(format!("{api}/repos/{path}")).header("Accept", "application/vnd.github+json").send().await.map_err(|e| format!("couldn't reach GitHub: {e}"))?;
+    let reply = crate::http::client()
+        .get(format!("{api}/repos/{path}"))
+        .timeout(Duration::from_secs(10))
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("couldn't reach GitHub: {e}"))?;
     let status = reply.status().as_u16();
     Ok((status, reply.json().await.unwrap_or(Value::Null)))
 }

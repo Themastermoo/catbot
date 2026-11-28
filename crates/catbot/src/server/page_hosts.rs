@@ -115,8 +115,8 @@ pub async fn change(app: &App, body: &Value) -> Result<Value, String> {
     Ok(h.shown())
 }
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder().timeout(Duration::from_secs(60)).user_agent(concat!("Catbot/", env!("CARGO_PKG_VERSION"))).build().unwrap_or_default()
+fn client() -> &'static reqwest::Client {
+    crate::http::client()
 }
 
 /// A name a service will take, made from the page's title: `catbot-garden-plan-3fa9c1`.
@@ -143,7 +143,7 @@ fn netlify_api() -> String {
 
 /// Netlify's answer as JSON, or what went wrong in words.
 async fn netlify_call(request: reqwest::RequestBuilder) -> Result<Value, String> {
-    let resp = request.send().await.map_err(|e| format!("couldn't reach Netlify: {e}"))?;
+    let resp = request.timeout(Duration::from_secs(60)).send().await.map_err(|e| format!("couldn't reach Netlify: {e}"))?;
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
     if status.as_u16() == 401 || status.as_u16() == 403 {
@@ -260,7 +260,7 @@ fn cloudflare_api() -> String {
 async fn cloudflare_check(token: &str, account: &str) -> Result<(), String> {
     let api = cloudflare_api();
     for url in [format!("{api}/user/tokens/verify"), format!("{api}/accounts/{account}/tokens/verify")] {
-        if let Ok(resp) = client().get(&url).bearer_auth(token).send().await
+        if let Ok(resp) = client().get(&url).timeout(Duration::from_secs(30)).bearer_auth(token).send().await
             && resp.status().is_success()
             && resp.json::<Value>().await.is_ok_and(|v| v["success"] == true)
         {
