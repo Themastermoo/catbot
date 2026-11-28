@@ -846,7 +846,7 @@ fn query_param<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
 
 /// `GET /api/bots`: the reference server's list with Catbot's bots added.
 async fn list_bots(app: &Arc<App>, req: Request) -> Response {
-    let limit = query_param(&req, "messages").and_then(|n| n.parse().ok()).unwrap_or(50usize);
+    let limit = query_param(&req, "messages").and_then(|n| n.parse().ok()).unwrap_or(50usize).min(500);
     let path = req.uri().path_and_query().map(|p| p.as_str().to_string()).unwrap_or_else(|| "/api/bots".into());
     let headers = req.headers().clone();
     drop(req);
@@ -1032,9 +1032,17 @@ async fn bot_route(app: &Arc<App>, id: &str, rest: &[String], req: Request) -> A
                 None => app.try_store(|store| store.ensure_conversation(&bot.id)).map_err(fail)?.id,
             };
             // A chain of hand-offs stops too, not just the bot answering now.
+            let mut handed = false;
+            for run in handoffs::running(app, &thread) {
+                if let Some(id) = run["id"].as_str()
+                    && handoffs::stop(app, &thread, id)
+                {
+                    handed = true;
+                }
+            }
             let chained = app.channel_busy(&thread);
             app.stop_channel(&thread);
-            Ok((StatusCode::OK, json!({ "ok": true, "stopped": app.turns.interrupt(&thread) || chained })))
+            Ok((StatusCode::OK, json!({ "ok": true, "stopped": app.turns.interrupt(&thread) || chained || handed })))
         }
         (method, rest) => {
             eprintln!("catbot: {method} /api/bots/<{}>/{} isn't something Catbot bots do yet", bot.name, rest.join("/"));
@@ -1169,29 +1177,40 @@ pub fn release_held(app: &Arc<App>, thread: &str) {
     if app.turns.busy(thread) || app.channel_busy(thread) {
         return;
     }
-    let Some(held) = app.held.lock().expect("held lock").remove(thread).filter(|h| !h.is_empty()) else { return };
+    let Some(held) = app.held.lock().unwrap_or_else(|e| e.into_inner()).remove(thread).filter(|h| !h.is_empty()) else { return };
     let request_id = held.last().map(|(id, _)| *id).unwrap_or_default();
     let said = held.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>().join("\n\n");
-    for (id, _) in &held {
-        mark_held(app, thread, *id, None);
-    }
-    let Some(conversation) = app.with_store(|store| store.conversation(thread)).flatten() else { return };
+    let Some(mut conversation) = app.with_store(|store| store.conversation(thread)).flatten() else { return };
     let Some(mut bot) = app.with_store(|store| store.bot_by_id(&conversation.bot_id)).flatten() else { return };
     bot.instructions.push_str(&handoffs::roster_note(app, &bot));
     let bot = match backups::choose(app, &bot) {
         Ok(Some((stand_in, why))) => {
             turns::save_and_send(app, thread, Role::Note, &why, None);
             app.with_store(|store| store.clear_session(thread));
+            conversation.session_id = None;
             stand_in
         }
         Ok(None) => bot,
         Err(why) => {
+            for (id, _) in &held {
+                mark_held(app, thread, *id, None);
+            }
             turns::save_and_send(app, thread, Role::Note, &format!("{} can't answer yet: {why}", bot.name), None);
             return;
         }
     };
     if let Err(err) = turns::start(app.clone(), bot, conversation, request_id, said) {
-        eprintln!("catbot: a held message couldn't go: {err}");
+        // Another turn claimed the thread in the meantime: put the held batch back in front.
+        eprintln!("catbot: a held message couldn't go yet ({err}); keeping it queued");
+        let mut queue = app.held.lock().unwrap_or_else(|e| e.into_inner());
+        let list = queue.entry(thread.to_string()).or_default();
+        let mut combined = held;
+        combined.append(list);
+        *list = combined;
+        return;
+    }
+    for (id, _) in &held {
+        mark_held(app, thread, *id, None);
     }
 }
 
@@ -1211,7 +1230,8 @@ pub fn resume_held(app: &Arc<App>) {
         }
         let channel = app.with_store(|store| store.conversation(&thread)).flatten().and_then(|c| c.channel_id);
         let key = channel.clone().unwrap_or_else(|| thread.clone());
-        app.held.lock().expect("held lock").entry(key.clone()).or_default().push((message.id, message.body.clone()));
+        let text = attachments::person_text(&message);
+        app.held.lock().unwrap_or_else(|e| e.into_inner()).entry(key.clone()).or_default().push((message.id, text));
         if !queued.iter().any(|(k, _)| *k == key) {
             queued.push((key, channel.is_some()));
         }
@@ -1279,10 +1299,20 @@ async fn steer(app: &Arc<App>, thread: &str, body: &Value) -> Answer {
     let Some((key, at, text)) = take_held(app, thread, id) else {
         return Err((StatusCode::CONFLICT, "that message isn't waiting any more".into()));
     };
+    let is_channel = key != thread;
     let put_back = |why: String| {
-        let mut held = app.held.lock().expect("held lock");
-        let list = held.entry(key.clone()).or_default();
-        list.insert(at.min(list.len()), (id, text.clone()));
+        {
+            let mut held = app.held.lock().unwrap_or_else(|e| e.into_inner());
+            let list = held.entry(key.clone()).or_default();
+            list.insert(at.min(list.len()), (id, text.clone()));
+        }
+        // If the turn finished while we held this message outside `app.held`, release it now
+        // so it isn't permanently stranded.
+        if is_channel {
+            channels::release_held(app, &key);
+        } else {
+            release_held(app, thread);
+        }
         (StatusCode::CONFLICT, why)
     };
     let Some(steering) = app.turns.steer(thread) else {
@@ -1399,7 +1429,25 @@ fn send_message(app: &Arc<App>, bot: Bot, body: Value) -> Answer {
         None => bot,
     };
     let conversation = app.try_store(|store| store.conversation(&conversation.id)).map_err(fail)?.unwrap_or(conversation);
-    turns::start(app.clone(), bot, conversation, request_id, said.trim().to_string()).map_err(|e| (StatusCode::CONFLICT, e.to_string()))?;
+    let trimmed = said.trim().to_string();
+    if turns::start(app.clone(), bot, conversation, request_id, trimmed.clone()).is_err() {
+        // Another turn claimed the thread between our busy check and turns::start: mark the
+        // already-saved message as held and queue it so it is never orphaned.
+        let patched = app.with_store(|store| {
+            let mut m = store.message(request_id)?.ok_or("message vanished")?;
+            let mut d = m.detail.clone().unwrap_or_else(|| json!({}));
+            d["held"] = json!(true);
+            store.update_detail(request_id, &d)?;
+            m.detail = Some(d);
+            Ok(wire::message(&m, store.previous_message_id(&thread, request_id)?))
+        });
+        if let Some(wire) = patched {
+            app.hub.send(json!({ "kind": "message.patch", "threadId": thread, "message": wire }));
+        }
+        app.held.lock().unwrap_or_else(|e| e.into_inner()).entry(thread.clone()).or_default().push((request_id, trimmed));
+        release_held(app, &thread);
+        return Ok((StatusCode::ACCEPTED, json!({ "ok": true, "threadId": thread, "message": message, "held": true })));
+    }
     Ok((StatusCode::ACCEPTED, json!({ "ok": true, "threadId": thread, "message": message })))
 }
 
@@ -1690,7 +1738,7 @@ async fn thread_route(app: &Arc<App>, thread: &str, rest: &[String], req: Reques
     }
 }
 
-/// Decodes %XX escapes (message ids only ever need these).
+/// Decodes %XX escapes without slicing inside multi-byte UTF-8 boundaries.
 fn urlencoding_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -1698,7 +1746,8 @@ fn urlencoding_decode(s: &str) -> String {
     while i < bytes.len() {
         if bytes[i] == b'%'
             && i + 2 < bytes.len()
-            && let Ok(byte) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+            && let Some(hex) = std::str::from_utf8(&bytes[i + 1..i + 3]).ok()
+            && let Ok(byte) = u8::from_str_radix(hex, 16)
         {
             out.push(byte);
             i += 3;
@@ -1708,4 +1757,17 @@ fn urlencoding_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod urlencoding_tests {
+    use super::urlencoding_decode;
+
+    #[test]
+    fn percent_before_multibyte_utf8_does_not_panic() {
+        assert_eq!(urlencoding_decode("a%20b"), "a b");
+        assert_eq!(urlencoding_decode("%€"), "%€");
+        assert_eq!(urlencoding_decode("%aé"), "%aé");
+        assert_eq!(urlencoding_decode("cb-12%2F3"), "cb-12/3");
+    }
 }

@@ -197,35 +197,55 @@ async fn drive(app: Arc<App>, thread: String, card: i64) {
         let going = detail["state"] == "running";
         // Start parts while there's room.
         while going && running.len() < PARALLEL {
-            let Some(bot) = app.with_store(|store| store.bot_by_id(&bot_id)).flatten() else { break };
-            let mut picked = None;
-            edit(&app, &thread, card, |d| {
-                let total = d["parts"].as_array().map(Vec::len).unwrap_or(0);
-                let Some(part) = d["parts"].as_array_mut().and_then(|p| p.iter_mut().find(|p| p["state"] == "queued")) else { return false };
-                set_part(part, "running");
-                picked = Some((part["seq"].as_u64().unwrap_or(0) as usize, part["item"].as_str().unwrap_or_default().to_string(), total));
-                true
-            });
-            let Some((seq, item, total)) = picked else { break };
-            let opening = opening(&detail, seq, total, &item);
-            let Some(conversation) = app.with_store(|store| store.new_conversation(&bot.id)) else {
+            let Some(bot) = app.with_store(|store| store.bot_by_id(&bot_id)).flatten() else {
+                // Bot was deleted mid-burst: fail remaining queued parts instead of sticking in "running".
                 edit(&app, &thread, card, |d| {
-                    if let Some(p) = d["parts"].get_mut(seq) {
-                        set_part(p, "failed");
-                        p["error"] = json!("Catbot couldn't open a chat for it.");
+                    if d["state"] != "running" {
+                        return false;
                     }
-                    true
+                    let mut changed = false;
+                    for p in d["parts"].as_array_mut().into_iter().flatten() {
+                        if p["state"] == "queued" {
+                            set_part(p, "failed");
+                            p["error"] = json!("The bot for this burst no longer exists.");
+                            changed = true;
+                        }
+                    }
+                    changed
                 });
-                continue;
+                break;
             };
-            let name = format!("Burst · {} · {}", clip(detail["task"].as_str().unwrap_or("parts"), 36), seq + 1);
-            let _ = app.with_store(|store| store.set_title(&conversation.id, &name, false));
+            // Reserve the next queued part AND create its conversation atomically under EDITING
+            // so a concurrent cancel always sees `p["thread"]` and can interrupt it.
+            let mut picked: Option<(usize, String, usize, crate::store::Conversation)> = None;
+            let mut create_failed = false;
             edit(&app, &thread, card, |d| {
-                if let Some(p) = d["parts"].get_mut(seq) {
-                    p["thread"] = json!(conversation.id);
+                if d["state"] != "running" {
+                    return false;
                 }
+                let total = d["parts"].as_array().map(Vec::len).unwrap_or(0);
+                let task_clip = clip(d["task"].as_str().unwrap_or("parts"), 36);
+                let Some(part) = d["parts"].as_array_mut().and_then(|p| p.iter_mut().find(|p| p["state"] == "queued")) else { return false };
+                let seq = part["seq"].as_u64().unwrap_or(0) as usize;
+                let item = part["item"].as_str().unwrap_or_default().to_string();
+                let Some(conversation) = app.with_store(|store| store.new_conversation(&bot.id)) else {
+                    set_part(part, "failed");
+                    part["error"] = json!("Catbot couldn't open a chat for it.");
+                    create_failed = true;
+                    return true;
+                };
+                let name = format!("Burst · {task_clip} · {}", seq + 1);
+                let _ = app.with_store(|store| store.set_title(&conversation.id, &name, false));
+                set_part(part, "running");
+                part["thread"] = json!(conversation.id);
+                picked = Some((seq, item, total, conversation));
                 true
             });
+            if create_failed {
+                continue;
+            }
+            let Some((seq, item, total, conversation)) = picked else { break };
+            let opening = opening(&detail, seq, total, &item);
             app.announce_bot(&bot.id);
             let app2 = app.clone();
             running.spawn(async move { (seq, part(&app2, bot, conversation, &item, &opening).await) });
@@ -362,10 +382,9 @@ async fn merge(app: &Arc<App>, thread: &str, card: i64, detail: &Value, bot_id: 
 /// `POST /api/threads/:thread/burst/:message`.
 pub fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -> Answer {
     let card = wire::parse_message_id(message).ok_or_else(|| bad("which burst?"))?;
-    let detail = load(app, thread, card).ok_or((StatusCode::NOT_FOUND, "no such burst in this chat".to_string()))?;
-    let state = detail["state"].as_str().unwrap_or_default().to_string();
-    match body["action"].as_str() {
-        Some("run") if state == "proposed" => {
+    let action = body["action"].as_str().ok_or_else(|| bad("run, cancel or retry?"))?;
+    match action {
+        "run" => {
             // The person's edited list, if they changed it.
             let items: Option<Vec<String>> = body["items"].as_array().map(|l| l.iter().filter_map(Value::as_str).map(|i| clip(i.trim(), ITEM_MAX)).filter(|i| !i.is_empty()).collect());
             if let Some(items) = &items {
@@ -376,19 +395,33 @@ pub fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -> Answ
                     return Err(bad(format!("a burst can have at most {MAX_PARTS} items")));
                 }
             }
+            let mut outcome: Result<(), (StatusCode, String)> = Err((StatusCode::NOT_FOUND, "no such burst in this chat".to_string()));
             edit(app, thread, card, |d| {
+                let st = d["state"].as_str().unwrap_or_default();
+                if st != "proposed" {
+                    outcome = Err((StatusCode::CONFLICT, format!("a burst that's {st} can't run")));
+                    return false;
+                }
                 if let Some(items) = &items {
                     d["parts"] = json!(parts_of(items));
                     d["estimateMinutes"] = json!(estimate_minutes(items.len()));
                 }
                 d["state"] = json!("running");
+                outcome = Ok(());
                 true
             });
+            outcome?;
             start(app.clone(), thread.to_string(), card);
         }
-        Some("cancel") if matches!(state.as_str(), "proposed" | "running" | "interrupted") => {
+        "cancel" => {
             let mut stopping = Vec::new();
+            let mut outcome: Result<(), (StatusCode, String)> = Err((StatusCode::NOT_FOUND, "no such burst in this chat".to_string()));
             edit(app, thread, card, |d| {
+                let st = d["state"].as_str().unwrap_or_default();
+                if !matches!(st, "proposed" | "running" | "interrupted") {
+                    outcome = Err((StatusCode::CONFLICT, format!("a burst that's {st} can't cancel")));
+                    return false;
+                }
                 d["state"] = json!("cancelled");
                 for p in d["parts"].as_array_mut().into_iter().flatten() {
                     if p["state"] == "running"
@@ -400,16 +433,28 @@ pub fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -> Answ
                         set_part(p, "cancelled");
                     }
                 }
+                outcome = Ok(());
                 true
             });
+            outcome?;
             for t in stopping {
                 app.turns.interrupt(&t);
             }
         }
-        Some("retry") if matches!(state.as_str(), "finished" | "interrupted") => {
-            let mut any = false;
+        "retry" => {
+            let mut outcome: Result<(), (StatusCode, String)> = Err((StatusCode::NOT_FOUND, "no such burst in this chat".to_string()));
             edit(app, thread, card, |d| {
+                let st = d["state"].as_str().unwrap_or_default().to_string();
+                if !matches!(st.as_str(), "finished" | "interrupted") {
+                    outcome = Err((StatusCode::CONFLICT, format!("a burst that's {st} can't retry")));
+                    return false;
+                }
+                let mut any = false;
+                let mut has_done = false;
                 for p in d["parts"].as_array_mut().into_iter().flatten() {
+                    if p["state"] == "done" {
+                        has_done = true;
+                    }
                     if p["state"] == "failed" || p["state"] == "queued" {
                         set_part(p, "queued");
                         if let Some(map) = p.as_object_mut() {
@@ -418,21 +463,28 @@ pub fn answer(app: &Arc<App>, thread: &str, message: &str, body: &Value) -> Answ
                         any = true;
                     }
                 }
-                if any {
+                // Restarted during `merging`: all parts are already `done`, so Continue merges them.
+                let can_merge = st == "interrupted" && has_done;
+                if any || can_merge {
                     d["state"] = json!("running");
                     if let Some(map) = d.as_object_mut() {
                         map.remove("note");
                     }
+                    outcome = Ok(());
+                    true
+                } else {
+                    outcome = Err((StatusCode::CONFLICT, "there's nothing to run again".into()));
+                    false
                 }
-                any
             });
-            if !any {
-                return Err((StatusCode::CONFLICT, "there's nothing to run again".into()));
-            }
+            outcome?;
             start(app.clone(), thread.to_string(), card);
         }
-        Some(other) => return Err((StatusCode::CONFLICT, format!("a burst that's {state} can't {other}"))),
-        None => return Err(bad("run, cancel or retry?")),
+        other => {
+            let detail = load(app, thread, card).ok_or((StatusCode::NOT_FOUND, "no such burst in this chat".to_string()))?;
+            let state = detail["state"].as_str().unwrap_or_default();
+            return Err((StatusCode::CONFLICT, format!("a burst that's {state} can't {other}")));
+        }
     }
     let detail = load(app, thread, card).unwrap_or(Value::Null);
     Ok((StatusCode::OK, json!({ "ok": true, "state": detail["state"] })))

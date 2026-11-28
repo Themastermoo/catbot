@@ -1,12 +1,21 @@
 //! The live frames Catbot itself produces, fanned out to every open event stream.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
+/// A pre-serialized SSE frame fanned out via `Arc` so K open clients share one serialization
+/// instead of deep-cloning `serde_json::Value` and re-serializing per client.
+#[derive(Clone, Debug)]
+pub struct HubFrame {
+    pub json: Arc<str>,
+    pub removed_device: Option<Arc<str>>,
+}
+
 pub struct Hub {
-    tx: broadcast::Sender<Value>,
+    tx: broadcast::Sender<Arc<HubFrame>>,
     seq: AtomicU64,
 }
 
@@ -24,10 +33,14 @@ impl Hub {
         if matches!(frame["kind"].as_str(), Some("message" | "message.patch" | "runtime")) {
             frame["seq"] = json!(self.seq.fetch_add(1, Ordering::Relaxed));
         }
-        let _ = self.tx.send(frame);
+        let removed_device = (frame["kind"] == "devices")
+            .then(|| frame["removed"].as_str().map(Arc::<str>::from))
+            .flatten();
+        let json: Arc<str> = frame.to_string().into();
+        let _ = self.tx.send(Arc::new(HubFrame { json, removed_device }));
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<Value> {
+    pub fn subscribe(&self) -> broadcast::Receiver<Arc<HubFrame>> {
         self.tx.subscribe()
     }
 }

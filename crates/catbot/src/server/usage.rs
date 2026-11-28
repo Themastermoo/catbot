@@ -344,12 +344,9 @@ async fn claude_plan() -> Value {
         return with(json!({ "ok": false, "error": "Claude Code isn't signed in on this computer (run `claude` and sign in), so its plan usage can't be read." }));
     };
     let url = std::env::var("CATBOT_CLAUDE_USAGE_URL").unwrap_or_else(|_| "https://api.anthropic.com/api/oauth/usage".into());
-    let client = match reqwest::Client::builder().timeout(Duration::from_secs(12)).build() {
-        Ok(c) => c,
-        Err(e) => return with(json!({ "ok": false, "error": e.to_string() })),
-    };
-    let response = client
+    let response = crate::http::client()
         .get(url)
+        .timeout(Duration::from_secs(12))
         .bearer_auth(token)
         .header("accept", "application/json")
         .header("anthropic-beta", "oauth-2025-04-20")

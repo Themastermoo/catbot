@@ -206,40 +206,62 @@ fn sign_in_mark(engine: &Engine) -> Option<String> {
 /// A message the AI stopped, with no backup to answer: it goes again once the AI is fixed. The
 /// chat says so.
 pub fn stopped(app: &App, engine: &Engine, what: &str, thread: &str, message: i64, text: &str) {
-    let mut all = app.with_store(|store| store.setting(STOPPED)).flatten().and_then(|v| v.as_array().cloned()).unwrap_or_default();
-    all.retain(|s| s["thread"] != thread);
-    all.push(json!({
+    let mark = sign_in_mark(engine);
+    let entry = json!({
         "engine": engine.id,
         "thread": thread,
         "message": message,
         "text": text,
         "at": chrono::Utc::now().timestamp_millis(),
-        "mark": sign_in_mark(engine),
-    }));
-    app.with_store(|store| store.set_setting(STOPPED, &Value::Array(all)));
+        "mark": mark,
+    });
+    app.with_store(|store| {
+        let mut all = store.setting(STOPPED)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+        all.retain(|s| s["thread"] != thread);
+        all.push(entry);
+        store.set_setting(STOPPED, &Value::Array(all))
+    });
     let when = if what == "sign-in" { format!("once {} is signed in again", engine.name) } else { format!("once {} has a key that works", engine.name) };
     super::turns::save_and_send(app, thread, crate::store::Role::Note, &format!("Catbot will send this again by itself {when}."), None);
 }
 
 /// Sends again the stopped messages whose AI is fixed. Ones older than three days are let go.
 pub fn send_again(app: &Arc<App>) {
-    let all = app.with_store(|store| store.setting(STOPPED)).flatten().and_then(|v| v.as_array().cloned()).unwrap_or_default();
-    if all.is_empty() {
-        return;
-    }
     let now = chrono::Utc::now().timestamp_millis();
-    let worked = app.worked.lock().expect("worked lock").clone();
-    let (mut ready, mut waiting) = (Vec::new(), Vec::new());
-    for stop in all {
-        let at = stop["at"].as_i64().unwrap_or(0);
-        if now - at > 3 * TOLD_EVERY_MS {
-            continue;
-        }
-        let Some(engine) = stop["engine"].as_str().and_then(engines::find) else { continue };
-        let fixed = worked.get(engine.id).is_some_and(|w| *w > at) || sign_in_mark(engine).is_some_and(|mark| stop["mark"].as_str() != Some(mark.as_str()));
-        if fixed { ready.push((engine, stop)) } else { waiting.push(stop) }
-    }
-    app.with_store(|store| store.set_setting(STOPPED, &Value::Array(waiting)));
+    let worked = app.worked.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let ready: Vec<(&'static Engine, Value)> = app
+        .with_store(|store| {
+            let all = store.setting(STOPPED)?.and_then(|v| v.as_array().cloned()).unwrap_or_default();
+            if all.is_empty() {
+                return Ok(Vec::new());
+            }
+            let (mut ready, mut waiting) = (Vec::new(), Vec::new());
+            let mut changed = false;
+            for stop in all {
+                let at = stop["at"].as_i64().unwrap_or(0);
+                if now - at > 3 * TOLD_EVERY_MS {
+                    changed = true;
+                    continue;
+                }
+                let Some(engine) = stop["engine"].as_str().and_then(engines::find) else {
+                    changed = true;
+                    continue;
+                };
+                let fixed = worked.get(engine.id).is_some_and(|w| *w > at)
+                    || sign_in_mark(engine).is_some_and(|mark| stop["mark"].as_str() != Some(mark.as_str()));
+                if fixed {
+                    changed = true;
+                    ready.push((engine, stop));
+                } else {
+                    waiting.push(stop);
+                }
+            }
+            if changed {
+                store.set_setting(STOPPED, &Value::Array(waiting))?;
+            }
+            Ok(ready)
+        })
+        .unwrap_or_default();
     for (engine, stop) in ready {
         let (Some(thread), Some(message), Some(text)) = (stop["thread"].as_str(), stop["message"].as_i64(), stop["text"].as_str()) else { continue };
         if app.with_store(|store| store.conversation(thread)).flatten().is_none() {
@@ -247,7 +269,7 @@ pub fn send_again(app: &Arc<App>) {
         }
         eprintln!("catbot: {} is fixed: sending the message it stopped in {thread} again", engine.name);
         super::turns::save_and_send(app, thread, crate::store::Role::Note, &format!("{} works again, so Catbot is sending your message again.", engine.name), None);
-        app.held.lock().expect("held lock").entry(thread.to_string()).or_default().push((message, text.to_string()));
+        app.held.lock().unwrap_or_else(|e| e.into_inner()).entry(thread.to_string()).or_default().push((message, text.to_string()));
         super::release_held(app, thread);
     }
 }

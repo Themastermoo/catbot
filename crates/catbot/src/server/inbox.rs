@@ -80,7 +80,7 @@ fn load(store: &Store) -> Kept {
     store.setting(KEY).ok().flatten().and_then(|v| serde_json::from_value(v).ok()).unwrap_or_default()
 }
 
-fn keep(store: &Store, mut kept: Kept) {
+fn keep(store: &Store, kept: &mut Kept) {
     let cutoff = now_ms() - KEEP_DAYS * 24 * 3600 * 1000;
     kept.lines.retain(|l| l.at >= cutoff);
     let extra = kept.lines.len().saturating_sub(LINES_KEPT);
@@ -106,7 +106,7 @@ fn change(app: &App, f: impl FnOnce(&Store, &mut Kept) -> bool) -> bool {
         let mut kept = load(store);
         let changed = f(store, &mut kept);
         if changed {
-            keep(store, kept);
+            keep(store, &mut kept);
         }
         Ok(changed)
     })
@@ -134,6 +134,64 @@ fn place(conversation: &Conversation) -> String {
     conversation.channel_id.clone().unwrap_or_else(|| conversation.bot_id.clone())
 }
 
+/// Preloaded lookups for a single `rows()` call to avoid up to 1,500 N+1 SQLite queries.
+struct Lookup {
+    bots: HashMap<String, (String, Option<String>)>,
+    bots_by_name: HashMap<String, String>,
+    channels: HashMap<String, String>,
+    conversations: HashMap<String, Option<Conversation>>,
+}
+
+impl Lookup {
+    fn new(store: &Store) -> Self {
+        let bots = store.bot_summaries().unwrap_or_default();
+        let bots_by_name = bots.iter().map(|(id, (name, _))| (name.to_lowercase(), id.clone())).collect();
+        let channels = store.channels().unwrap_or_default().into_iter().map(|c| (c.id, c.name)).collect();
+        Self { bots, bots_by_name, channels, conversations: HashMap::new() }
+    }
+
+    fn conversation(&mut self, store: &Store, id: &str) -> Option<&Conversation> {
+        if !self.conversations.contains_key(id) {
+            let found = store.conversation(id).ok().flatten();
+            self.conversations.insert(id.to_string(), found);
+        }
+        self.conversations.get(id).and_then(Option::as_ref)
+    }
+
+    fn bot_id_by_name(&self, name: &str) -> Option<&str> {
+        self.bots_by_name.get(&name.to_lowercase()).map(String::as_str)
+    }
+
+    fn from(&self, bot_id: &str, name: Option<&str>) -> Value {
+        let found = self.bots.get(bot_id);
+        let name = name
+            .map(str::to_string)
+            .or_else(|| found.map(|(n, _)| n.clone()))
+            .unwrap_or_else(|| "A bot".into());
+        let color = match found {
+            Some((_, Some(c))) => c.clone(),
+            Some((_, None)) => {
+                let hash = bot_id.bytes().fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
+                crate::store::COLORS[hash % crate::store::COLORS.len()].to_string()
+            }
+            None => "slate".into(),
+        };
+        json!({ "name": name, "botId": bot_id, "color": color })
+    }
+
+    fn origin(&self, conversation: &Conversation, message: Option<i64>) -> Value {
+        let title = match &conversation.channel_id {
+            Some(channel) => self.channels.get(channel).map(|n| format!("#{n}")).unwrap_or_default(),
+            None => conversation.title.clone().unwrap_or_else(|| crate::titles::UNTITLED.to_string()),
+        };
+        let mut origin = json!({ "botId": place(conversation), "threadId": conversation.id, "title": title });
+        if let Some(id) = message {
+            origin["messageId"] = json!(wire::message_id(id));
+        }
+        origin
+    }
+}
+
 fn origin(store: &Store, conversation: &Conversation, message: Option<i64>) -> Value {
     let title = match &conversation.channel_id {
         Some(channel) => store.channel(channel).ok().flatten().map(|c| format!("#{}", c.name)).unwrap_or_default(),
@@ -154,10 +212,11 @@ fn from(store: &Store, bot_id: &str, name: Option<&str>) -> Value {
 }
 
 /// The asks open now: approvals running turns wait on, and cards a bot left asking.
-fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
+fn asks(app: &App, store: &Store, lookup: &mut Lookup, seen: &[String]) -> Vec<Row> {
     let mut rows = Vec::new();
     for (thread, bot_id, request, message_id) in app.turns.all_open_cards() {
-        let (Ok(Some(conversation)), Ok(Some(message))) = (store.conversation(&thread), store.message(message_id)) else { continue };
+        let Ok(Some(message)) = store.message(message_id) else { continue };
+        let Some(conversation) = lookup.conversation(store, &thread).cloned() else { continue };
         let card = message.detail.as_ref().map(|d| d["card"].clone()).unwrap_or(Value::Null);
         let id = wire::message_id(message_id);
         rows.push(Row {
@@ -167,8 +226,8 @@ fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
             tab: "needs-you",
             wire: json!({
                 "id": id,
-                "from": from(store, &bot_id, None),
-                "origin": origin(store, &conversation, Some(message_id)),
+                "from": lookup.from(&bot_id, None),
+                "origin": lookup.origin(&conversation, Some(message_id)),
                 "text": clip(card["subtitle"].as_str().unwrap_or(&message.body)),
                 // A question in words is answered in its chat (stage 32.5); an approval, here too.
                 "card": if card["requestType"] == "question" {
@@ -181,7 +240,7 @@ fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
         });
     }
     for (thread, message) in store.asking_cards(ROWS_SHOWN).unwrap_or_default() {
-        let Ok(Some(conversation)) = store.conversation(&thread) else { continue };
+        let Some(conversation) = lookup.conversation(store, &thread).cloned() else { continue };
         let Some(detail) = &message.detail else { continue };
         let card = match detail["kind"].as_str() {
             // A review (stage 32.14): "Review Kiwi's answer", the answer's start under it.
@@ -201,7 +260,7 @@ fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
             _ => continue,
         };
         let asked_by = detail["askedBy"].as_str().filter(|n| *n != "you");
-        let bot = asked_by.and_then(|n| store.bot(n).ok().flatten()).map(|b| b.id).unwrap_or_else(|| conversation.bot_id.clone());
+        let bot = asked_by.and_then(|n| lookup.bot_id_by_name(n)).map(str::to_string).unwrap_or_else(|| conversation.bot_id.clone());
         let text = match card["type"].as_str() {
             Some("picture") => format!("Choose who draws: {}", detail["prompt"].as_str().unwrap_or_default()),
             _ => card["title"].as_str().unwrap_or(&message.body).to_string(),
@@ -214,8 +273,8 @@ fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
             tab: "needs-you",
             wire: json!({
                 "id": id,
-                "from": from(store, &bot, asked_by),
-                "origin": origin(store, &conversation, Some(message.id)),
+                "from": lookup.from(&bot, asked_by),
+                "origin": lookup.origin(&conversation, Some(message.id)),
                 "text": clip(&text),
                 "card": card,
             }),
@@ -227,6 +286,28 @@ fn asks(app: &App, store: &Store, seen: &[String]) -> Vec<Row> {
 
 fn line_tab(line: &Line) -> &'static str {
     if line.done || (line.kind == "result" && line.seen) { "done" } else { "info" }
+}
+
+fn line_row_cached(store: &Store, lookup: &mut Lookup, line: &Line) -> Option<Row> {
+    let conversation = lookup.conversation(store, &line.thread_id)?.clone();
+    let focus = if line.kind == "message" { line.id.strip_prefix("cb-").and_then(|n| n.parse().ok()) } else { None };
+    Some(Row {
+        id: line.id.clone(),
+        kind: match line.kind.as_str() {
+            "message" => "message",
+            "result" => "result",
+            _ => "notice",
+        },
+        tab: line_tab(line),
+        at: line.at,
+        unread: !line.seen,
+        wire: json!({
+            "id": line.id,
+            "from": lookup.from(&line.bot_id, None),
+            "origin": lookup.origin(&conversation, focus),
+            "text": line.text,
+        }),
+    })
 }
 
 fn line_row(store: &Store, line: &Line) -> Option<Row> {
@@ -277,9 +358,10 @@ fn troubles(app: &App) -> Vec<Row> {
 }
 
 fn rows(app: &App, store: &Store, kept: &Kept) -> Vec<Row> {
+    let mut lookup = Lookup::new(store);
     let mut rows = troubles(app);
-    rows.extend(asks(app, store, &kept.seen_asks));
-    rows.extend(kept.lines.iter().filter_map(|l| line_row(store, l)));
+    rows.extend(asks(app, store, &mut lookup, &kept.seen_asks));
+    rows.extend(kept.lines.iter().filter_map(|l| line_row_cached(store, &mut lookup, l)));
     rows.sort_by_key(|r| std::cmp::Reverse(r.at));
     // What is still open comes first, so settled rows never push it out of the list.
     let (open, settled): (Vec<Row>, Vec<Row>) = rows.into_iter().partition(|r| r.tab != "done");
@@ -290,13 +372,7 @@ fn count_of(rows: &[Row]) -> usize {
     rows.iter().filter(|r| r.tab == "needs-you" || (r.tab == "info" && r.unread)).count()
 }
 
-/// The inbox as the panel lists it.
-pub fn view(app: &App) -> Value {
-    let listed = {
-        let _one = CHANGING.lock().expect("inbox lock");
-        app.with_store(|store| Ok(rows(app, store, &load(store))))
-    }
-    .unwrap_or_default();
+fn rows_to_wire(listed: Vec<Row>) -> Value {
     let count = count_of(&listed);
     let rows: Vec<Value> = listed
         .into_iter()
@@ -310,6 +386,16 @@ pub fn view(app: &App) -> Value {
         })
         .collect();
     json!({ "rows": rows, "count": count })
+}
+
+/// The inbox as the panel lists it.
+pub fn view(app: &App) -> Value {
+    let listed = {
+        let _one = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+        app.with_store(|store| Ok(rows(app, store, &load(store))))
+    }
+    .unwrap_or_default();
+    rows_to_wire(listed)
 }
 
 /// Files a line of news and tells every open interface (a message with its row, to notify).
@@ -448,53 +534,83 @@ pub fn message_person(app: &App, grant: &super::bot_tools::Grant, args: &Value) 
 pub fn route(app: &App, method: &Method, rest: &[&str]) -> Answer {
     match (method, rest) {
         (&Method::GET, []) => Ok((StatusCode::OK, view(app))),
-        (&Method::GET, ["count"]) => Ok((StatusCode::OK, json!({ "count": view(app)["count"] }))),
+        (&Method::GET, ["count"]) => {
+            let count = {
+                let _one = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+                app.with_store(|store| Ok(count_of(&rows(app, store, &load(store)))))
+            }
+            .unwrap_or(0);
+            Ok((StatusCode::OK, json!({ "count": count })))
+        }
         (&Method::POST, ["read-all"]) => {
-            let listed: Vec<String> = view(app)["rows"].as_array().into_iter().flatten().filter(|r| r["kind"] == "ask" && r["unread"] == true).filter_map(|r| r["id"].as_str().map(str::to_string)).collect();
-            change(app, |_, kept| {
-                let mut any = false;
-                for line in kept.lines.iter_mut().filter(|l| !l.seen) {
-                    line.seen = true;
-                    any = true;
-                }
-                for id in listed {
-                    kept.seen_asks.push(id);
-                    any = true;
-                }
-                any
-            });
+            let wire = {
+                let _one = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+                app.with_store(|store| {
+                    let mut kept = load(store);
+                    let mut any = false;
+                    let open_ask_ids: Vec<String> = rows(app, store, &kept)
+                        .into_iter()
+                        .filter(|r| r.kind == "ask" && r.unread)
+                        .map(|r| r.id)
+                        .collect();
+                    for line in kept.lines.iter_mut().filter(|l| !l.seen) {
+                        line.seen = true;
+                        any = true;
+                    }
+                    for id in open_ask_ids {
+                        kept.seen_asks.push(id);
+                        any = true;
+                    }
+                    if any {
+                        keep(store, &mut kept);
+                    }
+                    Ok(rows_to_wire(rows(app, store, &kept)))
+                })
+                .unwrap_or_else(|| json!({ "rows": [], "count": 0 }))
+            };
             changed(app);
-            Ok((StatusCode::OK, view(app)))
+            Ok((StatusCode::OK, wire))
         }
         (&Method::POST, [id, what @ ("read" | "done")]) => {
             let id = id.to_string();
-            let is_ask = view(app)["rows"].as_array().into_iter().flatten().any(|r| r["kind"] == "ask" && r["id"] == id.as_str());
-            if is_ask && *what == "done" {
-                return Err((StatusCode::CONFLICT, "this one waits on your answer".into()));
-            }
-            let mut found = is_ask;
-            change(app, |_, kept| {
-                if is_ask {
-                    if kept.seen_asks.contains(&id) {
-                        return false;
+            let what = *what;
+            let result: Result<Value, (StatusCode, String)> = {
+                let _one = CHANGING.lock().unwrap_or_else(|e| e.into_inner());
+                let outcome = app.with_store(|store| {
+                    let mut kept = load(store);
+                    let current = rows(app, store, &kept);
+                    let is_ask = current.iter().any(|r| r.kind == "ask" && r.id == id);
+                    if is_ask && what == "done" {
+                        return Ok(Err((StatusCode::CONFLICT, "this one waits on your answer".into())));
                     }
-                    kept.seen_asks.push(id.clone());
-                    return true;
-                }
-                let Some(line) = kept.lines.iter_mut().find(|l| l.id == id) else { return false };
-                found = true;
-                let before = (line.seen, line.done);
-                line.seen = true;
-                if *what == "done" {
-                    line.done = true;
-                }
-                before != (line.seen, line.done)
-            });
-            if !found {
-                return Err((StatusCode::NOT_FOUND, "no such line in the inbox".into()));
-            }
+                    let changed_now = if is_ask {
+                        if kept.seen_asks.contains(&id) {
+                            false
+                        } else {
+                            kept.seen_asks.push(id.clone());
+                            true
+                        }
+                    } else {
+                        let Some(line) = kept.lines.iter_mut().find(|l| l.id == id) else {
+                            return Ok(Err((StatusCode::NOT_FOUND, "no such line in the inbox".into())));
+                        };
+                        let before = (line.seen, line.done);
+                        line.seen = true;
+                        if what == "done" {
+                            line.done = true;
+                        }
+                        before != (line.seen, line.done)
+                    };
+                    if changed_now {
+                        keep(store, &mut kept);
+                    }
+                    Ok(Ok(rows_to_wire(rows(app, store, &kept))))
+                });
+                outcome.unwrap_or_else(|| Err((StatusCode::NOT_FOUND, "no such line in the inbox".into())))
+            };
+            let wire = result?;
             changed(app);
-            Ok((StatusCode::OK, view(app)))
+            Ok((StatusCode::OK, wire))
         }
         _ => Err((StatusCode::NOT_FOUND, "the inbox doesn't do that".into())),
     }

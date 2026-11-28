@@ -539,17 +539,26 @@ pub async fn openrouter_back(app: &Arc<App>, query: &std::collections::HashMap<S
         );
         (status, Html(html)).into_response()
     };
-    let asked = OPENROUTER_ASK.lock().expect("openrouter lock").take();
-    let (Some(asked), Some(code)) = (asked, query.get("code").filter(|c| !c.is_empty())) else {
+    let Some(code) = query.get("code").filter(|c| !c.is_empty()) else {
+        return page(StatusCode::BAD_REQUEST, "No OpenRouter log-in code was given. Start it again from Catbot.");
+    };
+    let asked = {
+        let mut guard = OPENROUTER_ASK.lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(pending) if query.get("state").map(String::as_str) == Some(pending.state.as_str()) => guard.take(),
+            Some(_) => {
+                set_work(app, "openrouter", json!({ "problem": "The log-in came back from somewhere else, so Catbot ignored it. Try again." }), None);
+                app.hub.send(json!({ "kind": "engines" }));
+                return page(StatusCode::BAD_REQUEST, "This doesn't match the log-in Catbot started. Try again from Catbot.");
+            }
+            None => None,
+        }
+    };
+    let Some(asked) = asked else {
         return page(StatusCode::BAD_REQUEST, "No OpenRouter log-in is under way. Start it again from Catbot.");
     };
-    if query.get("state").map(String::as_str) != Some(asked.state.as_str()) {
-        set_work(app, "openrouter", json!({ "problem": "The log-in came back from somewhere else, so Catbot ignored it. Try again." }), None);
-        app.hub.send(json!({ "kind": "engines" }));
-        return page(StatusCode::BAD_REQUEST, "This doesn't match the log-in Catbot started. Try again from Catbot.");
-    }
     let traded = async {
-        let answer = reqwest::Client::new()
+        let answer = crate::http::client()
             .post(format!("{}/api/v1/auth/keys", openrouter_base()))
             .json(&json!({ "code": code, "code_verifier": asked.verifier, "code_challenge_method": "S256" }))
             .timeout(std::time::Duration::from_secs(30))

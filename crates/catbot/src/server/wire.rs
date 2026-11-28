@@ -189,10 +189,15 @@ pub fn bot(store: &Store, bot: &Bot, activity: Activity<'_>, messages: Option<us
     wire["folders"] = json!(store.chat_folders(&bot.id)?);
     if let Some(limit) = messages {
         let (list, more) = page(store, &conversation.id, None, limit)?;
-        let (latest, _) = store.page(&conversation.id, None, 1)?;
+        let active_leaf = if limit > 0 {
+            list.last().map(|m| m["id"].clone()).unwrap_or(Value::Null)
+        } else {
+            let (latest, _) = store.page(&conversation.id, None, 1)?;
+            latest.first().map(|m| json!(message_id(m.id))).unwrap_or(Value::Null)
+        };
         wire["messages"] = Value::Array(list);
         wire["hasMore"] = json!(more);
-        wire["activeLeafId"] = latest.first().map(|m| json!(message_id(m.id))).unwrap_or(Value::Null);
+        wire["activeLeafId"] = active_leaf;
     }
     Ok(wire)
 }

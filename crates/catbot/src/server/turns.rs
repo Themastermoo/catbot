@@ -153,7 +153,33 @@ impl Turns {
     }
 
     fn finish(&self, thread_id: &str) {
-        self.running.lock().expect("turns lock").remove(thread_id);
+        self.running.lock().unwrap_or_else(|e| e.into_inner()).remove(thread_id);
+    }
+}
+
+/// Ensures `turns.finish` and `doing.remove` always run even if a turn task panics.
+struct TurnGuard {
+    app: Arc<App>,
+    thread_id: String,
+    active: bool,
+}
+
+impl TurnGuard {
+    fn new(app: Arc<App>, thread_id: String) -> Self {
+        Self { app, thread_id, active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for TurnGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.app.turns.finish(&self.thread_id);
+            self.app.doing.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.thread_id);
+        }
     }
 }
 
@@ -163,6 +189,7 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
     let id = turn_id.clone();
     tokio::spawn(async move {
         let thread_id = conversation.id.clone();
+        let mut guard = TurnGuard::new(app.clone(), thread_id.clone());
         let reply = run(&app, &bot, conversation, request_id, &text, &id, cancel, false).await;
         // A reply that ends with @Name brings that bot in (`handoffs.rs`); the chat stays busy.
         let next = reply.as_deref().map(|r| super::handoffs::next_after(&app, &bot, r)).unwrap_or_default();
@@ -170,7 +197,8 @@ pub fn start(app: Arc<App>, bot: Bot, conversation: Conversation, request_id: i6
             app.set_channel_busy(&thread_id, true);
         }
         app.turns.finish(&thread_id);
-        app.doing.lock().expect("doing lock").remove(&thread_id);
+        app.doing.lock().unwrap_or_else(|e| e.into_inner()).remove(&thread_id);
+        guard.disarm();
         app.announce_bot(&bot.id);
         let handed = !next.is_empty();
         if let Some(reply) = reply.filter(|_| handed) {
@@ -209,9 +237,8 @@ pub fn doing_of(tool: &str) -> Option<&'static str> {
 pub async fn run_through(app: &Arc<App>, bot: &Bot, conversation: Conversation, request_id: i64, text: &str, guest: bool) -> Result<Option<String>, &'static str> {
     let (turn_id, cancel) = register(app, &conversation.id, &bot.id)?;
     let thread_id = conversation.id.clone();
+    let _guard = TurnGuard::new(app.clone(), thread_id.clone());
     let reply = run(app, bot, conversation, request_id, text, &turn_id, cancel, guest).await;
-    app.turns.finish(&thread_id);
-    app.doing.lock().expect("doing lock").remove(&thread_id);
     Ok(reply)
 }
 
@@ -301,12 +328,12 @@ async fn run(
     let before = super::changes::snapshot(points.clone(), "before a turn").await;
 
     let item_id = format!("item-{turn_id}");
-    // A fresh session (a branched chat, or one Claude lost) is shown what was said before.
-    let with_earlier = |session: &Session| match session {
-        Session::New(_) if bot.engine == engines::CLAUDE => format!("{}{text}", so_far(app, thread, if fresh { i64::MAX } else { request_id }, bot)),
+    // A fresh session (a branched chat, or one Claude lost, or a failover backup) is shown what was said before.
+    let prompt_for = |who: &Bot, session: &Session| match session {
+        Session::New(_) if who.engine == engines::CLAUDE => format!("{}{text}", so_far(app, thread, if fresh { i64::MAX } else { request_id }, who)),
         _ => text.to_string(),
     };
-    let mut result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
+    let mut result = drive(app, bot, &session, &prompt_for(bot, &session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
     let lost = result.outcome.as_ref().is_some_and(|o| !o.ok && o.result.as_deref().is_some_and(chat::says_lost))
         || result.errors.iter().any(|e| chat::says_lost(e));
     if matches!(session, Session::Resume(_)) && lost && !result.stopped {
@@ -316,7 +343,7 @@ async fn run(
         let note = "Claude no longer had this conversation, so it continued in a fresh one.";
         save_and_send(app, thread, Role::Note, note, None);
         session = Session::New(id);
-        result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
+        result = drive(app, bot, &session, &prompt_for(bot, &session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
     }
 
     // The bot's AI ran out of usage, credit or quota (any AI, Moo's ask on 2026-11-27): a backup
@@ -325,15 +352,16 @@ async fn run(
     let said: String = result.errors.iter().cloned().chain(result.outcome.as_ref().and_then(|o| o.result.clone())).collect::<Vec<_>>().join(" ");
     if !result.stopped && result.reply.trim().is_empty() && super::backups::says_limit(&said) {
         let until = super::backups::lifts_at(&said).unwrap_or_else(|| super::backups::lifts_guess(&said));
-        app.limited_until.lock().expect("limited lock").insert(bot.engine.clone(), until);
+        app.limited_until.lock().unwrap_or_else(|e| e.into_inner()).insert(bot.engine.clone(), until);
         super::usage::forget(app);
         if let Ok(Some((stand_in, why))) = super::backups::choose(app, bot) {
             save_and_send(app, thread, Role::Note, &why, None);
             if !guest {
                 app.with_store(|store| store.clear_session(thread));
             }
-            let fresh = Session::New(uuid::Uuid::new_v4().to_string());
-            result = drive(app, &stand_in, &fresh, text, codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
+            let fresh_session = Session::New(uuid::Uuid::new_v4().to_string());
+            let keep = !guest && stand_in.engine == bot.engine && stand_in.model == bot.model;
+            result = drive(app, &stand_in, &fresh_session, &prompt_for(&stand_in, &fresh_session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), keep).await;
             ran_on = stand_in;
         }
     }
@@ -354,9 +382,11 @@ async fn run(
                 _ = cancel.notified() => false,
             };
             if waited {
-                result = drive(app, bot, &session, &with_earlier(&session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
+                result = drive(app, bot, &session, &prompt_for(bot, &session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
+                what = super::health::classify(engine, &words(&result)).unwrap_or(what);
+            } else {
+                result.stopped = true;
             }
-            what = super::health::classify(engine, &words(&result)).unwrap_or(what);
         }
         if failed(&result) {
             super::health::broke(app, engine, what, &words(&result), &bot.id, thread);
@@ -365,8 +395,9 @@ async fn run(
                 if !guest {
                     app.with_store(|store| store.clear_session(thread));
                 }
-                let fresh = Session::New(uuid::Uuid::new_v4().to_string());
-                result = drive(app, &stand_in, &fresh, text, codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), !guest).await;
+                let fresh_session = Session::New(uuid::Uuid::new_v4().to_string());
+                let keep = !guest && stand_in.engine == bot.engine && stand_in.model == bot.model;
+                result = drive(app, &stand_in, &fresh_session, &prompt_for(&stand_in, &fresh_session), codex.clone(), thread, &item_id, &cancel, &emit, open.as_ref(), keep).await;
                 ran_on = stand_in;
             } else if !guest && conversation.channel_id.is_none() && super::health::waits_for_fix(what) {
                 // No backup: it goes again once the person has fixed the AI (stage 32.6).
@@ -641,10 +672,9 @@ async fn drive(
                     "always": always,
                     "rules": super::allowed::rules_for(&tool, &input),
                 });
-                if let Some(message) = save_and_send(app, thread, Role::Card, &summary, Some(&json!({ "card": card })))
-                    && let Some(message_id) = message["id"].as_str().and_then(wire::parse_message_id)
-                {
+                if let Some((message_id, wire)) = save_message(app, thread, Role::Card, &summary, Some(&json!({ "card": card }))) {
                     app.turns.add_card(thread, &id, message_id);
+                    app.hub.send(json!({ "kind": "message", "threadId": thread, "message": wire }));
                     app.announce_bot(&bot.id);
                     super::inbox::changed(app);
                     super::team_chat::waiting(app, bot, thread, &summary);
@@ -861,11 +891,10 @@ fn ask_question(app: &Arc<App>, bot: &Bot, thread: &str, id: &str, input: &Value
         "tool": ASK_USER_QUESTION,
         "questions": questions,
     });
-    if let Some(message) = save_and_send(app, thread, Role::Card, &summary, Some(&json!({ "card": card })))
-        && let Some(message_id) = message["id"].as_str().and_then(wire::parse_message_id)
-    {
+    if let Some((message_id, wire)) = save_message(app, thread, Role::Card, &summary, Some(&json!({ "card": card }))) {
         app.turns.add_card(thread, id, message_id);
         app.turns.add_question(thread, id, questions.iter().map(|q| q.question.clone()).collect());
+        app.hub.send(json!({ "kind": "message", "threadId": thread, "message": wire }));
         app.announce_bot(&bot.id);
         super::inbox::changed(app);
         super::team_chat::waiting(app, bot, thread, &summary);
@@ -877,26 +906,26 @@ fn ask_question(app: &Arc<App>, bot: &Bot, thread: &str, id: &str, input: &Value
 pub fn answer_question(app: &App, thread: &str, request_id: &str, answers: Value) -> Option<String> {
     let turn_id = app.turns.answer(thread, request_id, Decision::Answer(answers.clone()))?;
     app.hub.send(runtime(thread, &turn_id, json!({ "type": "request.resolved", "requestId": request_id, "behavior": "answer", "source": "user" })));
-    if let Some(message_id) = app.turns.card_of(thread, request_id).map(|(_, m)| m) {
-        app.with_store(|store| {
-            let mut detail = store.message(message_id)?.and_then(|m| m.detail).unwrap_or_else(|| json!({}));
-            detail["card"]["answers"] = answers;
-            store.update_detail(message_id, &detail)
-        });
-    }
-    settle_card(app, thread, request_id, "answer", false);
+    settle_card_with(app, thread, request_id, "answer", false, Some(answers));
     Some(turn_id)
 }
 
 pub fn settle_card(app: &App, thread: &str, request_id: &str, behavior: &str, dismissed: bool) {
+    settle_card_with(app, thread, request_id, behavior, dismissed, None);
+}
+
+fn settle_card_with(app: &App, thread: &str, request_id: &str, behavior: &str, dismissed: bool, answers: Option<Value>) {
     let Some(message_id) = app.turns.close_card(thread, request_id) else { return };
     let wire = app.with_store(|store| {
-        let message = store.message(message_id)?.ok_or("card vanished")?;
+        let mut message = store.message(message_id)?.ok_or("card vanished")?;
         let mut detail = message.detail.clone().unwrap_or_else(|| json!({}));
+        if let Some(answers) = answers {
+            detail["card"]["answers"] = answers;
+        }
         detail["card"]["answered"] = json!(behavior);
         detail["card"]["dismissed"] = json!(dismissed);
         store.update_detail(message_id, &detail)?;
-        let message = store.message(message_id)?.ok_or("card vanished")?;
+        message.detail = Some(detail);
         Ok(wire::message(&message, store.previous_message_id(thread, message_id)?))
     });
     if let Some(wire) = wire {
@@ -917,9 +946,9 @@ fn save_step(app: &Arc<App>, thread: &str, step: &Step) {
     save_and_send(app, thread, Role::Step, &body, detail.as_ref());
 }
 
-/// Bots' names by id.
+/// Bots' names by id (lightweight query without loading full instructions).
 fn names(app: &App) -> std::collections::HashMap<String, String> {
-    app.with_store(|store| store.bots()).unwrap_or_default().into_iter().map(|b| (b.id, b.name)).collect()
+    app.with_store(|store| store.bot_names()).unwrap_or_default()
 }
 
 /// A conversation as an AI's history: the person's words (and other bots', named, in a
@@ -994,14 +1023,18 @@ fn so_far(app: &App, thread: &str, before: i64, bot: &Bot) -> String {
     said
 }
 
-/// Saves a message and sends it to every open interface.
-pub fn save_and_send(app: &App, thread: &str, role: Role, body: &str, detail: Option<&Value>) -> Option<Value> {
-    let wire = app.with_store(|store| {
+fn save_message(app: &App, thread: &str, role: Role, body: &str, detail: Option<&Value>) -> Option<(i64, Value)> {
+    app.with_store(|store| {
         let id = store.add_message(thread, role, body, detail)?;
         let parent = store.previous_message_id(thread, id)?;
         let message = store.message(id)?.ok_or("message vanished")?;
-        Ok(wire::message(&message, parent))
-    })?;
+        Ok((id, wire::message(&message, parent)))
+    })
+}
+
+/// Saves a message and sends it to every open interface.
+pub fn save_and_send(app: &App, thread: &str, role: Role, body: &str, detail: Option<&Value>) -> Option<Value> {
+    let (_, wire) = save_message(app, thread, role, body, detail)?;
     app.hub.send(json!({ "kind": "message", "threadId": thread, "message": wire }));
     // The person wrote (not a trigger, not Catbot): what the chat sent them is answered.
     if role == Role::Person && detail.is_none_or(|d| d["fromCatbot"].is_null()) {

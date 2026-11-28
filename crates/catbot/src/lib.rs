@@ -14,6 +14,7 @@ pub mod claude;
 pub mod codex;
 pub mod console;
 pub mod engines;
+pub mod http;
 pub mod login;
 pub mod memory;
 pub mod pi;

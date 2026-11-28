@@ -105,6 +105,7 @@ pub fn sync(app: &App) {
         let kept = departments::load(store);
         let bots = store.bots()?;
         let mut chats = map(store, KEY);
+        let before = chats.clone();
         let leads = map(store, LEADS);
         // Departments that are gone: their chats are ordinary channels now.
         let gone: Vec<String> = chats.keys().filter(|name| !kept.list.iter().any(|d| &d.name == *name)).cloned().collect();
@@ -116,7 +117,10 @@ pub fn sync(app: &App) {
         for dept in &kept.list {
             let members: Vec<String> = bots.iter().filter(|b| kept.members.get(&b.id) == Some(&dept.name)).map(|b| b.id.clone()).collect();
             if members.is_empty() {
-                continue; // (a channel can't be empty: it waits for the department's next bot)
+                if let Some(id) = chats.remove(&dept.name) {
+                    changed.push(id);
+                }
+                continue;
             }
             let chief = dept.chief.clone().filter(|id| members.contains(id));
             let picked = leads.get(&dept.name).cloned().filter(|id| members.contains(id));
@@ -135,7 +139,9 @@ pub fn sync(app: &App) {
                 }
             }
         }
-        store.set_setting(KEY, &json!(chats))?;
+        if chats != before {
+            store.set_setting(KEY, &json!(chats))?;
+        }
         Ok::<_, BoxError>(changed)
     });
     for id in changed.into_iter().flatten() {

@@ -159,7 +159,7 @@ impl Updates {
     }
 
     fn now(&self) -> std::sync::MutexGuard<'_, Now> {
-        self.now.lock().expect("updates lock")
+        self.now.lock().unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -282,11 +282,18 @@ fn asset<'a>(release: &'a Value, name: &str) -> Option<&'a str> {
 }
 
 fn client() -> Result<reqwest::Client, String> {
-    reqwest::Client::builder()
-        .connect_timeout(Duration::from_secs(20))
-        .user_agent(format!("Catbot/{VERSION}"))
-        .build()
-        .map_err(|e| e.to_string())
+    use std::sync::OnceLock;
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    Ok(CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(20))
+                .read_timeout(Duration::from_secs(90))
+                .user_agent(format!("Catbot/{VERSION}"))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new())
+        })
+        .clone())
 }
 
 /// A release's `release.json`, read from its assets.
@@ -445,20 +452,25 @@ async fn install(app: &std::sync::Arc<App>) -> Answer {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
                 if std::mem::take(&mut app.updates.now().waiting) {
-                    finish_install(&app);
+                    finish_install(&app).await;
                 }
             });
         }
         tell(app, json!({}));
         return Ok((StatusCode::ACCEPTED, wire(app)));
     }
-    finish_install(app);
+    finish_install(app).await;
     Ok((StatusCode::OK, wire(app)))
 }
 
 /// Takes the copy of the data, makes the new version current, and asks the app to restart.
-fn finish_install(app: &App) {
-    match switch_to_new(app) {
+/// Runs blocking filesystem/installer operations (`pkexec apt-get`, SQLite snapshot) off Tokio workers.
+async fn finish_install(app: &std::sync::Arc<App>) {
+    let app_blocking = app.clone();
+    let result = tokio::task::spawn_blocking(move || switch_to_new(&app_blocking))
+        .await
+        .unwrap_or_else(|e| Err(format!("installer task stopped: {e}")));
+    match result {
         Ok(extra) => tell(app, extra),
         Err(err) => {
             app.updates.now().error = Some(err);
@@ -525,6 +537,17 @@ fn install_deb(place: &Place, file: &Path) -> Result<(), String> {
     }
 }
 
+/// Total ordering for version strings (never violates antisymmetry on equal parsed versions).
+fn cmp_versions(a: &str, b: &str) -> std::cmp::Ordering {
+    if newer(a, b) {
+        std::cmp::Ordering::Greater
+    } else if newer(b, a) {
+        std::cmp::Ordering::Less
+    } else {
+        a.cmp(b)
+    }
+}
+
 /// Copies an AppImage onto the shelf of kept ones as `Catbot-<version>.AppImage` (unless it's
 /// there already) and notes its storage format. Returns where it is.
 fn keep_appimage(shelf: &Path, from: &Path, version: &str, store: i64) -> Result<PathBuf, String> {
@@ -538,7 +561,7 @@ fn keep_appimage(shelf: &Path, from: &Path, version: &str, store: i64) -> Result
     // The last few.
     if let Some(map) = list["kept"].as_object_mut() {
         let mut versions: Vec<String> = map.keys().cloned().collect();
-        versions.sort_by(|a, b| if newer(a, b) { std::cmp::Ordering::Greater } else { std::cmp::Ordering::Less });
+        versions.sort_by(|a, b| cmp_versions(a, b));
         while versions.len() > KEPT + 1 {
             let old = versions.remove(0);
             map.remove(&old);
@@ -690,7 +713,7 @@ async fn phone_back(app: &std::sync::Arc<App>, to: &str, use_snapshot: bool) -> 
             now.error = done.as_ref().err().cloned();
         }
         match done {
-            Ok(()) => finish_install(&app),
+            Ok(()) => finish_install(&app).await,
             Err(_) => tell(&app, json!({})),
         }
     });
@@ -753,7 +776,7 @@ async fn deb_back(app: &std::sync::Arc<App>, to: &str, use_snapshot: bool) -> An
             now.error = done.as_ref().err().cloned();
         }
         match done {
-            Ok(()) => finish_install(&app),
+            Ok(()) => finish_install(&app).await,
             Err(_) => tell(&app, json!({})),
         }
     });
@@ -986,12 +1009,12 @@ pub fn wire(app: &App) -> Value {
                 .filter(|(v, _)| v == VERSION || place.dir.as_deref().is_some_and(|d| d.join("versions").join(v).join("Catbot.exe").is_file()))
                 .map(|(v, about)| json!({ "version": v, "store": about["store"], "current": v == VERSION }))
                 .collect();
-            list.sort_by(|a, b| if newer(a["version"].as_str().unwrap_or(""), b["version"].as_str().unwrap_or("")) { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater });
+            list.sort_by(|a, b| cmp_versions(b["version"].as_str().unwrap_or(""), a["version"].as_str().unwrap_or("")));
             list
         })
         .unwrap_or_default();
     let mut list = linux.unwrap_or(list);
-    list.sort_by(|a, b| if newer(a["version"].as_str().unwrap_or(""), b["version"].as_str().unwrap_or("")) { std::cmp::Ordering::Less } else { std::cmp::Ordering::Greater });
+    list.sort_by(|a, b| cmp_versions(b["version"].as_str().unwrap_or(""), a["version"].as_str().unwrap_or("")));
     json!({
         "platform": place.platform.name(),
         "canSwap": place.platform != Platform::Home && (place.platform != Platform::Windows || place.dir.is_some()),

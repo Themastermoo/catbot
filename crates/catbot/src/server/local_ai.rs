@@ -19,7 +19,8 @@
 //! The rest of the time an engine on this computer is like any other (`engines.rs`).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use axum::http::StatusCode;
@@ -70,10 +71,6 @@ fn add(app: &App, id: &str) -> Result<(), (StatusCode, String)> {
     }).map_err(fail)
 }
 
-fn client(timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder().timeout(timeout).build().unwrap_or_default()
-}
-
 /// The program, if it's on this computer (`CATBOT_OLLAMA_PROGRAM` stands in for it in tests).
 fn program(id: &str) -> Option<std::path::PathBuf> {
     if id == "ollama"
@@ -91,48 +88,90 @@ fn program(id: &str) -> Option<std::path::PathBuf> {
     engines::find_program(name).or_else(|| also.into_iter().find(|p| p.is_file()))
 }
 
+/// Cached `(model_name, digest) -> thinks` so discovery doesn't hammer `/api/show` on every refresh.
+static THINK_CACHE: OnceLock<Mutex<HashMap<(String, String), bool>>> = OnceLock::new();
+
+fn think_cache() -> &'static Mutex<HashMap<(String, String), bool>> {
+    THINK_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 /// What one says about itself: running (and its version), and its models.
 async fn look(app: &App, id: &str) -> Value {
     let base = base(app, id);
-    let quick = client(Duration::from_secs(3));
+    let http = crate::http::client();
+    let quick = Duration::from_secs(3);
     if id == "ollama" {
-        let Ok(answer) = quick.get(format!("{base}/api/version")).send().await else {
+        let Ok(answer) = http.get(format!("{base}/api/version")).timeout(quick).send().await else {
             return json!({ "running": false });
         };
         let version: Value = answer.json().await.unwrap_or(Value::Null);
-        let tags: Value = match quick.get(format!("{base}/api/tags")).send().await {
+        let tags: Value = match http.get(format!("{base}/api/tags")).timeout(quick).send().await {
             Ok(answer) => answer.json().await.unwrap_or(Value::Null),
             Err(_) => Value::Null,
         };
-        let mut models = Vec::new();
-        let mut thinkers = Vec::new();
-        for m in tags["models"].as_array().into_iter().flatten() {
+        let raw_models: Vec<Value> = tags["models"].as_array().cloned().unwrap_or_default();
+        // Probe uncached models concurrently; reuse cached capability when `(name, digest)` matches.
+        let lookups = raw_models.iter().map(|m| {
+            let base = base.clone();
             let name = m["name"].as_str().unwrap_or_default().to_string();
-            let shown: Value = match quick.post(format!("{base}/api/show")).json(&json!({ "model": name })).send().await {
-                Ok(answer) => answer.json().await.unwrap_or(Value::Null),
-                Err(_) => Value::Null,
-            };
-            let thinks = shown["capabilities"].as_array().is_some_and(|c| c.iter().any(|x| x == "thinking"));
-            thinkers.push((name.clone(), thinks));
-            models.push(json!({
-                "name": name,
-                "size": m["size"],
-                "parameters": m["details"]["parameter_size"],
-                "quantization": m["details"]["quantization_level"],
-                "family": m["details"]["family"],
-                "thinks": thinks,
-            }));
-        }
+            let digest = m["digest"].as_str().unwrap_or_default().to_string();
+            async move {
+                if !digest.is_empty()
+                    && let Some(&cached) = think_cache().lock().unwrap_or_else(|e| e.into_inner()).get(&(name.clone(), digest.clone()))
+                {
+                    return (name, cached);
+                }
+                let shown: Value = match http.post(format!("{base}/api/show")).timeout(quick).json(&json!({ "model": name })).send().await {
+                    Ok(answer) => answer.json().await.unwrap_or(Value::Null),
+                    Err(_) => Value::Null,
+                };
+                let thinks = shown["capabilities"].as_array().is_some_and(|c| c.iter().any(|x| x == "thinking"));
+                if !digest.is_empty() && !shown.is_null() {
+                    let mut cache = think_cache().lock().unwrap_or_else(|e| e.into_inner());
+                    if cache.len() > 256 {
+                        cache.clear();
+                    }
+                    cache.insert((name.clone(), digest), thinks);
+                }
+                (name, thinks)
+            }
+        });
+        let thinkers: Vec<(String, bool)> = futures_util::future::join_all(lookups).await;
+        let models: Vec<Value> = raw_models
+            .iter()
+            .zip(thinkers.iter())
+            .map(|(m, (name, thinks))| {
+                json!({
+                    "name": name,
+                    "size": m["size"],
+                    "parameters": m["details"]["parameter_size"],
+                    "quantization": m["details"]["quantization_level"],
+                    "family": m["details"]["family"],
+                    "thinks": thinks,
+                })
+            })
+            .collect();
         engines::note_thinkers(thinkers);
         json!({ "running": true, "version": version["version"], "models": models })
     } else {
-        let Ok(answer) = quick.get(format!("{base}/v1/models")).send().await else {
+        let Ok(answer) = http.get(format!("{base}/v1/models")).timeout(quick).send().await else {
             return json!({ "running": false });
         };
         let listed: Value = answer.json().await.unwrap_or(Value::Null);
         let models: Vec<Value> = listed["data"].as_array().into_iter().flatten().filter_map(|m| m["id"].as_str()).map(|id| json!({ "name": id })).collect();
         json!({ "running": true, "models": models })
     }
+}
+
+/// Static hardware memory cached once per process so discovery doesn't spawn `nvidia-smi` repeatedly.
+static HARDWARE_MEM: OnceLock<(Option<f64>, Option<f64>)> = OnceLock::new();
+
+async fn cached_memory() -> (Option<f64>, Option<f64>) {
+    if let Some(&mem) = HARDWARE_MEM.get() {
+        return mem;
+    }
+    let mem = tokio::task::spawn_blocking(memory).await.unwrap_or((None, None));
+    *HARDWARE_MEM.get_or_init(|| mem)
 }
 
 /// The graphics card's memory and the computer's, in GB, where they can be told.
@@ -173,14 +212,15 @@ pub fn fit(need: f64, gpu: Option<f64>, ram: Option<f64>) -> &'static str {
 /// Downloads under way: model → (bytes done, bytes in all, what Ollama says, the problem).
 type Pull = (u64, u64, String, Option<String>);
 static PULLS: Mutex<Option<HashMap<String, Pull>>> = Mutex::new(None);
-static TASKS: Mutex<Option<HashMap<String, tokio::task::JoinHandle<()>>>> = Mutex::new(None);
+static TASKS: Mutex<Option<HashMap<String, (u64, tokio::task::JoinHandle<()>)>>> = Mutex::new(None);
+static PULL_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn pulls() -> HashMap<String, Pull> {
-    PULLS.lock().expect("pulls lock").clone().unwrap_or_default()
+    PULLS.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default()
 }
 
 fn set_pull(model: &str, pull: Option<Pull>) {
-    let mut all = PULLS.lock().expect("pulls lock");
+    let mut all = PULLS.lock().unwrap_or_else(|e| e.into_inner());
     let map = all.get_or_insert_with(HashMap::new);
     match pull {
         Some(p) => {
@@ -202,11 +242,16 @@ fn check_model(name: &str) -> Result<String, (StatusCode, String)> {
 }
 
 fn pull(app: &Arc<App>, model: String) -> Answer {
-    if pulls().get(&model).is_some_and(|p| p.3.is_none()) {
-        return Ok((StatusCode::ACCEPTED, json!({ "already": true })));
+    {
+        let mut all = PULLS.lock().unwrap_or_else(|e| e.into_inner());
+        let map = all.get_or_insert_with(HashMap::new);
+        if map.get(&model).is_some_and(|p| p.3.is_none()) {
+            return Ok((StatusCode::ACCEPTED, json!({ "already": true })));
+        }
+        map.insert(model.clone(), (0, 0, "starting".into(), None));
     }
-    set_pull(&model, Some((0, 0, "starting".into(), None)));
     app.hub.send(json!({ "kind": "local-ai" }));
+    let token = PULL_SEQ.fetch_add(1, Ordering::Relaxed);
     let (app2, name) = (app.clone(), model.clone());
     let task = tokio::spawn(async move {
         let app = app2;
@@ -219,17 +264,25 @@ fn pull(app: &Arc<App>, model: String) -> Answer {
             }
             Err(why) => set_pull(&name, Some((0, 0, String::new(), Some(why)))),
         }
-        TASKS.lock().expect("tasks lock").get_or_insert_with(HashMap::new).remove(&name);
+        {
+            let mut tasks = TASKS.lock().unwrap_or_else(|e| e.into_inner());
+            let map = tasks.get_or_insert_with(HashMap::new);
+            if map.get(&name).is_some_and(|(t, _)| *t == token) {
+                map.remove(&name);
+            }
+        }
         app.hub.send(json!({ "kind": "local-ai" }));
         app.hub.send(json!({ "kind": "engines" }));
     });
-    TASKS.lock().expect("tasks lock").get_or_insert_with(HashMap::new).insert(model, task);
+    if let Some((_, prev)) = TASKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(model, (token, task)) {
+        prev.abort();
+    }
     Ok((StatusCode::ACCEPTED, json!({ "ok": true })))
 }
 
 async fn pull_stream(app: &App, model: &str) -> Result<(), String> {
     use futures_util::StreamExt;
-    let answer = reqwest::Client::new()
+    let answer = crate::http::stream_client()
         .post(format!("{}/api/pull", base(app, "ollama")))
         .json(&json!({ "model": model, "stream": true }))
         .send()
@@ -241,7 +294,7 @@ async fn pull_stream(app: &App, model: &str) -> Result<(), String> {
     }
     let mut body = answer.bytes_stream();
     let mut lines = crate::stream_lines::StreamLines::default();
-    let mut last_said = std::time::Instant::now();
+    let mut last_said = std::time::Instant::now() - Duration::from_secs(1);
     let mut finished = false;
     while let Some(chunk) = body.next().await {
         let chunk = chunk.map_err(|e| format!("the download broke off: {e}"))?;
@@ -253,10 +306,10 @@ async fn pull_stream(app: &App, model: &str) -> Result<(), String> {
             let status = event["status"].as_str().unwrap_or_default().to_string();
             finished |= status == "success";
             let (done, total) = (event["completed"].as_u64().unwrap_or(0), event["total"].as_u64().unwrap_or(0));
-            set_pull(model, Some((done, total, status, None)));
+            set_pull(model, Some((done, total, status.clone(), None)));
             if last_said.elapsed() > Duration::from_millis(500) {
                 last_said = std::time::Instant::now();
-                app.hub.send(json!({ "kind": "local-ai", "pulling": model, "done": done, "total": total }));
+                app.hub.send(json!({ "kind": "local-ai", "pulling": model, "done": done, "total": total, "status": status }));
             }
         }
     }
@@ -264,7 +317,7 @@ async fn pull_stream(app: &App, model: &str) -> Result<(), String> {
 }
 
 fn stop_pull(model: &str) {
-    if let Some(task) = TASKS.lock().expect("tasks lock").get_or_insert_with(HashMap::new).remove(model) {
+    if let Some((_, task)) = TASKS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).remove(model) {
         task.abort();
     }
     set_pull(model, None);
@@ -307,8 +360,7 @@ fn start(id: &str) -> Result<String, String> {
 // ---- Routes ------------------------------------------------------------------------------------
 
 async fn shown(app: &App) -> Value {
-    let (gpu, ram) = tokio::task::spawn_blocking(memory).await.unwrap_or((None, None));
-    let (ollama, lmstudio) = tokio::join!(look(app, "ollama"), look(app, "lmstudio"));
+    let ((gpu, ram), (ollama, lmstudio)) = tokio::join!(cached_memory(), async { tokio::join!(look(app, "ollama"), look(app, "lmstudio")) });
     let now = pulls();
     let one = |id: &str, mut seen: Value| {
         seen["id"] = json!(id);
@@ -351,10 +403,11 @@ pub async fn route(app: &Arc<App>, method: &axum::http::Method, rest: &[&str], q
         (&Method::POST, [id, "start"]) => {
             engine(id)?;
             let started = start(id).map_err(|why| (StatusCode::CONFLICT, why))?;
-            // A moment for it to answer, so the page can say it's running.
+            // A moment for it to answer, so the page can say it's running (cheap ping only).
+            let probe = format!("{}{}", base(app, id), if *id == "ollama" { "/api/version" } else { "/v1/models" });
             for _ in 0..20 {
                 tokio::time::sleep(Duration::from_millis(250)).await;
-                if look(app, id).await["running"] == true {
+                if crate::http::client().get(&probe).timeout(Duration::from_secs(2)).send().await.is_ok() {
                     break;
                 }
             }
@@ -371,8 +424,9 @@ pub async fn route(app: &Arc<App>, method: &axum::http::Method, rest: &[&str], q
         }
         (&Method::POST, ["ollama", "remove"]) => {
             let model = check_model(body["model"].as_str().unwrap_or_default())?;
-            let answer = client(Duration::from_secs(30))
+            let answer = crate::http::client()
                 .delete(format!("{}/api/delete", base(app, "ollama")))
+                .timeout(Duration::from_secs(30))
                 .json(&json!({ "model": model }))
                 .send()
                 .await

@@ -410,6 +410,8 @@ impl Store {
         std::fs::create_dir_all(home)?;
         let conn = Connection::open(home.join("catbot.db"))?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.pragma_update(None, "synchronous", "NORMAL")?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
@@ -606,12 +608,22 @@ impl Store {
                  COMMIT;",
             )?;
         }
+        // Idempotent performance indexes (backward-compatible with STORE_VERSION = 12):
+        // eliminate full-table JSON scans in asking_cards/held_messages/burst_cards and N+1 lookups.
+        conn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS conversations_by_channel ON conversations(channel_id) WHERE channel_id IS NOT NULL;
+             CREATE INDEX IF NOT EXISTS chat_folders_by_bot ON chat_folders(bot_id, position);
+             CREATE INDEX IF NOT EXISTS conversations_unread ON conversations(updated_at DESC) WHERE unread = 1 AND archived_at IS NULL;
+             CREATE INDEX IF NOT EXISTS messages_asking ON messages(id DESC) WHERE detail IS NOT NULL AND json_valid(detail) AND json_extract(detail, '$.state') IN ('asking', 'choosing');
+             CREATE INDEX IF NOT EXISTS messages_held ON messages(id) WHERE detail IS NOT NULL AND json_valid(detail) AND json_extract(detail, '$.held') = 1;
+             CREATE INDEX IF NOT EXISTS messages_burst_active ON messages(id) WHERE detail IS NOT NULL AND json_valid(detail) AND json_extract(detail, '$.kind') = 'burst' AND json_extract(detail, '$.state') IN ('running', 'merging');",
+        )?;
         Ok(Self { conn, home: home.to_path_buf() })
     }
 
     /// A bot's chat folders (stage 23.3), in their order.
     pub fn chat_folders(&self, bot_id: &str) -> Result<Vec<ChatFolder>, BoxError> {
-        let mut stmt = self.conn.prepare("SELECT id, name, emoji FROM chat_folders WHERE bot_id = ?1 ORDER BY position, rowid")?;
+        let mut stmt = self.conn.prepare_cached("SELECT id, name, emoji FROM chat_folders WHERE bot_id = ?1 ORDER BY position, rowid")?;
         let rows = stmt.query_map([bot_id], |r| Ok(ChatFolder { id: r.get(0)?, name: r.get(1)?, emoji: r.get(2)? }))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -630,16 +642,20 @@ impl Store {
 
     /// Takes a folder away; its chats stay, out of any folder.
     pub fn delete_chat_folder(&self, id: &str) -> Result<(), BoxError> {
-        self.conn.execute("UPDATE conversations SET folder_id = NULL WHERE folder_id = ?1", [id])?;
-        self.conn.execute("DELETE FROM chat_folders WHERE id = ?1", [id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("UPDATE conversations SET folder_id = NULL WHERE folder_id = ?1", [id])?;
+        tx.execute("DELETE FROM chat_folders WHERE id = ?1", [id])?;
+        tx.commit()?;
         Ok(())
     }
 
     /// Puts a bot's folders in this order (ids not listed keep their place after).
     pub fn order_chat_folders(&self, ids: &[String]) -> Result<(), BoxError> {
+        let tx = self.conn.unchecked_transaction()?;
         for (i, id) in ids.iter().enumerate() {
-            self.conn.execute("UPDATE chat_folders SET position = ?2 WHERE id = ?1", params![id, i as i64])?;
+            tx.execute("UPDATE chat_folders SET position = ?2 WHERE id = ?1", params![id, i as i64])?;
         }
+        tx.commit()?;
         Ok(())
     }
 
@@ -650,7 +666,7 @@ impl Store {
 
     /// Which folder each of a bot's chats is in.
     pub fn chat_folder_map(&self, bot_id: &str) -> Result<std::collections::HashMap<String, String>, BoxError> {
-        let mut stmt = self.conn.prepare("SELECT id, folder_id FROM conversations WHERE bot_id = ?1 AND folder_id IS NOT NULL")?;
+        let mut stmt = self.conn.prepare_cached("SELECT id, folder_id FROM conversations WHERE bot_id = ?1 AND folder_id IS NOT NULL")?;
         let rows = stmt.query_map([bot_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
@@ -1038,25 +1054,46 @@ impl Store {
         Ok(name)
     }
 
+    /// Lightweight bot id -> name lookup (avoids loading full instructions columns).
+    pub fn bot_names(&self) -> Result<std::collections::HashMap<String, String>, BoxError> {
+        let mut stmt = self.conn.prepare_cached("SELECT id, name FROM bots")?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Lightweight bot id -> (name, color) lookup for inbox/wire rendering without loading instructions.
+    pub fn bot_summaries(&self) -> Result<std::collections::HashMap<String, (String, Option<String>)>, BoxError> {
+        let mut stmt = self.conn.prepare_cached("SELECT id, name, color FROM bots")?;
+        let rows = stmt.query_map([], |r| {
+            let color = r.get::<_, Option<String>>(2)?.filter(|c| COLORS.contains(&c.as_str()));
+            Ok((r.get::<_, String>(0)?, (r.get::<_, String>(1)?, color)))
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Removes a bot and its conversations. Its folder is left on disk.
     pub fn delete_bot(&self, name: &str) -> Result<Bot, BoxError> {
         let bot = self.bot(name)?.ok_or_else(|| format!("no bot named {name}"))?;
+        let channels = self.channels()?;
+        let tx = self.conn.unchecked_transaction()?;
         // A channel transcript held by this bot passes to another member (or the channel goes,
         // if it has no one else), so deleting the bot doesn't delete the channel's talk.
-        for channel in self.channels()? {
+        for channel in channels {
             let members: Vec<String> = channel.members.iter().filter(|m| **m != bot.id).cloned().collect();
             if channel.members.contains(&bot.id) && members.is_empty() {
-                self.delete_channel(&channel.id)?;
+                tx.execute("DELETE FROM conversations WHERE channel_id = ?1", [&channel.id])?;
+                tx.execute("DELETE FROM channels WHERE id = ?1", [&channel.id])?;
                 continue;
             }
             if let Some(next) = members.first() {
-                self.conn.execute("UPDATE conversations SET bot_id = ?1 WHERE channel_id = ?2 AND bot_id = ?3", params![next, channel.id, bot.id])?;
+                tx.execute("UPDATE conversations SET bot_id = ?1 WHERE channel_id = ?2 AND bot_id = ?3", params![next, channel.id, bot.id])?;
                 if channel.lead.as_deref() == Some(bot.id.as_str()) {
-                    self.conn.execute("UPDATE channels SET lead_bot_id = ?1 WHERE id = ?2", params![next, channel.id])?;
+                    tx.execute("UPDATE channels SET lead_bot_id = ?1 WHERE id = ?2", params![next, channel.id])?;
                 }
             }
         }
-        self.conn.execute("DELETE FROM bots WHERE id = ?1", [&bot.id])?;
+        tx.execute("DELETE FROM bots WHERE id = ?1", [&bot.id])?;
+        tx.commit()?;
         Ok(bot)
     }
 
@@ -1074,42 +1111,63 @@ impl Store {
         let folder = (1..).map(|n| if n == 1 { base.clone() } else { base.with_file_name(format!("{}-{n}", slug(name))) }).find(|p| !p.exists()).unwrap_or(base);
         std::fs::create_dir_all(&folder)?;
         let lead = lead.filter(|l| members.iter().any(|m| m == l)).map(str::to_string).unwrap_or_else(|| members[0].clone());
-        self.conn.execute(
-            "INSERT INTO channels (id, name, folder, lead_bot_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![id, name, folder.to_string_lossy(), lead, now()],
-        )?;
-        self.set_channel_members(&id, members)?;
         let at = now();
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "INSERT INTO channels (id, name, folder, lead_bot_id, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![id, name, folder.to_string_lossy(), lead, at],
+        )?;
+        for (i, bot) in members.iter().enumerate() {
+            tx.execute(
+                "INSERT OR IGNORE INTO channel_members (channel_id, bot_id, position) VALUES (?1, ?2, ?3)",
+                params![id, bot, i as i64],
+            )?;
+        }
+        tx.execute(
             "INSERT INTO conversations (id, bot_id, created_at, updated_at, title, channel_id) VALUES (?1, ?2, ?3, ?3, ?4, ?5)",
             params![uuid::Uuid::new_v4().to_string(), lead, at, name, id],
         )?;
+        tx.commit()?;
         self.channel(&id)?.ok_or_else(|| "the channel vanished".into())
     }
 
-    fn set_channel_members(&self, channel_id: &str, members: &[String]) -> Result<(), BoxError> {
-        self.conn.execute("DELETE FROM channel_members WHERE channel_id = ?1", [channel_id])?;
-        for (i, bot) in members.iter().enumerate() {
-            self.conn.execute(
-                "INSERT OR IGNORE INTO channel_members (channel_id, bot_id, position) VALUES (?1, ?2, ?3)",
-                params![channel_id, bot, i as i64],
-            )?;
-        }
-        Ok(())
-    }
-
     pub fn channels(&self) -> Result<Vec<Channel>, BoxError> {
-        let ids: Vec<String> = {
-            let mut stmt = self.conn.prepare("SELECT id FROM channels ORDER BY created_at")?;
-            stmt.query_map([], |r| r.get(0))?.collect::<Result<_, _>>()?
-        };
-        Ok(ids.iter().filter_map(|id| self.channel(id).ok().flatten()).collect())
+        let mut stmt = self.conn.prepare_cached("SELECT id, name, instructions, folder, lead_bot_id, color, created_at FROM channels ORDER BY created_at")?;
+        let mut list: Vec<Channel> = stmt
+            .query_map([], |r| {
+                Ok(Channel {
+                    id: r.get(0)?,
+                    name: r.get(1)?,
+                    instructions: r.get(2)?,
+                    folder: PathBuf::from(r.get::<_, String>(3)?),
+                    lead: r.get(4)?,
+                    color: r.get(5)?,
+                    created_at: r.get(6)?,
+                    members: Vec::new(),
+                })
+            })?
+            .collect::<Result<_, _>>()?;
+        if list.is_empty() {
+            return Ok(list);
+        }
+        let mut by_channel: std::collections::HashMap<String, Vec<String>> = std::collections::HashMap::new();
+        let mut mstmt = self.conn.prepare_cached("SELECT channel_id, bot_id FROM channel_members ORDER BY channel_id, position")?;
+        for row in mstmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
+            let (ch_id, bot_id) = row?;
+            by_channel.entry(ch_id).or_default().push(bot_id);
+        }
+        for channel in &mut list {
+            if let Some(members) = by_channel.remove(&channel.id) {
+                channel.members = members;
+            }
+        }
+        Ok(list)
     }
 
     pub fn channel(&self, id: &str) -> Result<Option<Channel>, BoxError> {
-        let found = self
-            .conn
-            .query_row("SELECT id, name, instructions, folder, lead_bot_id, color, created_at FROM channels WHERE id = ?1", [id], |r| {
+        let mut stmt = self.conn.prepare_cached("SELECT id, name, instructions, folder, lead_bot_id, color, created_at FROM channels WHERE id = ?1")?;
+        let found = stmt
+            .query_row([id], |r| {
                 Ok(Channel {
                     id: r.get(0)?,
                     name: r.get(1)?,
@@ -1123,8 +1181,8 @@ impl Store {
             })
             .optional()?;
         let Some(mut channel) = found else { return Ok(None) };
-        let mut stmt = self.conn.prepare("SELECT bot_id FROM channel_members WHERE channel_id = ?1 ORDER BY position")?;
-        channel.members = stmt.query_map([id], |r| r.get(0))?.collect::<Result<_, _>>()?;
+        let mut mstmt = self.conn.prepare_cached("SELECT bot_id FROM channel_members WHERE channel_id = ?1 ORDER BY position")?;
+        channel.members = mstmt.query_map([id], |r| r.get(0))?.collect::<Result<_, _>>()?;
         Ok(Some(channel))
     }
 
@@ -1134,22 +1192,32 @@ impl Store {
             return Err("a channel needs at least one bot".into());
         }
         let lead = channel.lead.clone().filter(|l| channel.members.contains(l)).unwrap_or_else(|| channel.members[0].clone());
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "UPDATE channels SET name = ?1, instructions = ?2, color = ?3, lead_bot_id = ?4 WHERE id = ?5",
             params![channel.name.trim(), channel.instructions, channel.color, lead, channel.id],
         )?;
-        self.set_channel_members(&channel.id, &channel.members)?;
+        tx.execute("DELETE FROM channel_members WHERE channel_id = ?1", [&channel.id])?;
+        for (i, bot) in channel.members.iter().enumerate() {
+            tx.execute(
+                "INSERT OR IGNORE INTO channel_members (channel_id, bot_id, position) VALUES (?1, ?2, ?3)",
+                params![channel.id, bot, i as i64],
+            )?;
+        }
         // The transcript is held by a member.
-        self.conn.execute(
+        tx.execute(
             "UPDATE conversations SET bot_id = ?1, title = ?2 WHERE channel_id = ?3",
             params![lead, channel.name.trim(), channel.id],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn delete_channel(&self, id: &str) -> Result<(), BoxError> {
-        self.conn.execute("DELETE FROM conversations WHERE channel_id = ?1", [id])?;
-        self.conn.execute("DELETE FROM channels WHERE id = ?1", [id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM conversations WHERE channel_id = ?1", [id])?;
+        tx.execute("DELETE FROM channels WHERE id = ?1", [id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1257,13 +1325,38 @@ impl Store {
     /// A new chat for the same bot holding a copy of this chat's messages up to and including
     /// `upto`, which the bot then opens to. The copy starts without a Claude session.
     pub fn branch_conversation(&self, from: &Conversation, upto: i64, title: &str) -> Result<Conversation, BoxError> {
-        let branch = self.new_conversation(&from.bot_id)?;
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let at = now();
+        let branch = Conversation {
+            id: uuid::Uuid::new_v4().to_string(),
+            bot_id: from.bot_id.clone(),
+            session_id: None,
+            created_at: at.clone(),
+            updated_at: at.clone(),
+            title: Some(title.to_string()),
+            title_by_person: true,
+            archived_at: None,
+            channel_id: None,
+            unread: false,
+        };
+        tx.execute(
+            "INSERT INTO conversations (id, bot_id, session_id, created_at, updated_at, title, title_by_person) VALUES (?1, ?2, NULL, ?3, ?3, ?4, 1)",
+            params![branch.id, branch.bot_id, at, title],
+        )?;
+        tx.execute("UPDATE bots SET open_conversation = ?2 WHERE id = ?1", params![branch.bot_id, branch.id])?;
+        tx.execute(
             "INSERT INTO messages (conversation_id, role, body, detail, at)
-             SELECT ?1, role, body, detail, at FROM messages WHERE conversation_id = ?2 AND id <= ?3 ORDER BY id",
+             SELECT ?1, role, body,
+                    CASE
+                        WHEN detail IS NOT NULL AND json_valid(detail) THEN
+                            json_remove(detail, '$.held')
+                        ELSE detail
+                    END,
+                    at
+             FROM messages WHERE conversation_id = ?2 AND id <= ?3 ORDER BY id",
             params![branch.id, from.id, upto],
         )?;
-        self.set_title(&branch.id, title, true)?;
+        tx.commit()?;
         Ok(branch)
     }
 
@@ -1317,8 +1410,10 @@ impl Store {
     /// Deletes a chat and its messages. If its bot was opening to it, the bot opens to its
     /// latest chat instead.
     pub fn delete_conversation(&self, id: &str) -> Result<(), BoxError> {
-        self.conn.execute("UPDATE bots SET open_conversation = NULL WHERE open_conversation = ?1", [id])?;
-        self.conn.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("UPDATE bots SET open_conversation = NULL WHERE open_conversation = ?1", [id])?;
+        tx.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -1365,16 +1460,18 @@ impl Store {
     pub fn add_message(&self, conversation_id: &str, role: Role, body: &str, detail: Option<&Value>) -> Result<i64, BoxError> {
         let at = now();
         let detail = detail.map(Value::to_string);
-        self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO messages (conversation_id, role, body, detail, at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![conversation_id, role.as_str(), body, detail, at],
         )?;
-        let id = self.conn.last_insert_rowid();
+        let id = tx.last_insert_rowid();
         // A new message brings an archived chat back into the list.
-        self.conn.execute(
+        tx.execute(
             "UPDATE conversations SET updated_at = ?2, archived_at = NULL WHERE id = ?1",
             params![conversation_id, at],
         )?;
+        tx.commit()?;
         Ok(id)
     }
 
@@ -1499,7 +1596,7 @@ impl Store {
 
     /// Every chat a bot answered in since the person last looked, newest first.
     pub fn unread_conversations(&self) -> Result<Vec<Conversation>, BoxError> {
-        let mut stmt = self.conn.prepare(&format!("SELECT {CONVERSATION} FROM conversations WHERE unread = 1 AND archived_at IS NULL ORDER BY updated_at DESC"))?;
+        let mut stmt = self.conn.prepare_cached(&format!("SELECT {CONVERSATION} FROM conversations WHERE unread = 1 AND archived_at IS NULL ORDER BY updated_at DESC"))?;
         let rows = stmt.query_map([], conversation_from_row)?.collect::<Result<_, _>>()?;
         Ok(rows)
     }
@@ -1507,7 +1604,7 @@ impl Store {
     /// Messages still marked as waiting for a bot's turn to end (`detail.held`), oldest first,
     /// each with its chat: after a restart, the ones the queue in memory lost.
     pub fn held_messages(&self) -> Result<Vec<(String, Message)>, BoxError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, role, body, detail, at, conversation_id FROM messages
              WHERE detail IS NOT NULL AND json_valid(detail) AND json_extract(detail, '$.held') = 1
              ORDER BY id",
@@ -1519,7 +1616,7 @@ impl Store {
     /// Cards still waiting on the person in any chat (a change to approve, a picture to choose),
     /// newest first, each with its chat.
     pub fn asking_cards(&self, limit: usize) -> Result<Vec<(String, Message)>, BoxError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT id, role, body, detail, at, conversation_id FROM messages
              WHERE detail IS NOT NULL AND json_valid(detail) AND json_extract(detail, '$.state') IN ('asking', 'choosing')
              ORDER BY id DESC LIMIT ?1",
@@ -1530,7 +1627,7 @@ impl Store {
 
     /// Burst cards that were running or merging (stage 32.15): their chat and message.
     pub fn burst_cards(&self) -> Result<Vec<(String, i64)>, BoxError> {
-        let mut stmt = self.conn.prepare(
+        let mut stmt = self.conn.prepare_cached(
             "SELECT conversation_id, id FROM messages
              WHERE detail IS NOT NULL AND json_valid(detail) AND json_extract(detail, '$.kind') = 'burst'
                AND json_extract(detail, '$.state') IN ('running', 'merging')",
